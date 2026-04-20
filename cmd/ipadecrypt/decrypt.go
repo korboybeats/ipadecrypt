@@ -31,7 +31,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		return errors.New("bootstrap not completed")
 	}
 
-	bundleID := args[0]
+	appRef := args[0]
 
 	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 	if err != nil {
@@ -72,8 +72,8 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 
 	// --- lookup ---
 	live = tui.NewLive()
-	live.Spin("resolving %s", bundleID)
-	app, err := as.Lookup(*cfg.Apple.Account, bundleID)
+	live.Spin("resolving %s", appRef)
+	app, err := as.Lookup(*cfg.Apple.Account, appRef)
 	if err != nil {
 		live.Fail("lookup failed")
 		tui.Err("lookup: %v", err)
@@ -99,6 +99,21 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		live = tui.NewLive()
 		live.Spin("downloading IPA")
 
+		reauth := func() error {
+			live.Spin("re-authenticating")
+			acc, lerr := as.Login(cfg.Apple.Email, cfg.Apple.Password, "")
+			if lerr != nil {
+				live.Fail("re-auth failed: %v", lerr)
+				return lerr
+			}
+			cfg.Apple.Account = &acc
+			if serr := cfg.Save(); serr != nil {
+				live.Fail("save config: %v", serr)
+				return serr
+			}
+			return nil
+		}
+
 		downloaded := false
 		for tries := 0; tries < 3 && !downloaded; tries++ {
 			out, err := as.Download(*cfg.Apple.Account, app, cacheDir, decryptExtVerID)
@@ -115,22 +130,22 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 				downloaded = true
 
 			case errors.Is(err, appstore.ErrPasswordTokenExpired):
-				live.Spin("re-authenticating")
-				acc, lerr := as.Login(cfg.Apple.Email, cfg.Apple.Password, "")
-				if lerr != nil {
-					live.Fail("re-auth failed: %v", lerr)
-					return lerr
-				}
-				cfg.Apple.Account = &acc
-				if serr := cfg.Save(); serr != nil {
-					live.Fail("save config: %v", serr)
-					return serr
+				if rerr := reauth(); rerr != nil {
+					return rerr
 				}
 				live.Spin("retrying download")
 
 			case errors.Is(err, appstore.ErrLicenseRequired):
 				live.Spin("acquiring license")
-				if perr := as.Purchase(*cfg.Apple.Account, app); perr != nil && !errors.Is(perr, appstore.ErrLicenseAlreadyExists) {
+				perr := as.Purchase(*cfg.Apple.Account, app)
+				if errors.Is(perr, appstore.ErrPasswordTokenExpired) {
+					if rerr := reauth(); rerr != nil {
+						return rerr
+					}
+					live.Spin("acquiring license")
+					perr = as.Purchase(*cfg.Apple.Account, app)
+				}
+				if perr != nil && !errors.Is(perr, appstore.ErrLicenseAlreadyExists) {
 					live.Fail("purchase failed: %v", perr)
 					return perr
 				}
