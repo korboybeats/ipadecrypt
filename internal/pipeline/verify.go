@@ -10,12 +10,14 @@ import (
 )
 
 const (
-	mhMagic   = 0xfeedface
-	mhMagic64 = 0xfeedfacf
-	mhCigam   = 0xcefaedfe
-	mhCigam64 = 0xcffaedfe
-	fatMagic  = 0xcafebabe
-	fatCigam  = 0xbebafeca
+	mhMagic    = 0xfeedface
+	mhMagic64  = 0xfeedfacf
+	mhCigam    = 0xcefaedfe
+	mhCigam64  = 0xcffaedfe
+	fatMagic   = 0xcafebabe
+	fatCigam   = 0xbebafeca
+	fatMagic64 = 0xcafebabf
+	fatCigam64 = 0xbfbafeca
 
 	lcEncryptionInfo   = 0x21
 	lcEncryptionInfo64 = 0x2c
@@ -80,7 +82,7 @@ func isMachOMagic(b []byte) bool {
 	m := binary.LittleEndian.Uint32(b)
 
 	switch m {
-	case mhMagic, mhMagic64, mhCigam, mhCigam64, fatMagic, fatCigam:
+	case mhMagic, mhMagic64, mhCigam, mhCigam64, fatMagic, fatCigam, fatMagic64, fatCigam64:
 		return true
 	}
 
@@ -95,7 +97,9 @@ func sliceHasCryptid(data []byte) (bool, error) {
 	magic := binary.LittleEndian.Uint32(data[:4])
 	switch magic {
 	case fatMagic, fatCigam:
-		return checkFat(data)
+		return checkFat(data, false)
+	case fatMagic64, fatCigam64:
+		return checkFat(data, true)
 	case mhMagic, mhMagic64:
 		return checkThin(data, false)
 	case mhCigam, mhCigam64:
@@ -104,7 +108,7 @@ func sliceHasCryptid(data []byte) (bool, error) {
 	return false, errors.New("not mach-o")
 }
 
-func checkFat(data []byte) (bool, error) {
+func checkFat(data []byte, is64 bool) (bool, error) {
 	bo := binary.BigEndian // fat headers are always big-endian on disk regardless of arch
 	if len(data) < 8 {
 		return false, errors.New("fat header truncated")
@@ -114,22 +118,35 @@ func checkFat(data []byte) (bool, error) {
 		return false, fmt.Errorf("implausible nfat_arch=%d", nfat)
 	}
 
+	archSize := 20
+	if is64 {
+		archSize = 32
+	}
+
 	off := 8
-	for i := uint32(0); i < nfat; i++ {
-		if off+20 > len(data) {
+	for range nfat {
+		if off+archSize > len(data) {
 			return false, errors.New("fat_arch truncated")
 		}
-		sliceOff := bo.Uint32(data[off+8 : off+12])
-		sliceSize := bo.Uint32(data[off+12 : off+16])
-		if uint64(sliceOff)+uint64(sliceSize) > uint64(len(data)) {
+
+		var sliceOff, sliceSize uint64
+		if is64 {
+			sliceOff = bo.Uint64(data[off+8 : off+16])
+			sliceSize = bo.Uint64(data[off+16 : off+24])
+		} else {
+			sliceOff = uint64(bo.Uint32(data[off+8 : off+12]))
+			sliceSize = uint64(bo.Uint32(data[off+12 : off+16]))
+		}
+		off += archSize
+
+		if sliceOff+sliceSize > uint64(len(data)) {
 			return false, errors.New("fat slice out of range")
 		}
-
-		slice := data[sliceOff : sliceOff+sliceSize]
-		if len(slice) < 4 {
+		if sliceSize < 4 {
 			continue
 		}
 
+		slice := data[sliceOff : sliceOff+sliceSize]
 		m := binary.LittleEndian.Uint32(slice[:4])
 		enc, err := checkThin(slice, m == mhCigam || m == mhCigam64)
 		if err != nil {
@@ -138,7 +155,6 @@ func checkFat(data []byte) (bool, error) {
 		if enc {
 			return true, nil
 		}
-		off += 20
 	}
 	return false, nil
 }
@@ -148,6 +164,7 @@ func checkThin(data []byte, swap bool) (bool, error) {
 	if swap {
 		bo = binary.BigEndian
 	}
+
 	if len(data) < 28 {
 		return false, errors.New("mach_header truncated")
 	}
