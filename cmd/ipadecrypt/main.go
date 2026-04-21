@@ -48,7 +48,7 @@ func main() {
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
 
 	decrypt := &cobra.Command{
-		Use:   "decrypt <bundle-id|app-store-id>",
+		Use:   "decrypt <bundle-id|app-store-id|path-to-local-ipa>",
 		Short: "Download, install, decrypt, and retrieve an app by bundle ID or App Store ID",
 		Args:  cobra.ExactArgs(1),
 		RunE:  decryptHandler,
