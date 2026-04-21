@@ -351,6 +351,9 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 			live.Spin("decrypting extension %s", ev.Attr("name"))
 		case "spawn_failed":
 			live.Note("could not spawn %s (skipped)", ev.Attr("name"))
+		case "spawn_chmod":
+			live.Note("chmod +x on %s (was mode %s) to unblock spawn",
+				filepath.Base(ev.Attr("path")), ev.Attr("old_mode"))
 		case "main":
 			live.Spin("decrypting main executable: %s", ev.Attr("name"))
 		case "dyld":

@@ -277,8 +277,9 @@ static int find_main_exec_base(task_t task, mach_vm_address_t *out_base) {
 // ----- decrypt flow ----------------------------------------------------
 
 // Spawn exec_path with SPAWN_START_SUSPENDED, return pid + task port. The
-// caller must kill/deallocate on success.
-static int spawn_suspended(const char *exec_path, pid_t *out_pid, task_t *out_task) {
+// Attempt the posix_spawn once with the given flags. Returns 0 on success,
+// or the errno value on failure. On success *out_pid is filled.
+static int do_spawn(const char *exec_path, pid_t *out_pid) {
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
@@ -295,6 +296,36 @@ static int spawn_suspended(const char *exec_path, pid_t *out_pid, task_t *out_ta
     int rc = posix_spawn(&pid, exec_path, &fa, &attr, argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&attr);
+    if (rc == 0) *out_pid = pid;
+    return rc;
+}
+
+// caller must kill/deallocate on success.
+static int spawn_suspended(const char *exec_path, pid_t *out_pid, task_t *out_task) {
+    pid_t pid = 0;
+    int rc = do_spawn(exec_path, &pid);
+
+    // EACCES can mean "file not executable" (installed extension binaries
+    // sometimes ship without +x for mobile, since iOS normally launches
+    // them only through ExtensionKit) OR "AMFI denied the signature".
+    // Try chmod +x once and retry before concluding it's an AMFI issue.
+    if (rc == EACCES) {
+        struct stat st;
+        if (stat(exec_path, &st) == 0) {
+            mode_t want = st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH;
+            if (want != st.st_mode) {
+                LOG("[helper] EACCES on %s (mode=%03o), chmod +x and retrying\n",
+                    exec_path, st.st_mode & 0777);
+                EVT("event=spawn_chmod path=\"%s\" old_mode=%o", exec_path, st.st_mode & 0777);
+                if (chmod(exec_path, want) == 0) {
+                    rc = do_spawn(exec_path, &pid);
+                } else {
+                    LOG("[helper] chmod %s: %s\n", exec_path, strerror(errno));
+                }
+            }
+        }
+    }
+
     if (rc != 0) {
         ERR("posix_spawn %s: %s", exec_path, strerror(rc));
         return -1;
@@ -927,25 +958,33 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Iterate PlugIns/*.appex and decrypt each one. Each .appex is a
-    // self-contained bundle with its own main exec + optional Frameworks/;
-    // it wouldn't be reached by dyld while the main app is merely spawned
-    // suspended, so we need its own spawn-and-dump pass.
+    // Iterate PlugIns/*.appex and Extensions/*.appex and decrypt each one.
+    // Each .appex is a self-contained bundle with its own main exec + optional
+    // Frameworks/; it wouldn't be reached by dyld while the main app is merely
+    // spawned suspended, so we need its own spawn-and-dump pass.
     //
-    // Note we only look at the main app's PlugIns/, not any nested appex
-    // inside Watch/ - those are watchOS binaries, can't execute on iPhone.
-    char plugins_src[4096];
-    snprintf(plugins_src, sizeof(plugins_src), "%s/PlugIns", bundle);
-    DIR *pd = opendir(plugins_src);
-    if (pd) {
+    // PlugIns/ is the classic NSExtension location; Extensions/ is used by
+    // iOS 18+ ExtensionKit (e.g. YouTube's AppMigrationExtension). Both must
+    // be scanned — skipping one leaves encrypted binaries in the output IPA.
+    //
+    // Note we only look at the main app's PlugIns/ and Extensions/, not any
+    // nested appex inside Watch/ - those are watchOS binaries, can't execute
+    // on iPhone.
+    static const char *appex_subdirs[] = { "PlugIns", "Extensions" };
+    for (size_t i = 0; i < sizeof(appex_subdirs) / sizeof(appex_subdirs[0]); i++) {
+        const char *sub = appex_subdirs[i];
+        char plugins_src[4096];
+        snprintf(plugins_src, sizeof(plugins_src), "%s/%s", bundle, sub);
+        DIR *pd = opendir(plugins_src);
+        if (!pd) continue;
         struct dirent *pde;
         while ((pde = readdir(pd)) != NULL) {
             size_t nl = strlen(pde->d_name);
             if (nl < 6 || strcmp(pde->d_name + nl - 6, ".appex") != 0) continue;
             char appex_src[4096], appex_dst[4096];
             snprintf(appex_src, sizeof(appex_src), "%s/%s", plugins_src, pde->d_name);
-            snprintf(appex_dst, sizeof(appex_dst), "%s/PlugIns/%s", app_dst, pde->d_name);
-            LOG("[helper] decrypting plugin %s\n", pde->d_name);
+            snprintf(appex_dst, sizeof(appex_dst), "%s/%s/%s", app_dst, sub, pde->d_name);
+            LOG("[helper] decrypting plugin %s/%s\n", sub, pde->d_name);
             EVT("event=plugin_start name=\"%s\"", pde->d_name);
             (void)decrypt_bundle(appex_src, appex_dst);
         }
