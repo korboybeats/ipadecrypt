@@ -422,7 +422,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	outLocal := filepath.Join(cwd, fmt.Sprintf("%s_%s.decrypted.ipa", app.BundleID, app.Version))
 
 	live = tui.NewLive()
-	live.Spin("downloading → %s", filepath.Base(outLocal))
+	live.Spin("pulling → %s", filepath.Base(outLocal))
 	if err := dev.Download(outRemote, outLocal); err != nil {
 		live.Fail("pull failed")
 		tui.Err("pull: %v", err)
