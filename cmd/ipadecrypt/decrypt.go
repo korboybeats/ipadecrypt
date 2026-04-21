@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -356,7 +357,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		filepath.Join(device.RemoteRoot, "work",
 			fmt.Sprintf("%s_%s.ipa", app.BundleID, app.Version)))
 
-	if err := dev.Mkdir(filepath.Dir(outRemote)); err != nil {
+	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
 		tui.Err("mkdir work: %v", err)
 		return err
 	}

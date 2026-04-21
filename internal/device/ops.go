@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -160,7 +160,7 @@ func (c *Client) Uninstall(appinstPath, bundleID string) error {
 
 func (c *Client) EnsureHelper() (string, error) {
 	sum := sha256.Sum256(helperArm64)
-	remote := filepath.Join(RemoteRoot, "helpers",
+	remote := path.Join(RemoteRoot, "helpers",
 		fmt.Sprintf("helper-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
 
 	if c.Exists(remote) {
