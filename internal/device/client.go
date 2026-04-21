@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -201,7 +202,7 @@ func (c *Client) Mkdir(path string) error {
 }
 
 func (c *Client) Upload(local, remote string) error {
-	if err := c.Mkdir(filepath.Dir(remote)); err != nil {
+	if err := c.Mkdir(path.Dir(remote)); err != nil {
 		return err
 	}
 
@@ -225,7 +226,7 @@ func (c *Client) Upload(local, remote string) error {
 }
 
 func (c *Client) UploadBytes(data []byte, remote string, mode os.FileMode) error {
-	if err := c.Mkdir(filepath.Dir(remote)); err != nil {
+	if err := c.Mkdir(path.Dir(remote)); err != nil {
 		return err
 	}
 
