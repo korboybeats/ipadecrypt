@@ -119,19 +119,6 @@ func (c *Client) LocateAppSync() (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-func (c *Client) CheckSudo() error {
-	_, _, code, err := c.RunSudo("true")
-	if err != nil {
-		return err
-	}
-
-	if code != 0 {
-		return fmt.Errorf("sudo exit %d", code)
-	}
-
-	return nil
-}
-
 func (c *Client) Install(appinstPath, ipaRemote string) error {
 	out, errOut, code, err := c.RunSudo(fmt.Sprintf("%s %q", appinstPath, ipaRemote))
 	if err != nil {

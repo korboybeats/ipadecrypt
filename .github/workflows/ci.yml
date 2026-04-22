@@ -53,7 +53,7 @@ jobs:
           echo "image=ghcr.io/${owner}/ipadecrypt-toolchain:df-${hash}" >> "$GITHUB_OUTPUT"
           echo "latest=ghcr.io/${owner}/ipadecrypt-toolchain:latest"    >> "$GITHUB_OUTPUT"
 
-          # Push only when we can — fork PRs get read-only GITHUB_TOKEN and 403 on push.
+          # Push only when we can - fork PRs get read-only GITHUB_TOKEN and 403 on push.
           if [ "${{ github.event_name }}" != "pull_request" ] \
              || [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
             echo "can_push=true"  >> "$GITHUB_OUTPUT"
@@ -105,7 +105,7 @@ jobs:
           tags: ${{ steps.meta.outputs.image }}
 
       # On main, make sure :latest points at the current Dockerfile's image.
-      # Manifest-level retag — no rebuild.
+      # Manifest-level retag - no rebuild.
       - name: retag :latest on main
         if: github.ref == 'refs/heads/main' && steps.meta.outputs.can_push == 'true'
         run: |

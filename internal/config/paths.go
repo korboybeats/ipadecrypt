@@ -31,30 +31,6 @@ func (p *Paths) ConfigPath() string {
 	return filepath.Join(p.Root, "config.json")
 }
 
-func (p *Paths) SetCacheDir(cacheDir string) error {
-	if cacheDir == "" {
-		p.cacheDir = ""
-		return nil
-	}
-
-	if !filepath.IsAbs(cacheDir) {
-		absCacheDir, err := filepath.Abs(cacheDir)
-		if err != nil {
-			return fmt.Errorf("cache dir: %w", err)
-		}
-
-		cacheDir = absCacheDir
-	}
-
-	if _, err := p.ensure(cacheDir); err != nil {
-		return err
-	}
-
-	p.cacheDir = cacheDir
-
-	return nil
-}
-
 func (p *Paths) CacheDir() (string, error) {
 	if p.cacheDir != "" {
 		return p.ensure(p.cacheDir)
@@ -63,17 +39,13 @@ func (p *Paths) CacheDir() (string, error) {
 	return p.ensure(filepath.Join(p.Root, "cache"))
 }
 
-func (p *Paths) EncryptedIPA(bundleID string, trackID int64, version string) (string, error) {
+func (p *Paths) CachedEncryptedIPA(bundleID string, version string) (string, error) {
 	dir, err := p.CacheDir()
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(dir, fmt.Sprintf("%s_%d_%s.ipa", bundleID, trackID, version)), nil
-}
-
-func (p *Paths) WorkDir(bundleID string) (string, error) {
-	return p.ensure(filepath.Join(p.Root, "work", bundleID))
+	return filepath.Join(dir, fmt.Sprintf("%s_%s.ipa", bundleID, version)), nil
 }
 
 func (p *Paths) ensure(dir string) (string, error) {

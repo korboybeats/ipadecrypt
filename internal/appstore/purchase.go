@@ -15,7 +15,7 @@ type purchaseResult struct {
 
 // Purchase acquires a license for the given free app on the signed-in account.
 // Tries the App Store pricing family first, falls back to Arcade.
-func (c *Client) Purchase(acc Account, app App) error {
+func (c *Client) Purchase(acc *Account, app App) error {
 	if app.Price > 0 {
 		return errors.New("paid apps are not supported")
 	}
@@ -25,14 +25,10 @@ func (c *Client) Purchase(acc Account, app App) error {
 		return err
 	}
 
-	err = c.purchaseWithParams(acc, app, g, pricingAppStore)
-	if errors.Is(err, ErrTemporarilyUnavailable) {
-		return c.purchaseWithParams(acc, app, g, pricingAppleArcade)
-	}
-	return err
+	return c.purchaseWithParams(acc, app, g, pricingAppStore)
 }
 
-func (c *Client) purchaseWithParams(acc Account, app App, g, params string) error {
+func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) error {
 	podPrefix := ""
 	if acc.Pod != "" {
 		podPrefix = "p" + acc.Pod + "-"

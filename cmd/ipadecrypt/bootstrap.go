@@ -17,7 +17,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	ctx, cancel := notifyContext()
 	defer cancel()
 
-	cfg, paths, err := loadConfigOrDefault(cacheDirOverride)
+	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
 		tui.Err("%v", err)
 		return err
@@ -60,7 +60,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	}
 
 	var (
-		acc      appstore.Account
+		acc      *appstore.Account
 		authCode string
 		signedIn bool
 	)
@@ -72,10 +72,12 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		switch {
 		case errors.Is(lerr, appstore.ErrAuthCodeRequired):
 			live.Stop()
+
 			code, perr := tui.Prompt("Apple sent a 6-digit code - enter it")
 			if perr != nil {
 				return perr
 			}
+
 			authCode = strings.TrimSpace(code)
 
 		case lerr != nil:
@@ -94,7 +96,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		return errors.New("login: 3 two-factor attempts failed")
 	}
 
-	cfg.Apple.Account = &acc
+	cfg.Apple.Account = acc
 
 	tui.Fields(
 		"Apple ID", acc.Email,

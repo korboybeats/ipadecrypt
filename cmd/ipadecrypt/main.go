@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 )
 
 var (
-	cacheDirOverride string
+	rootDirOverride string
 
 	bootstrapReset bool
 
@@ -37,8 +36,8 @@ func main() {
 		SilenceErrors: true,
 	}
 
-	root.PersistentFlags().StringVar(&cacheDirOverride, "cache-dir", "",
-		"cache directory path (default: ~/.ipadecrypt/cache)")
+	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",
+		"config root directory path (default: ~/.ipadecrypt)")
 
 	bootstrap := &cobra.Command{
 		Use:   "bootstrap",
@@ -67,27 +66,10 @@ func main() {
 	}
 }
 
-func loadConfigOrDefault(cacheDir string) (*config.Config, *config.Paths, error) {
-	rootDir := ""
-	if cacheDir != "" {
-		absCacheDir, err := filepath.Abs(cacheDir)
-		if err != nil {
-			return nil, nil, fmt.Errorf("cache dir: %w", err)
-		}
-
-		cacheDir = absCacheDir
-		rootDir = filepath.Dir(cacheDir)
-	}
-
+func loadConfigOrDefault(rootDir string) (*config.Config, *config.Paths, error) {
 	paths, err := config.NewPaths(rootDir)
 	if err != nil {
 		return nil, nil, err
-	}
-
-	if cacheDir != "" {
-		if err := paths.SetCacheDir(cacheDir); err != nil {
-			return nil, nil, err
-		}
 	}
 
 	cfgFile := paths.ConfigPath()

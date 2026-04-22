@@ -26,15 +26,15 @@ type loginResult struct {
 // Login authenticates against the App Store and returns the account.
 // Pass authCode when a prior call returned ErrAuthCodeRequired (2FA).
 // Internally fetches the bag to discover the authenticate endpoint.
-func (c *Client) Login(email, password, authCode string) (Account, error) {
+func (c *Client) Login(email, password, authCode string) (*Account, error) {
 	endpoint, err := c.bag()
 	if err != nil {
-		return Account{}, err
+		return nil, err
 	}
 
 	g, err := guid()
 	if err != nil {
-		return Account{}, err
+		return nil, err
 	}
 
 	url := endpoint
@@ -53,7 +53,7 @@ func (c *Client) Login(email, password, authCode string) (Account, error) {
 			"why":      "signIn",
 		})
 		if err != nil {
-			return Account{}, err
+			return nil, err
 		}
 
 		out = loginResult{}
@@ -61,12 +61,12 @@ func (c *Client) Login(email, password, authCode string) (Account, error) {
 			"Content-Type": "application/x-www-form-urlencoded",
 		}, body, formatXML, &out)
 		if err != nil {
-			return Account{}, fmt.Errorf("login: %w", err)
+			return nil, fmt.Errorf("login: %w", err)
 		}
 
 		next, retry, err := interpretLogin(res, &out, attempt, authCode)
 		if err != nil {
-			return Account{}, err
+			return nil, err
 		}
 		if !retry {
 			break
@@ -77,11 +77,11 @@ func (c *Client) Login(email, password, authCode string) (Account, error) {
 	}
 
 	if out.PasswordToken == "" || out.DirectoryServicesID == "" {
-		return Account{}, errors.New("login: no token after retries")
+		return nil, errors.New("login: no token after retries")
 	}
 
 	addr := out.Account.Address
-	return Account{
+	return &Account{
 		Name:                strings.TrimSpace(addr.FirstName + " " + addr.LastName),
 		Email:               out.Account.Email,
 		PasswordToken:       out.PasswordToken,

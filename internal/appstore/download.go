@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"howett.net/plist"
@@ -19,10 +18,65 @@ type DownloadOutput struct {
 	Sinfs           []Sinf
 }
 
+// DownloadTicket is an App-Store-authorized download: the signed CDN URL to
+// fetch, the per-file sinf licensing blobs, and the response metadata.
+// PrepareDownload returns one; hand it to CompleteDownload to pull the bytes.
+// No bytes move until CompleteDownload runs, so the caller can look at the
+// ticket and decide whether it's worth fetching.
+type DownloadTicket struct {
+	URL       string
+	Sinfs     []Sinf
+	Metadata  map[string]any
+	AssetInfo map[string]any
+}
+
+// Version returns CFBundleShortVersionString ("1.54.0") - the human-readable
+// version of the specific release this ticket describes. Empty if absent.
+func (t DownloadTicket) Version() string {
+	return metaString(t.Metadata, "bundleShortVersionString")
+}
+
+// ExternalVersionID returns the stable App Store identifier for this
+// specific release (e.g. "847134900"). Useful as a cache key since it can't
+// collide across releases the way human version strings can.
+func (t DownloadTicket) ExternalVersionID() string {
+	return metaString(t.Metadata, "softwareVersionExternalIdentifier")
+}
+
+// BundleID returns softwareVersionBundleId from the metadata - handy when
+// the caller doesn't already know it.
+func (t DownloadTicket) BundleID() string {
+	return metaString(t.Metadata, "softwareVersionBundleId")
+}
+
+// FileSize returns the IPA download size in bytes as reported by the
+// response (asset-info.file-size). 0 if unknown.
+func (t DownloadTicket) FileSize() int64 {
+	if v, ok := t.AssetInfo["file-size"]; ok {
+		switch n := v.(type) {
+		case int64:
+			return n
+		case uint64:
+			return int64(n)
+		case int:
+			return int64(n)
+		}
+	}
+	return 0
+}
+
+func metaString(m map[string]any, key string) string {
+	if v, ok := m[key]; ok {
+		return fmt.Sprintf("%v", v)
+	}
+	return ""
+}
+
 type downloadItem struct {
-	URL      string                 `plist:"URL,omitempty"`
-	Sinfs    []Sinf                 `plist:"sinfs,omitempty"`
-	Metadata map[string]interface{} `plist:"metadata,omitempty"`
+	URL       string         `plist:"URL,omitempty"`
+	Sinfs     []Sinf         `plist:"sinfs,omitempty"`
+	Metadata  map[string]any `plist:"metadata,omitempty"`
+	AssetInfo map[string]any `plist:"asset-info,omitempty"`
 }
 
 type downloadResult struct {
@@ -31,15 +85,18 @@ type downloadResult struct {
 	Items           []downloadItem `plist:"songList,omitempty"`
 }
 
-// Download fetches the IPA for app, writes it to outPath (directory or full
-// file path), injects iTunesMetadata.plist and replicates sinfs.
+// PrepareDownload authorizes a download with Apple and returns a ticket
+// describing the specific release that will be fetched (URL, sinfs, metadata,
+// asset info). No bytes are transferred. Callers can inspect
+// ticket.Version(), ticket.FileSize() etc. and then hand the ticket to
+// CompleteDownload - or drop it if the version turns out to already be cached.
 //
 // On ErrPasswordTokenExpired the caller must re-Login and retry.
 // On ErrLicenseRequired the caller must Purchase and retry.
-func (c *Client) Download(acc Account, app App, outPath, externalVersionID string) (DownloadOutput, error) {
+func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string) (DownloadTicket, error) {
 	g, err := guid()
 	if err != nil {
-		return DownloadOutput{}, err
+		return DownloadTicket{}, err
 	}
 
 	podPrefix := ""
@@ -60,7 +117,7 @@ func (c *Client) Download(acc Account, app App, outPath, externalVersionID strin
 
 	body, err := plistBody(payload)
 	if err != nil {
-		return DownloadOutput{}, err
+		return DownloadTicket{}, err
 	}
 
 	headers := map[string]string{
@@ -71,7 +128,7 @@ func (c *Client) Download(acc Account, app App, outPath, externalVersionID strin
 
 	var out downloadResult
 	if _, err := c.send(http.MethodPost, url, headers, body, formatXML, &out); err != nil {
-		return DownloadOutput{}, fmt.Errorf("download: %w", err)
+		return DownloadTicket{}, fmt.Errorf("download: %w", err)
 	}
 
 	switch {
@@ -79,35 +136,51 @@ func (c *Client) Download(acc Account, app App, outPath, externalVersionID strin
 		out.FailureType == failureSignInRequired,
 		out.FailureType == failureDeviceVerificationFailed,
 		out.FailureType == failureLicenseAlreadyExists:
-		return DownloadOutput{}, ErrPasswordTokenExpired
+		return DownloadTicket{}, ErrPasswordTokenExpired
 	case out.FailureType == failureLicenseNotFound:
-		return DownloadOutput{}, ErrLicenseRequired
+		return DownloadTicket{}, ErrLicenseRequired
 	case out.FailureType != "" && out.CustomerMessage != "":
-		return DownloadOutput{}, errors.New(out.CustomerMessage)
+		return DownloadTicket{}, errors.New(out.CustomerMessage)
 	case out.FailureType != "":
-		return DownloadOutput{}, fmt.Errorf("download: %s", out.FailureType)
+		return DownloadTicket{}, fmt.Errorf("download: %s", out.FailureType)
 	case len(out.Items) == 0:
-		return DownloadOutput{}, errors.New("download: empty songList")
+		return DownloadTicket{}, errors.New("download: empty songList")
 	}
 
 	item := out.Items[0]
+	return DownloadTicket{
+		URL:       item.URL,
+		Sinfs:     item.Sinfs,
+		Metadata:  item.Metadata,
+		AssetInfo: item.AssetInfo,
+	}, nil
+}
 
-	version := "unknown"
-	if v, ok := item.Metadata["bundleShortVersionString"]; ok {
-		version = fmt.Sprintf("%v", v)
+// CompleteDownload fetches the IPA described by `ticket` into outPath,
+// injects iTunesMetadata.plist, and replicates sinfs. outPath must be a
+// file path, not a directory.
+func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath string) (DownloadOutput, error) {
+	if outPath == "" {
+		return DownloadOutput{}, errors.New("download: outPath is required (must be a file path)")
+	}
+	if info, err := os.Stat(outPath); err == nil && info.IsDir() {
+		return DownloadOutput{}, fmt.Errorf("download: outPath %q is a directory; CompleteDownload expects a file path", outPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return DownloadOutput{}, fmt.Errorf("download: stat outPath: %w", err)
 	}
 
-	dst, err := resolveDestination(app, version, outPath)
-	if err != nil {
-		return DownloadOutput{}, err
+	item := downloadItem{
+		URL:      ticket.URL,
+		Sinfs:    ticket.Sinfs,
+		Metadata: ticket.Metadata,
 	}
 
-	tmp := dst + ".tmp"
+	tmp := outPath + ".tmp"
 	if err := fetchToFile(c.http, item.URL, tmp); err != nil {
 		return DownloadOutput{}, err
 	}
 
-	if err := applyPatches(tmp, dst, item, acc); err != nil {
+	if err := applyPatches(tmp, outPath, item, acc); err != nil {
 		return DownloadOutput{}, err
 	}
 
@@ -115,7 +188,7 @@ func (c *Client) Download(acc Account, app App, outPath, externalVersionID strin
 		return DownloadOutput{}, fmt.Errorf("remove tmp: %w", err)
 	}
 
-	return DownloadOutput{DestinationPath: dst, Sinfs: item.Sinfs}, nil
+	return DownloadOutput{DestinationPath: outPath, Sinfs: item.Sinfs}, nil
 }
 
 func fetchToFile(hc *http.Client, url, dst string) error {
@@ -123,6 +196,7 @@ func fetchToFile(hc *http.Client, url, dst string) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dst, err)
 	}
+
 	defer f.Close()
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -138,6 +212,7 @@ func fetchToFile(hc *http.Client, url, dst string) error {
 	if err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}
+
 	defer res.Body.Close()
 
 	if _, err := io.Copy(f, res.Body); err != nil {
@@ -147,58 +222,25 @@ func fetchToFile(hc *http.Client, url, dst string) error {
 	return nil
 }
 
-func resolveDestination(app App, version, path string) (string, error) {
-	file := fileName(app, version)
-
-	if path == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(cwd, file), nil
-	}
-
-	info, err := os.Stat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-	if info != nil && info.IsDir() {
-		return filepath.Join(path, file), nil
-	}
-
-	return path, nil
-}
-
-func fileName(app App, version string) string {
-	var parts []string
-	if app.BundleID != "" {
-		parts = append(parts, app.BundleID)
-	}
-	if app.ID != 0 {
-		parts = append(parts, strconv.FormatInt(app.ID, 10))
-	}
-	if version != "" {
-		parts = append(parts, version)
-	}
-	return strings.Join(parts, "_") + ".ipa"
-}
-
 // applyPatches rebuilds src into dst with iTunesMetadata.plist injected and
 // sinfs replicated into either manifest-listed paths or the SC_Info fallback.
-func applyPatches(src, dst string, item downloadItem, acc Account) error {
+func applyPatches(src, dst string, item downloadItem, acc *Account) error {
 	zr, err := zip.OpenReader(src)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", src, err)
 	}
+
 	defer zr.Close()
 
 	df, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dst, err)
 	}
+
 	defer df.Close()
 
 	zw := zip.NewWriter(df)
+
 	defer zw.Close()
 
 	for _, f := range zr.File {
@@ -225,12 +267,14 @@ func applyPatches(src, dst string, item downloadItem, acc Account) error {
 		if len(item.Sinfs) != len(manifest.SinfPaths) {
 			return fmt.Errorf("sinf count mismatch: have %d, manifest wants %d", len(item.Sinfs), len(manifest.SinfPaths))
 		}
+
 		for i, p := range manifest.SinfPaths {
 			entry := fmt.Sprintf("Payload/%s.app/%s", bundleName, p)
 			if err := writeEntry(zw, entry, item.Sinfs[i].Data); err != nil {
 				return err
 			}
 		}
+
 		return nil
 	}
 
@@ -238,14 +282,17 @@ func applyPatches(src, dst string, item downloadItem, acc Account) error {
 	if err != nil {
 		return err
 	}
+
 	if info == nil {
 		return errors.New("no Info.plist in package")
 	}
+
 	if len(item.Sinfs) == 0 {
 		return errors.New("no sinfs in download response")
 	}
 
 	entry := fmt.Sprintf("Payload/%s.app/SC_Info/%s.sinf", bundleName, info.BundleExecutable)
+
 	return writeEntry(zw, entry, item.Sinfs[0].Data)
 }
 
@@ -254,15 +301,18 @@ func copyZipEntry(f *zip.File, zw *zip.Writer) error {
 	if err != nil {
 		return err
 	}
+
 	defer rc.Close()
 
 	hdr := f.FileHeader
+
 	w, err := zw.CreateHeader(&hdr)
 	if err != nil {
 		return err
 	}
 
 	_, err = io.Copy(w, rc)
+
 	return err
 }
 
@@ -271,11 +321,13 @@ func writeEntry(zw *zip.Writer, name string, data []byte) error {
 	if err != nil {
 		return err
 	}
+
 	_, err = w.Write(data)
+
 	return err
 }
 
-func writeMetadataEntry(zw *zip.Writer, metadata map[string]interface{}, acc Account) error {
+func writeMetadataEntry(zw *zip.Writer, metadata map[string]interface{}, acc *Account) error {
 	metadata["apple-id"] = acc.Email
 	metadata["userName"] = acc.Email
 
@@ -300,16 +352,20 @@ func readManifest(zr *zip.ReadCloser) (*pkgManifest, error) {
 		if !strings.HasSuffix(f.Name, ".app/SC_Info/Manifest.plist") {
 			continue
 		}
+
 		data, err := readZipFile(f)
 		if err != nil {
 			return nil, err
 		}
+
 		var m pkgManifest
 		if _, err := plist.Unmarshal(data, &m); err != nil {
 			return nil, fmt.Errorf("parse Manifest.plist: %w", err)
 		}
+
 		return &m, nil
 	}
+
 	return nil, nil
 }
 
@@ -318,16 +374,20 @@ func readInfo(zr *zip.ReadCloser) (*pkgInfo, error) {
 		if !strings.Contains(f.Name, ".app/Info.plist") || strings.Contains(f.Name, "/Watch/") {
 			continue
 		}
+
 		data, err := readZipFile(f)
 		if err != nil {
 			return nil, err
 		}
+
 		var i pkgInfo
 		if _, err := plist.Unmarshal(data, &i); err != nil {
 			return nil, fmt.Errorf("parse Info.plist: %w", err)
 		}
+
 		return &i, nil
 	}
+
 	return nil, nil
 }
 
@@ -337,6 +397,7 @@ func readBundleName(zr *zip.ReadCloser) (string, error) {
 			return filepath.Base(strings.TrimSuffix(f.Name, ".app/Info.plist")), nil
 		}
 	}
+
 	return "", errors.New("no .app/Info.plist in package")
 }
 
@@ -345,6 +406,8 @@ func readZipFile(f *zip.File) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	defer rc.Close()
+
 	return io.ReadAll(rc)
 }
