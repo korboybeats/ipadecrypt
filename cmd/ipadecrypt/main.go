@@ -1,16 +1,11 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/londek/ipadecrypt/internal/config"
-	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -30,11 +25,9 @@ var (
 
 func main() {
 	root := &cobra.Command{
-		Use:           "ipadecrypt",
-		Short:         "End-to-end FairPlay decrypter for App Store apps",
-		Long:          "ipadecrypt is an end-to-end suite for decrypting encrypted IPAs from the App Store with minimal user interaction.\n\nRun `ipadecrypt bootstrap` first to sign in and verify your device.",
-		SilenceUsage:  true,
-		SilenceErrors: true,
+		Use:   "ipadecrypt",
+		Short: "End-to-end FairPlay decrypter for App Store apps",
+		Long:  "ipadecrypt is an end-to-end suite for decrypting encrypted IPAs from the App Store with minimal user interaction.\n\nRun `ipadecrypt bootstrap` first to sign in and verify your device.",
 	}
 
 	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",
@@ -43,7 +36,7 @@ func main() {
 	bootstrap := &cobra.Command{
 		Use:   "bootstrap",
 		Short: "Interactive setup. App Store sign-in, device probe, prerequisite checks",
-		RunE:  bootstrapHandler,
+		Run:   bootstrapHandler,
 	}
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
 
@@ -51,7 +44,7 @@ func main() {
 		Use:   "decrypt <bundle-id|app-store-id|path-to-local-ipa>",
 		Short: "Download, install, decrypt, and retrieve an app by bundle ID or App Store ID",
 		Args:  cobra.ExactArgs(1),
-		RunE:  decryptHandler,
+		Run:   decryptHandler,
 	}
 	decrypt.Flags().StringVar(&decryptExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
 	decrypt.Flags().BoolVar(&decryptNoCleanup, "no-cleanup", false, "leave remote staging files in place")
@@ -64,7 +57,7 @@ func main() {
 		Short: "Browse the App Store version history of an app",
 		Long:  "Opens an interactive table of every App Store release of the given app. Metadata for the 3 newest versions is fetched eagerly; older versions are fetched on-demand (Enter on a row) and cached on disk.",
 		Args:  cobra.ExactArgs(1),
-		RunE:  versionsHandler,
+		Run:   versionsHandler,
 	}
 	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/.ipadecrypt/logs/versions.log")
 
@@ -93,44 +86,4 @@ func loadConfigOrDefault(rootDir string) (*config.Config, *config.Paths, error) 
 	}
 
 	return cfg, paths, nil
-}
-
-// notifyContext wires SIGINT/SIGTERM to context cancellation. Stdin reads
-// (prompt helpers) don't respect context, so we force-exit if the first
-// signal doesn't drain within 2 seconds, or a second signal arrives.
-func notifyContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		defer signal.Stop(sigCh)
-
-		select {
-		case <-sigCh:
-		case <-ctx.Done():
-			return
-		}
-
-		fmt.Fprint(os.Stderr, "\r\033[2K\033[0m")
-
-		tui.Warn("interrupted - cleaning up")
-
-		cancel()
-
-		select {
-		case <-sigCh:
-		case <-time.After(2 * time.Second):
-		}
-
-		fmt.Fprint(os.Stderr, "\033[0m")
-
-		os.Exit(130)
-	}()
-
-	return ctx, func() {
-		signal.Stop(sigCh)
-		cancel()
-	}
 }

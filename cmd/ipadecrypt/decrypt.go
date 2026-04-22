@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -22,9 +23,7 @@ import (
 var (
 	appStoreIDRe = regexp.MustCompile(`/id(\d+)`)
 
-	errEnvironmentNotConfigured = errors.New("environment not configured")
-	errAppinstNotFound          = errors.New("appinst not found")
-	errPaidAppsUnsupported      = errors.New("paid apps not supported")
+	errAppinstNotFound = errors.New("appinst not found")
 )
 
 type decryptTarget struct {
@@ -168,26 +167,23 @@ func humanBytes(n int64) string {
 	}
 }
 
-func decryptHandler(cmd *cobra.Command, args []string) error {
-	ctx, cancel := notifyContext()
-	defer cancel()
-
+func decryptHandler(cmd *cobra.Command, args []string) {
 	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
 		tui.Err("%v", err)
-		return err
+		return
 	}
 
 	target, err := parseDecryptArg(args[0])
 	if err != nil {
 		tui.Err("%v", err)
-		return err
+		return
 	}
 
 	if cfg.Apple.Account == nil || cfg.Device.Host == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
-		return errEnvironmentNotConfigured
+		return
 	}
 
 	//
@@ -197,12 +193,13 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	live := tui.NewLive()
 	live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
 
-	dev, err := device.Connect(ctx, cfg.Device)
+	dev, err := device.Connect(context.Background(), cfg.Device)
 	if err != nil {
 		live.Fail("ssh connect failed")
 		tui.Err("ssh: %v", err)
-		return err
+		return
 	}
+
 	defer dev.Close()
 
 	live.Spin("probing device")
@@ -211,7 +208,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		live.Fail("probe failed")
 		tui.Err("probe device: %v", err)
-		return err
+		return
 	}
 
 	live.OK("%s@%s iOS %s %s", cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch)
@@ -232,7 +229,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		appBundleID, appVersion, err = pipeline.AppInfo(target.localPath)
 		if err != nil {
 			tui.Err("read IPA: %v", err)
-			return err
+			return
 		}
 		encPath = target.localPath
 
@@ -241,7 +238,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 		if err != nil {
 			tui.Err("appstore client: %v", err)
-			return err
+			return
 		}
 
 		tui.OK("signed in as %s", cfg.Apple.Account.Email)
@@ -258,12 +255,12 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			live.Fail("lookup failed")
 			tui.Err("lookup: %v", err)
-			return err
+			return
 		}
 
 		if app.Price > 0 {
 			live.Fail("paid app (price=%v) - unsupported", app.Price)
-			return errPaidAppsUnsupported
+			return
 		}
 
 		live.OK("Found %s on AppStore", app.BundleID)
@@ -288,12 +285,12 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 			if errors.Is(err, errRemoteDownloadFailed) {
 				live.Fail("download failed")
 				tui.Err("download: %v", errors.Unwrap(err))
-				return errors.Unwrap(err)
+				return
 			}
 
 			live.Fail("prepare failed")
 			tui.Err("prepare: %v", err)
-			return err
+			return
 		}
 
 		appBundleID = app.BundleID
@@ -318,7 +315,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		live.Fail("patch MinimumOSVersion failed")
 		tui.Err("patch MinimumOSVersion: %v", err)
-		return err
+		return
 	}
 	defer func() {
 		if patch.patchedPath != "" {
@@ -340,7 +337,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		default:
 			tui.Err("prepare install: %v", err)
 		}
-		return err
+		return
 	}
 
 	live = tui.NewLive()
@@ -375,7 +372,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		live.Fail("install failed")
 		tui.Err("install: %v", err)
-		return err
+		return
 	}
 
 	if install.reinstalled {
@@ -390,7 +387,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
 		tui.Err("mkdir work: %v", err)
-		return err
+		return
 	}
 
 	live = tui.NewLive()
@@ -414,14 +411,14 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	_, stderr, code, err := dev.RunHelper(plan.helperPath, install.bundlePath, outRemote, onEvent, nil)
+	_, _, code, err := dev.RunHelper(plan.helperPath, install.bundlePath, outRemote, onEvent, nil)
 	if err != nil {
 		live.Fail("helper run: %v", err)
-		return fmt.Errorf("helper run: %w (stderr: %s)", err, stderr)
+		return
 	}
 	if code != 0 {
 		live.Fail("helper exit %d", code)
-		return fmt.Errorf("helper exit %d: %s", code, stderr)
+		return
 	}
 
 	live.OK("%s", progress.Summary())
@@ -429,7 +426,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	outLocal, err := localOutputPath(appBundleID, appVersion)
 	if err != nil {
 		tui.Err("output path: %v", err)
-		return err
+		return
 	}
 
 	live = tui.NewLive()
@@ -440,7 +437,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	}); err != nil {
 		live.Fail("pull failed")
 		tui.Err("pull: %v", err)
-		return err
+		return
 	}
 
 	if !decryptKeepMetadata {
@@ -449,7 +446,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			live.Fail("strip metadata failed")
 			tui.Err("strip metadata: %v", err)
-			return err
+			return
 		}
 		if removed {
 			live.Note("removed iTunesMetadata.plist")
@@ -462,7 +459,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			live.Fail("strip watch failed")
 			tui.Err("strip watch: %v", err)
-			return err
+			return
 		}
 		if n > 0 {
 			live.Note("removed %d Watch/ entries", n)
@@ -477,14 +474,14 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		if verr != nil {
 			live.Fail("verify failed")
 			tui.Err("verify: %v", verr)
-			return verr
+			return
 		}
 		if len(res.Encrypted) > 0 {
 			live.Fail("%d binary(ies) still have cryptid != 0", len(res.Encrypted))
 			for _, n := range res.Encrypted {
 				tui.Info("  %s", n)
 			}
-			return fmt.Errorf("verify failed: %d still-encrypted binaries", len(res.Encrypted))
+			return
 		}
 
 		suffix := ""
@@ -495,8 +492,6 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	}
 
 	cleanupDecrypt(dev, decryptNoCleanup, plan.stagingRemote, outRemote)
-
-	return nil
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {

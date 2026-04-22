@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -13,14 +14,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func bootstrapHandler(cmd *cobra.Command, args []string) error {
-	ctx, cancel := notifyContext()
-	defer cancel()
-
+func bootstrapHandler(cmd *cobra.Command, args []string) {
 	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
 		tui.Err("%v", err)
-		return err
+		return
 	}
 
 	if bootstrapReset {
@@ -28,7 +26,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		cfg.Device = config.Device{Port: 22, User: "mobile", AcceptNewHostKey: true}
 		if err := cfg.Save(); err != nil {
 			tui.Err("reset config: %v", err)
-			return err
+			return
 		}
 	}
 
@@ -40,7 +38,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	if cfg.Apple.Email == "" {
 		s, err := tui.Prompt("Apple ID email")
 		if err != nil {
-			return err
+			return
 		}
 		cfg.Apple.Email = strings.TrimSpace(s)
 	}
@@ -48,7 +46,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	if cfg.Apple.Password == "" {
 		s, err := tui.PromptPassword("Apple ID password")
 		if err != nil {
-			return err
+			return
 		}
 		cfg.Apple.Password = s
 	}
@@ -56,7 +54,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 	if err != nil {
 		tui.Err("appstore client: %v", err)
-		return err
+		return
 	}
 
 	var (
@@ -75,14 +73,14 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 
 			code, perr := tui.Prompt("Apple sent a 6-digit code - enter it")
 			if perr != nil {
-				return perr
+				return
 			}
 
 			authCode = strings.TrimSpace(code)
 
 		case lerr != nil:
 			live.Fail("login failed: %v", lerr)
-			return lerr
+			return
 
 		default:
 			live.OK("authenticated")
@@ -93,7 +91,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 
 	if !signedIn {
 		tui.Err("login: 3 two-factor attempts failed")
-		return errors.New("login: 3 two-factor attempts failed")
+		return
 	}
 
 	cfg.Apple.Account = acc
@@ -106,7 +104,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 
 	if err := cfg.Save(); err != nil {
 		tui.Err("save config: %v", err)
-		return err
+		return
 	}
 
 	// ---- Step 2: connect to device -----------------------------------
@@ -119,7 +117,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	if cfg.Device.Host == "" {
 		s, err := tui.Prompt("device IP/host")
 		if err != nil {
-			return err
+			return
 		}
 		cfg.Device.Host = strings.TrimSpace(s)
 	}
@@ -127,7 +125,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	if cfg.Device.User == "" {
 		u, err := tui.PromptDefault("device SSH user", "mobile")
 		if err != nil {
-			return err
+			return
 		}
 		cfg.Device.User = u
 	}
@@ -138,8 +136,9 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 			"SSH public key",
 		})
 		if err != nil {
-			return err
+			return
 		}
+
 		if idx == 1 {
 			cfg.Device.Auth.Kind = "key"
 		} else {
@@ -152,22 +151,25 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		if cfg.Device.Auth.KeyPath == "" {
 			p, err := tui.PromptDefault("SSH private key path", "~/.ssh/id_ed25519")
 			if err != nil {
-				return err
+				return
 			}
+
 			cfg.Device.Auth.KeyPath = strings.TrimSpace(p)
 		}
 		if cfg.Device.Auth.KeyPassphrase == "" {
 			pass, err := tui.PromptPassword("key passphrase (leave empty if unencrypted)")
 			if err != nil {
-				return err
+				return
 			}
+
 			cfg.Device.Auth.KeyPassphrase = pass
 		}
 		if cfg.Device.Auth.Password == "" && cfg.Device.User != "root" {
 			pw, err := tui.PromptPassword("sudo password (leave empty if not needed)")
 			if err != nil {
-				return err
+				return
 			}
+
 			cfg.Device.Auth.Password = pw
 		}
 
@@ -175,8 +177,9 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		if cfg.Device.Auth.Password == "" {
 			pw, err := tui.PromptPassword("device's SSH password")
 			if err != nil {
-				return err
+				return
 			}
+
 			cfg.Device.Auth.Password = pw
 		}
 	}
@@ -185,31 +188,38 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		cfg.Device.Port = 22
 	}
 
-	live := tui.NewLive()
-	live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
-	dev, err := device.Connect(ctx, cfg.Device)
-	if err != nil {
-		live.Fail("ssh connect failed: %v", err)
-		tui.Info("check that OpenSSH is running on the device and the password is correct")
-		return err
-	}
+	var probe device.ProbeResult
+	connected := false
+	func() {
+		live := tui.NewLive()
+		live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
 
-	live.Spin("probing device")
-	probe, err := dev.Probe()
-	if err != nil {
-		live.Fail("probe failed: %v", err)
-		dev.Close()
-		return err
-	}
+		dev, err := device.Connect(context.Background(), cfg.Device)
+		if err != nil {
+			live.Fail("ssh connect failed: %v", err)
+			tui.Info("check that OpenSSH is running on the device and the password is correct")
+			return
+		}
+		defer dev.Close()
 
-	if err := cfg.Save(); err != nil {
-		live.Fail("save config: %v", err)
-		dev.Close()
-		return err
-	}
+		live.Spin("probing device")
+		probe, err = dev.Probe()
+		if err != nil {
+			live.Fail("probe failed: %v", err)
+			return
+		}
 
-	live.OK("connected")
-	dev.Close()
+		if err := cfg.Save(); err != nil {
+			live.Fail("save config: %v", err)
+			return
+		}
+
+		live.OK("connected")
+		connected = true
+	}()
+	if !connected {
+		return
+	}
 
 	tui.Fields(
 		"Host", fmt.Sprintf("%s@%s", cfg.Device.User, cfg.Device.Host),
@@ -241,7 +251,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		missing := 0
 		var connErr error
 
-		pdev, perr := device.Connect(ctx, cfg.Device)
+		pdev, perr := device.Connect(context.Background(), cfg.Device)
 		if perr != nil {
 			tui.Err("ssh connect failed: %v", perr)
 			printed = 1
@@ -277,7 +287,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		}
 
 		if perr := tui.PressEnter(prompt); perr != nil {
-			return perr
+			return
 		}
 
 		// Status rows + prompt row + Enter-echo row.
@@ -295,33 +305,31 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	tui.Step(4, 4, "Install the decrypt helper")
 	tui.Info("A small embedded C binary that reads FairPlay-decrypted pages from a\nsuspended task. Uploaded once to /var/mobile/Media/ipadecrypt/helpers/\nand cached by SHA thereafter.")
 
-	dev, err = device.Connect(ctx, cfg.Device)
+	dev, err := device.Connect(context.Background(), cfg.Device)
 	if err != nil {
 		tui.Err("ssh connect failed: %v", err)
-		return err
+		return
 	}
 
 	defer dev.Close()
 
-	live = tui.NewLive()
+	live := tui.NewLive()
 	live.Spin("uploading helper binary")
 	helperPath, err := dev.EnsureHelper()
 	if err != nil {
 		live.Fail("upload failed: %v", err)
-		return err
+		return
 	}
 
 	live.Spin("verifying helper can exec")
 	if err := dev.VerifyHelper(helperPath); err != nil {
 		live.Fail("verify failed: %v", err)
 		tui.Info("the device's code-signing layer rejected the helper's entitlements")
-		return err
+		return
 	}
 
 	live.OK("helper ready at %s", helperPath)
 
 	tui.Spacer()
 	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id>` to decrypt an app")
-
-	return nil
 }

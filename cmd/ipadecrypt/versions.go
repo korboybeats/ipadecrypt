@@ -35,44 +35,40 @@ func parseVersionsArg(raw string) (versionsTarget, error) {
 	return versionsTarget{bundleId: dt.bundleId, appId: dt.appId}, nil
 }
 
-func versionsHandler(cmd *cobra.Command, args []string) error {
-	ctx, cancel := notifyContext()
-	defer cancel()
-	_ = ctx
-
+func versionsHandler(cmd *cobra.Command, args []string) {
 	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
 		tui.Err("%v", err)
-		return err
+		return
 	}
 
 	target, err := parseVersionsArg(args[0])
 	if err != nil {
 		tui.Err("%v", err)
-		return err
+		return
 	}
 
 	if cfg.Apple.Account == nil {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to sign in")
-		return errEnvironmentNotConfigured
+		return
 	}
 
 	if !cfg.Versions.WarningAccepted {
 		if err := showVersionsWarning(); err != nil {
-			return err
+			return
 		}
 		cfg.Versions.WarningAccepted = true
 		if err := cfg.Save(); err != nil {
 			tui.Err("save config: %v", err)
-			return err
+			return
 		}
 	}
 
 	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 	if err != nil {
 		tui.Err("appstore client: %v", err)
-		return err
+		return
 	}
 
 	live := tui.NewLive()
@@ -86,7 +82,7 @@ func versionsHandler(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		live.Fail("lookup failed")
 		tui.Err("lookup: %v", err)
-		return err
+		return
 	}
 
 	live.OK("found %s (%s)", app.BundleID, app.Name)
@@ -96,7 +92,7 @@ func versionsHandler(cmd *cobra.Command, args []string) error {
 		p, err := paths.VersionsLog()
 		if err != nil {
 			tui.Err("log path: %v", err)
-			return err
+			return
 		}
 		logPath = p
 	}
@@ -108,7 +104,7 @@ func versionsHandler(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		live.Fail("list versions failed")
 		tui.Err("list: %v", err)
-		return err
+		return
 	}
 
 	logVersionsResponse(logPath, "list_versions", app.BundleID, "", list.Raw)
@@ -118,7 +114,7 @@ func versionsHandler(cmd *cobra.Command, args []string) error {
 	cachePath, err := paths.VersionsCacheFile(app.BundleID)
 	if err != nil {
 		tui.Err("cache path: %v", err)
-		return err
+		return
 	}
 
 	cache, err := loadVersionsCache(cachePath)
@@ -131,7 +127,9 @@ func versionsHandler(cmd *cobra.Command, args []string) error {
 	}
 	cache.BundleID = app.BundleID
 
-	return runVersionsTUI(cfg, as, app, list, cache, cachePath, logPath)
+	if err := runVersionsTUI(cfg, as, app, list, cache, cachePath, logPath); err != nil {
+		return
+	}
 }
 
 func lookupVersionsTargetApp(as *appstore.Client, acc *appstore.Account, target versionsTarget) (appstore.App, error) {
