@@ -201,7 +201,10 @@ func (c *Client) Mkdir(path string) error {
 	return nil
 }
 
-func (c *Client) Upload(local, remote string) error {
+// Upload copies a local file to the device over SFTP. If onProgress is
+// non-nil it is called periodically (throttled to ~100ms) with the
+// running byte count and the total file size.
+func (c *Client) Upload(local, remote string, onProgress func(cur, total int64)) error {
 	if err := c.Mkdir(path.Dir(remote)); err != nil {
 		return err
 	}
@@ -212,14 +215,28 @@ func (c *Client) Upload(local, remote string) error {
 	}
 	defer src.Close()
 
+	var total int64
+	if st, err := src.Stat(); err == nil {
+		total = st.Size()
+	}
+
 	dst, err := c.sftp.Create(remote)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", remote, err)
 	}
 	defer dst.Close()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	w := io.Writer(dst)
+	if onProgress != nil {
+		w = &progressWriter{w: dst, total: total, onProgress: onProgress}
+	}
+
+	if _, err := io.Copy(w, src); err != nil {
 		return fmt.Errorf("upload %s: %w", remote, err)
+	}
+
+	if onProgress != nil {
+		onProgress(total, total)
 	}
 
 	return nil
@@ -247,12 +264,20 @@ func (c *Client) UploadBytes(data []byte, remote string, mode os.FileMode) error
 	return c.sftp.Chmod(remote, mode)
 }
 
-func (c *Client) Download(remote, local string) error {
+// Download pulls a remote file from the device to a local path. If
+// onProgress is non-nil it is called periodically (throttled to ~100ms)
+// with the running byte count and the total file size.
+func (c *Client) Download(remote, local string, onProgress func(cur, total int64)) error {
 	src, err := c.sftp.Open(remote)
 	if err != nil {
 		return fmt.Errorf("open remote %s: %w", remote, err)
 	}
 	defer src.Close()
+
+	var total int64
+	if st, err := src.Stat(); err == nil {
+		total = st.Size()
+	}
 
 	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 		return fmt.Errorf("mkdir local: %w", err)
@@ -264,11 +289,42 @@ func (c *Client) Download(remote, local string) error {
 	}
 	defer dst.Close()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	w := io.Writer(dst)
+	if onProgress != nil {
+		w = &progressWriter{w: dst, total: total, onProgress: onProgress}
+	}
+
+	if _, err := io.Copy(w, src); err != nil {
 		return fmt.Errorf("download %s: %w", remote, err)
 	}
 
+	if onProgress != nil {
+		onProgress(total, total)
+	}
+
 	return nil
+}
+
+// progressWriter counts bytes written through it and invokes onProgress
+// at most once every 100ms. The final count is emitted by the caller
+// after io.Copy returns.
+type progressWriter struct {
+	w          io.Writer
+	total      int64
+	written    int64
+	last       time.Time
+	onProgress func(cur, total int64)
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	p.written += int64(n)
+	now := time.Now()
+	if now.Sub(p.last) >= 100*time.Millisecond {
+		p.last = now
+		p.onProgress(p.written, p.total)
+	}
+	return n, err
 }
 
 func (c *Client) Exists(path string) bool {

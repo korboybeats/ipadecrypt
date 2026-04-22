@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"howett.net/plist"
 )
@@ -199,7 +200,11 @@ func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string)
 // CompleteDownload fetches the IPA described by `ticket` into outPath,
 // injects iTunesMetadata.plist, and replicates sinfs. outPath must be a
 // file path, not a directory.
-func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath string) (DownloadOutput, error) {
+// CompleteDownload fetches the IPA described by `ticket` into outPath.
+// If onProgress is non-nil it is called periodically (throttled to
+// ~100ms) during the CDN fetch with the running byte count and
+// ticket.FileSize() as the total.
+func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath string, onProgress func(cur, total int64)) (DownloadOutput, error) {
 	if outPath == "" {
 		return DownloadOutput{}, errors.New("download: outPath is required (must be a file path)")
 	}
@@ -216,7 +221,7 @@ func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath s
 	}
 
 	tmp := outPath + ".tmp"
-	if err := fetchToFile(c.http, item.URL, tmp); err != nil {
+	if err := fetchToFile(c.http, item.URL, tmp, ticket.FileSize(), onProgress); err != nil {
 		return DownloadOutput{}, err
 	}
 
@@ -231,7 +236,7 @@ func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath s
 	return DownloadOutput{DestinationPath: outPath, Sinfs: item.Sinfs}, nil
 }
 
-func fetchToFile(hc *http.Client, url, dst string) error {
+func fetchToFile(hc *http.Client, url, dst string, total int64, onProgress func(cur, total int64)) error {
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dst, err)
@@ -244,8 +249,10 @@ func fetchToFile(hc *http.Client, url, dst string) error {
 		return err
 	}
 
+	var resumeFrom int64
 	if stat, err := f.Stat(); err == nil && stat.Size() > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", stat.Size()))
+		resumeFrom = stat.Size()
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
 
 	res, err := hc.Do(req)
@@ -255,11 +262,50 @@ func fetchToFile(hc *http.Client, url, dst string) error {
 
 	defer res.Body.Close()
 
-	if _, err := io.Copy(f, res.Body); err != nil {
+	// Prefer the ticket-reported size when available; fall back to
+	// Content-Length adjusted for any Range resume.
+	if total <= 0 {
+		if res.ContentLength > 0 {
+			total = resumeFrom + res.ContentLength
+		}
+	}
+
+	var w io.Writer = f
+	if onProgress != nil {
+		w = &progressWriter{w: f, total: total, written: resumeFrom, onProgress: onProgress}
+	}
+
+	if _, err := io.Copy(w, res.Body); err != nil {
 		return fmt.Errorf("write %s: %w", dst, err)
 	}
 
+	if onProgress != nil && total > 0 {
+		onProgress(total, total)
+	}
+
 	return nil
+}
+
+// progressWriter counts bytes written and invokes onProgress at most
+// once every 100ms. Callers are expected to emit the final count
+// themselves after io.Copy returns.
+type progressWriter struct {
+	w          io.Writer
+	total      int64
+	written    int64
+	last       time.Time
+	onProgress func(cur, total int64)
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	p.written += int64(n)
+	now := time.Now()
+	if now.Sub(p.last) >= 100*time.Millisecond {
+		p.last = now
+		p.onProgress(p.written, p.total)
+	}
+	return n, err
 }
 
 // applyPatches rebuilds src into dst with iTunesMetadata.plist injected and

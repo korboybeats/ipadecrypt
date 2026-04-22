@@ -140,6 +140,34 @@ func isAllDigits(s string) bool {
 	return true
 }
 
+func transferProgressText(label string, cur, total int64) string {
+	if total <= 0 {
+		return label
+	}
+	return fmt.Sprintf("%s (%s / %s)", label, humanBytes(cur), humanBytes(total))
+}
+
+func humanBytes(n int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+		TB = GB * 1024
+	)
+	switch {
+	case n >= TB:
+		return fmt.Sprintf("%.2f TB", float64(n)/float64(TB))
+	case n >= GB:
+		return fmt.Sprintf("%.2f GB", float64(n)/float64(GB))
+	case n >= MB:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(MB))
+	case n >= KB:
+		return fmt.Sprintf("%.1f KB", float64(n)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 func decryptHandler(cmd *cobra.Command, args []string) error {
 	ctx, cancel := notifyContext()
 	defer cancel()
@@ -252,6 +280,9 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 			case authRetryingDownload:
 				live.Spin("retrying download")
 			}
+		}, func(cur, total int64) {
+			live.Message("%s", transferProgressText("downloading IPA from App Store", cur, total))
+			live.Progress(cur, total)
 		})
 		if err != nil {
 			if errors.Is(err, errRemoteDownloadFailed) {
@@ -337,6 +368,9 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		case installRescan:
 			live.Spin("locating installed app")
 		}
+	}, func(cur, total int64) {
+		live.Message("%s", transferProgressText("uploading IPA to device", cur, total))
+		live.Progress(cur, total)
 	})
 	if err != nil {
 		live.Fail("install failed")
@@ -373,7 +407,10 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 			live.Spin("%s", update.spin)
 		}
 		if update.progress {
-			live.Progress(update.progressCur, update.progressMax, "%s", update.progressText)
+			if update.progressText != "" {
+				live.Message("%s", update.progressText)
+			}
+			live.Progress(update.progressCur, update.progressMax)
 		}
 	}
 
@@ -397,7 +434,10 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 
 	live = tui.NewLive()
 	live.Spin("pulling → %s", filepath.Base(outLocal))
-	if err := dev.Download(outRemote, outLocal); err != nil {
+	if err := dev.Download(outRemote, outLocal, func(cur, total int64) {
+		live.Message("%s", transferProgressText(fmt.Sprintf("pulling → %s", filepath.Base(outLocal)), cur, total))
+		live.Progress(cur, total)
+	}); err != nil {
 		live.Fail("pull failed")
 		tui.Err("pull: %v", err)
 		return err
@@ -475,7 +515,7 @@ type remoteSourceDisposition struct {
 	kind    sourceDisposition
 }
 
-func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *appstore.Client, app appstore.App, extVerID string, onAuth func(authEvent)) (remoteSourceDisposition, error) {
+func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *appstore.Client, app appstore.App, extVerID string, onAuth func(authEvent), onProgress func(cur, total int64)) (remoteSourceDisposition, error) {
 	if extVerID == "" {
 		encPath, err := paths.CachedEncryptedIPA(app.BundleID, app.Version)
 		if err != nil {
@@ -511,7 +551,7 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 		}, nil
 	}
 
-	if _, err := as.CompleteDownload(cfg.Apple.Account, ticket, encPath); err != nil {
+	if _, err := as.CompleteDownload(cfg.Apple.Account, ticket, encPath, onProgress); err != nil {
 		return remoteSourceDisposition{}, fmt.Errorf("%w: %w", errRemoteDownloadFailed, err)
 	}
 
@@ -589,7 +629,7 @@ func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error
 	}, nil
 }
 
-func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath string, onEvent func(installEvent)) (installResult, error) {
+func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath string, onEvent func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
 	notify := func(e installEvent) {
 		if onEvent != nil {
 			onEvent(e)
@@ -597,7 +637,7 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 	}
 
 	if plan.bundlePath == "" {
-		return installUploadedBundle(dev, plan, uploadPath, false, "", notify)
+		return installUploadedBundle(dev, plan, uploadPath, false, "", notify, onProgress)
 	}
 
 	notify(installHashIPA)
@@ -626,12 +666,12 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 	}
 
 	notify(installReplaceInstalled)
-	return installUploadedBundle(dev, plan, uploadPath, true, previousVersion, notify)
+	return installUploadedBundle(dev, plan, uploadPath, true, previousVersion, notify, onProgress)
 }
 
-func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath string, reinstalled bool, previousVersion string, notify func(installEvent)) (installResult, error) {
+func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath string, reinstalled bool, previousVersion string, notify func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
 	notify(installUpload)
-	if err := dev.Upload(uploadPath, plan.stagingRemote); err != nil {
+	if err := dev.Upload(uploadPath, plan.stagingRemote, onProgress); err != nil {
 		return installResult{}, fmt.Errorf("upload: %w", err)
 	}
 

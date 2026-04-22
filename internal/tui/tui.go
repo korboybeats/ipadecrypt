@@ -286,17 +286,16 @@ type Live struct {
 }
 
 type liveState struct {
-	kind     byte
 	msg      string
 	cur, max int64
+	hasBar   bool
 }
 
 func NewLive() *Live {
 	l := &Live{
-		stop:  make(chan struct{}),
-		done:  make(chan struct{}),
-		tty:   IsTTY(),
-		state: liveState{kind: 's'},
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
+		tty:  IsTTY(),
 	}
 	if l.tty {
 		l.active = true
@@ -308,17 +307,35 @@ func NewLive() *Live {
 }
 
 func (l *Live) Spin(format string, args ...any) {
-	l.set(liveState{kind: 's', msg: fmt.Sprintf(format, args...)})
+	l.setMessage(fmt.Sprintf(format, args...), true)
 }
 
-func (l *Live) Progress(cur, max int64, format string, args ...any) {
-	l.set(liveState{kind: 'p', msg: fmt.Sprintf(format, args...), cur: cur, max: max})
+// Message updates the current live-line text without changing whether the
+// progress bar is visible.
+func (l *Live) Message(format string, args ...any) {
+	l.setMessage(fmt.Sprintf(format, args...), false)
 }
 
-func (l *Live) set(st liveState) {
+// Progress updates the current progress ratio while leaving the current
+// live-line text alone.
+func (l *Live) Progress(cur, max int64) {
+	l.mu.Lock()
+	l.state.cur = cur
+	l.state.max = max
+	l.state.hasBar = true
+	l.mu.Unlock()
+}
+
+func (l *Live) setMessage(msg string, clearBar bool) {
 	l.mu.Lock()
 	prev := l.state
-	l.state = st
+	l.state.msg = msg
+	if clearBar {
+		l.state.cur = 0
+		l.state.max = 0
+		l.state.hasBar = false
+	}
+	st := l.state
 	tty := l.tty
 	l.mu.Unlock()
 	if !tty && st.msg != prev.msg {
@@ -393,13 +410,14 @@ func (l *Live) render(tick int) {
 	defer l.mu.Unlock()
 	fmt.Fprint(Out, "\r\033[2K")
 	st := l.state
-	var line string
-	switch st.kind {
-	case 'p':
-		line = "  " + renderBar(st.cur, st.max) + " " + st.msg
-	default:
-		frame := spinFrames[tick%len(spinFrames)]
-		line = "  " + paint(ansiCyan+ansiBold, frame) + " " + st.msg
+	frame := spinFrames[tick%len(spinFrames)]
+	line := "  " + paint(ansiCyan+ansiBold, frame)
+	if st.msg != "" {
+		line += " " + st.msg
+	}
+	if st.hasBar {
+		line += " "
+		line += renderBar(st.cur, st.max)
 	}
 	fmt.Fprint(Out, truncate(line, width()))
 }
@@ -428,8 +446,7 @@ func renderBar(cur, max int64) string {
 	pct := int((cur * 100) / max)
 	return paint(ansiGreen, strings.Repeat("█", filled)) +
 		paint(ansiDim, strings.Repeat("░", W-filled)) +
-		" " + paint(ansiGreen+ansiBold, fmt.Sprintf("%3d%%", pct)) +
-		" " + paint(ansiDim, fmt.Sprintf("%d/%d", cur, max))
+		" " + paint(ansiGreen+ansiBold, fmt.Sprintf("%3d%%", pct))
 }
 
 func truncate(s string, max int) string {
