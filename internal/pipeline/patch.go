@@ -15,21 +15,14 @@ import (
 	"howett.net/plist"
 )
 
-// PatchResult is the outcome of a single pre-install pass over an IPA:
-// a combined MinimumOSVersion rewrite (main app's Info.plist) and Watch/
-// slice strip (installd rejects the WatchKit-2 layout on iPhone-only
-// installs with MIInstallerErrorDomain Code=119).
 type PatchResult struct {
 	MinOSChanged  bool
 	PreviousMinOS string
 	WatchRemoved  int
 }
 
-// PatchForInstall walks src, rewrites the main app's Info.plist
-// MinimumOSVersion if it exceeds target, optionally drops every Watch/
-// entry, and writes the result to dst. Single zip pass. Watch/ is stripped
-// by default because installd rejects WatchKit-2 layouts on iPhone with
-// MIInstallerErrorDomain Code=119; keepWatch bypasses that.
+// PatchForInstall rewrites main Info.plist MinimumOSVersion and (unless
+// keepWatch) drops Watch/ entries. Single zip pass.
 func PatchForInstall(src, dst, target string, keepWatch bool) (PatchResult, error) {
 	var res PatchResult
 

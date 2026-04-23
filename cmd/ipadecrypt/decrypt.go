@@ -212,6 +212,64 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	live.OK("%s@%s iOS %s %s", cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch)
 
 	//
+	// If a bundle-id target is already installed, offer to decrypt the
+	// on-device build (e.g. TestFlight) instead of reinstalling from the
+	// App Store. Non-TTY aborts — no way to confirm.
+	//
+
+	if target.bundleId != "" {
+		live = tui.NewLive()
+		live.Spin("checking if %s is installed", target.bundleId)
+		installedPath, err := dev.FindInstalledByBundleID(target.bundleId)
+		if err != nil {
+			live.Fail("scan failed")
+			tui.Err("scan installed: %v", err)
+			return
+		}
+
+		if installedPath != "" {
+			version, verr := dev.InstalledVersion(installedPath)
+			if verr != nil || version == "" {
+				version = "unknown"
+			}
+
+			live.OK("found installed %s v%s", target.bundleId, version)
+
+			if !tui.IsTTY() {
+				tui.Err("%s v%s is already installed on the device.", target.bundleId, version)
+				tui.Info("Non-TTY runs can't prompt. Uninstall the app first, pass a local .ipa path, or re-run in a TTY.")
+				return
+			}
+
+			idx, serr := tui.Select(
+				fmt.Sprintf("%s v%s is installed — which build do you want decrypted?", target.bundleId, version),
+				[]string{
+					fmt.Sprintf("Installed build v%s (no App Store reinstall)", version),
+					"Latest from App Store (will reinstall, overwriting installed)",
+				},
+			)
+			if serr != nil {
+				tui.Err("%v", serr)
+				return
+			}
+
+			if idx == 0 {
+				helperPath, herr := dev.EnsureHelper()
+				if herr != nil {
+					tui.Err("helper upload: %v", herr)
+					return
+				}
+
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "")
+
+				return
+			}
+		} else {
+			live.OK("%s not installed; will fetch from App Store", target.bundleId)
+		}
+	}
+
+	//
 	// Acquire encrypted IPA, either from the App Store or a local path
 	//
 
@@ -346,8 +404,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	if plan.bundlePath == "" {
 		live.Spin("preparing install")
 	} else {
-		live.Note("app already installed at %s", plan.bundlePath)
-		live.Spin("checking installed app")
+		live.Spin("checking installed app at %s", plan.bundlePath)
 	}
 
 	install, err := ensureInstalledBundle(dev, plan, patch.uploadPath, func(e installEvent) {
@@ -385,14 +442,20 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
-	outRemote := remoteOutputPath(appBundleID, appVersion)
+	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote)
+}
+
+// runDecryptOnBundle runs helper → pull → strip → verify → cleanup on an
+// installed bundle. stagingRemote may be "" for the use-installed path.
+func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote string) {
+	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
 		tui.Err("mkdir work: %v", err)
 		return
 	}
 
-	live = tui.NewLive()
+	live := tui.NewLive()
 	live.Spin("starting helper")
 
 	progress := &helperProgress{}
@@ -413,7 +476,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	_, _, code, err := dev.RunHelper(plan.helperPath, appBundleID, install.bundlePath, outRemote, onEvent, nil)
+	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, onEvent, nil)
 	if err != nil {
 		live.Fail("helper run: %v", err)
 		return
@@ -425,7 +488,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 	live.OK("%s", progress.Summary())
 
-	outLocal, err := localOutputPath(decryptOutput, appBundleID, appVersion)
+	outLocal, err := localOutputPath(decryptOutput, bundleID, version)
 	if err != nil {
 		tui.Err("output path: %v", err)
 		return
@@ -481,7 +544,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("%d Mach-O(s) verified cryptid=0%s", res.Scanned, suffix)
 	}
 
-	cleanupDecrypt(dev, decryptNoCleanup, plan.stagingRemote, outRemote)
+	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote, outRemote)
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
@@ -723,8 +786,12 @@ func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote
 		return
 	}
 
-	_ = dev.Remove(stagingRemote)
-	_ = dev.Remove(outRemote)
+	if stagingRemote != "" {
+		_ = dev.Remove(stagingRemote)
+	}
+	if outRemote != "" {
+		_ = dev.Remove(outRemote)
+	}
 }
 
 func fileExists(path string) bool {

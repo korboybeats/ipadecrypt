@@ -10,7 +10,6 @@ import (
 	"io"
 	"path"
 	"strings"
-	"time"
 
 	"howett.net/plist"
 )
@@ -123,26 +122,16 @@ func (c *Client) LocateAppSync() (string, error) {
 }
 
 func (c *Client) Install(appinstPath, ipaRemote string) error {
-	// appinst is occasionally flaky on Dopamine: installd or LaunchServices
-	// returns a transient error (often exit 6) that disappears on a second
-	// attempt a moment later. Retry a couple times with a short backoff.
-	var lastOut, lastErr string
-	var lastCode int
-	for attempt := range 3 {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second)
-		}
-		out, errOut, code, err := c.RunSudo(fmt.Sprintf("%s %q", appinstPath, ipaRemote))
-		if err != nil {
-			return fmt.Errorf("appinst: %w", err)
-		}
-		if code == 0 {
-			return nil
-		}
-		lastOut, lastErr, lastCode = out, errOut, code
+	out, errOut, code, err := c.RunSudo(fmt.Sprintf("%s %q", appinstPath, ipaRemote))
+	if err != nil {
+		return fmt.Errorf("appinst: %w", err)
 	}
 
-	return fmt.Errorf("appinst exit %d:\nstdout: %s\nstderr: %s", lastCode, lastOut, lastErr)
+	if code != 0 {
+		return fmt.Errorf("appinst exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+
+	return nil
 }
 
 func (c *Client) EnsureHelper() (string, error) {
@@ -233,6 +222,31 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 	return "", errors.New("installed version not found")
 }
 
+// FindInstalledByBundleID returns the first installed .app whose Info.plist
+// contains bundleID. grep -aF works for both XML and binary plists.
+func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
+	if strings.ContainsAny(bundleID, "'\"\\$`\n") {
+		return "", fmt.Errorf("unsupported characters in bundle-id %q", bundleID)
+	}
+	cmd := fmt.Sprintf(
+		"sh -c '"+
+			"for p in /var/containers/Bundle/Application/*/*.app; do "+
+			"  if grep -qaF \"%s\" \"$p/Info.plist\" 2>/dev/null; then "+
+			"    echo \"$p\"; exit 0; "+
+			"  fi; "+
+			"done; exit 0"+
+			"'",
+		bundleID)
+	out, errOut, code, err := c.RunSudo(cmd)
+	if err != nil {
+		return "", err
+	}
+	if code != 0 && code != 1 {
+		return "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // FindInstalled locates an installed app bundle directory by its .app name.
 // Installed apps live under /var/containers/Bundle/Application/<uuid>/X.app
 // on rootful and rootless setups alike. Requires sudo because /var/containers
@@ -273,11 +287,7 @@ type EventHandler func(Event)
 // the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
 func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string, onEvent EventHandler, humanFallback io.Writer) (string, string, int, error) {
 	cmd := fmt.Sprintf("%s -v %q %q %q", helperPath, bundleID, bundlePath, outIPA)
-	// Helper emits structured @evt lines on stdout (parsed by splitter) and
-	// diagnostic LOG/ERR text on stderr. Route accordingly: stdout → splitter,
-	// stderr → humanFallback if caller wants live passthrough. Both streams
-	// are also accumulated by RunSudoStream into the returned strings so the
-	// caller can surface context on failure.
+	// @evt lines on stdout → splitter; LOG/ERR on stderr → humanFallback.
 	splitter := newEventSplitter(onEvent, humanFallback)
 	defer splitter.Close()
 	return c.RunSudoStream(cmd, splitter, humanFallback)

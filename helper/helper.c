@@ -462,10 +462,7 @@ static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
     return 0;
 }
 
-// Some installed extensions ship mode 0644 because iOS loads them through
-// ExtensionKit rather than execve. posix_spawn / execve from our helper both
-// require +x, so stamp it on ahead of any spawn attempt. We run as root via
-// sudo so chmod is always allowed.
+// Installed appex mains often ship mode 0644; posix_spawn/execve need +x.
 static void ensure_executable(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) return;
@@ -476,9 +473,7 @@ static void ensure_executable(const char *path) {
     }
 }
 
-// Unified spawn. Returns 0 on success, fills out_pid/out_task. *out_ptrace
-// is set to 1 iff the PT_TRACE_ME fallback was taken; caller must resume
-// via PT_CONTINUE in that case.
+// *out_ptrace=1 iff PT_TRACE_ME fallback taken (caller resumes via PT_CONTINUE).
 static int spawn_suspended(const char *bundle_id, const char *exec_path,
                            pid_t *out_pid, task_t *out_task, int *out_ptrace) {
     *out_ptrace = 0;
