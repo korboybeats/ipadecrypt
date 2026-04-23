@@ -6,11 +6,8 @@ project_name: ipadecrypt
 before:
   hooks:
     - go mod tidy
-    # Rebuild the embedded iOS helper. Requires macOS + Xcode + ldid on the
-    # release runner. Comment out if helper.arm64 is already checked in and
-    # you want to release from Linux/CI without an Xcode toolchain.
     - ./helper/build.sh
-    - cp helper/dist/helper.arm64 internal/device/helper.arm64
+    - cp helper/dist/ipadecrypt-helper-arm64 internal/device/ipadecrypt-helper-arm64
 
 builds:
   - id: ipadecrypt
@@ -36,6 +33,9 @@ archives:
 
 checksum:
   name_template: checksums.txt
+  extra_files:
+    - glob: helper/dist/ipadecrypt-helper-arm64
+      name_template: ipadecrypt-helper-arm64
 
 snapshot:
   version_template: "{{ incpatch .Version }}-dev"
@@ -57,5 +57,5 @@ release:
   draft: false
   prerelease: auto
   extra_files:
-    - glob: helper/dist/helper.arm64
-      name_template: helper.arm64
+    - glob: helper/dist/ipadecrypt-helper-arm64
+      name_template: ipadecrypt-helper-arm64
