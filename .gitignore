@@ -1,3 +1,4 @@
 *.ipa
 .claude
 dist/
+.grepai/
