@@ -1,7 +1,5 @@
 // Package tui is the single-stop terminal UI for ipadecrypt. Everything - status
 // lines, prompts, spinners, progress bars, result blocks - writes to Out
-// (stderr by default) so that stdout is reserved for data (e.g. the final
-// decrypted IPA path).
 package tui
 
 import (
@@ -41,6 +39,7 @@ func useColor() bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
+
 	return IsTTY()
 }
 
@@ -48,6 +47,7 @@ func paint(code, s string) string {
 	if useColor() {
 		return code + s + ansiReset
 	}
+
 	return s
 }
 
@@ -114,13 +114,20 @@ func Err(format string, args ...any)  { status(ansiRed, "✗", "[err]", format, 
 
 func status(color, glyph, plain, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	var line string
+	lines := strings.Split(msg, "\n")
+
+	var head string
 	if useColor() {
-		line = "  " + paint(color+ansiBold, glyph) + " " + msg
+		head = "  " + paint(color+ansiBold, glyph) + " " + lines[0]
 	} else {
-		line = "  " + plain + " " + msg
+		head = "  " + plain + " " + lines[0]
 	}
-	fmt.Fprintln(Out, truncate(line, width()))
+
+	fmt.Fprintln(Out, truncate(head, width()))
+
+	for _, cont := range lines[1:] {
+		fmt.Fprintln(Out, "    "+cont)
+	}
 }
 
 // Erase moves the cursor up n lines and clears from there to the end of the
@@ -353,7 +360,7 @@ func (l *Live) setMessage(msg string, clearBar bool) {
 		return
 	}
 
-	if !clearBar && prev.hasBar {
+	if !clearBar {
 		return
 	}
 
