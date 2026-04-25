@@ -284,16 +284,19 @@ func rewriteIPA(ipaPath string, skip func(name string) bool) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", ipaPath, err)
 	}
+
 	defer r.Close()
 
 	tmp := ipaPath + ".tmp"
+
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", tmp, err)
 	}
+
 	w := zip.NewWriter(out)
 
-	cleanup := func() { _ = os.Remove(tmp) }
+	cleanup := func() { os.Remove(tmp) }
 
 	removed := 0
 	for _, f := range r.File {

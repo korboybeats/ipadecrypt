@@ -241,7 +241,7 @@ func (ui *versionsUI) applyResult(res fetchResult) {
 		// need to re-read it from disk to merge.
 		ui.cacheMu.Lock()
 		ui.cache.Versions[res.meta.ExternalVersionID] = cv
-		_ = ui.cache.save(ui.cachePath)
+		ui.cache.save(ui.cachePath)
 		ui.cacheMu.Unlock()
 		return
 	}

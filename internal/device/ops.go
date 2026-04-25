@@ -2,6 +2,7 @@ package device
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -143,7 +144,7 @@ func (c *Client) EnsureHelper() (string, error) {
 		return remote, nil
 	}
 
-	if err := c.UploadBytes(helperArm64, remote, 0o755); err != nil {
+	if err := c.Upload(bytes.NewReader(helperArm64), remote, 0o755); err != nil {
 		return "", fmt.Errorf("upload helper: %w", err)
 	}
 

@@ -335,7 +335,8 @@ func logVersionsResponse(path, kind, bundleID, extVerID string, raw map[string]a
 	if err != nil {
 		return
 	}
+
 	defer f.Close()
 
-	_, _ = f.Write(append(data, '\n'))
+	f.Write(append(data, '\n'))
 }

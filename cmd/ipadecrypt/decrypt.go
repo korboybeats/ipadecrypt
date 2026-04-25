@@ -225,8 +225,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		}
 
 		if installedPath != "" {
-			version, verr := dev.InstalledVersion(installedPath)
-			if verr != nil || version == "" {
+			version, err := dev.InstalledVersion(installedPath)
+			if err != nil || version == "" {
 				version = "unknown"
 			}
 
@@ -238,22 +238,22 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				return
 			}
 
-			idx, serr := tui.Select(
+			idx, err := tui.Select(
 				fmt.Sprintf("%s v%s is installed - which build do you want decrypted?", target.bundleId, version),
 				[]string{
 					fmt.Sprintf("Installed build v%s (no App Store reinstall)", version),
 					"Latest from App Store (will reinstall, overwriting installed)",
 				},
 			)
-			if serr != nil {
-				tui.Err("%v", serr)
+			if err != nil {
+				tui.Err("%v", err)
 				return
 			}
 
 			if idx == 0 {
-				helperPath, herr := dev.EnsureHelper()
-				if herr != nil {
-					tui.Err("helper upload: %v", herr)
+				helperPath, err := dev.EnsureHelper()
+				if err != nil {
+					tui.Err("helper upload: %v", err)
 					return
 				}
 
@@ -368,7 +368,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	}
 	defer func() {
 		if patch.patchedPath != "" {
-			_ = os.Remove(patch.patchedPath)
+			os.Remove(patch.patchedPath)
 		}
 	}()
 
@@ -491,13 +491,40 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 
 	live.Spin("pulling → %s", filepath.Base(outLocal))
 
-	if err := dev.Download(outRemote, outLocal, func(cur, total int64) {
+	remoteSt, err := dev.Stat(outRemote)
+	if err != nil {
+		live.Fail("stat remote: %v", err)
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outLocal), 0o755); err != nil {
+		live.Fail("mkdir local: %v", err)
+		return
+	}
+
+	outFile, err := os.OpenFile(outLocal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		live.Fail("open local: %v", err)
+		return
+	}
+
+	pw := newProgressWriter(outFile, remoteSt.Size(), func(cur, total int64) {
 		live.Message("%s", transferProgressText(fmt.Sprintf("pulling → %s", filepath.Base(outLocal)), cur, total))
 		live.Progress(cur, total)
-	}); err != nil {
+	})
+
+	if err := dev.Download(outRemote, pw); err != nil {
+		outFile.Close()
 		live.Fail("pull failed: %v", err)
 		return
 	}
+
+	if err := outFile.Close(); err != nil {
+		live.Fail("close local: %v", err)
+		return
+	}
+
+	pw.Flush()
 
 	if !decryptKeepMetadata {
 		live.Spin("stripping iTunesMetadata.plist")
@@ -617,7 +644,7 @@ func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
 
 	tmp := f.Name()
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
+		os.Remove(tmp)
 		return patchResult{}, fmt.Errorf("close temp ipa: %w", err)
 	}
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -626,12 +653,12 @@ func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
 
 	res, err := pipeline.PatchForInstall(encPath, tmp, iosVersion, decryptKeepWatch)
 	if err != nil {
-		_ = os.Remove(tmp)
+		os.Remove(tmp)
 		return patchResult{}, err
 	}
 
 	if !res.MinOSChanged && res.WatchRemoved == 0 {
-		_ = os.Remove(tmp)
+		os.Remove(tmp)
 		return patchResult{uploadPath: encPath}, nil
 	}
 
@@ -720,11 +747,26 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 
 func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath string, reinstalled bool, previousVersion string, notify func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
 	notify(installUpload)
-	if err := dev.Upload(uploadPath, plan.stagingRemote, onProgress); err != nil {
+
+	src, err := os.Open(uploadPath)
+	if err != nil {
+		return installResult{}, fmt.Errorf("open %s: %w", uploadPath, err)
+	}
+
+	defer src.Close()
+
+	st, err := src.Stat()
+	if err != nil {
+		return installResult{}, fmt.Errorf("stat %s: %w", uploadPath, err)
+	}
+
+	pr := newProgressReader(src, st.Size(), onProgress)
+	if err := dev.Upload(pr, plan.stagingRemote, 0); err != nil {
 		return installResult{}, fmt.Errorf("upload: %w", err)
 	}
 
 	notify(installRunAppinst)
+
 	if err := dev.Install(plan.appinstPath, plan.stagingRemote); err != nil {
 		return installResult{}, fmt.Errorf("install: %w", err)
 	}
@@ -735,10 +777,12 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 	}
 
 	notify(installRescan)
+
 	bundlePath, err := dev.FindInstalled(plan.helperPath, appDirName)
 	if err != nil {
 		return installResult{}, fmt.Errorf("post-install scan: %w", err)
 	}
+
 	if bundlePath == "" {
 		return installResult{}, errors.New("install reported success but bundle not found")
 	}
@@ -785,10 +829,10 @@ func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote
 	}
 
 	if stagingRemote != "" {
-		_ = dev.Remove(stagingRemote)
+		os.Remove(stagingRemote)
 	}
 	if outRemote != "" {
-		_ = dev.Remove(outRemote)
+		os.Remove(outRemote)
 	}
 }
 

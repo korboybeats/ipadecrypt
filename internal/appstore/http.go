@@ -56,7 +56,7 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 	}
 
 	if out == nil {
-		_, _ = io.Copy(io.Discard, res.Body)
+		io.Copy(io.Discard, res.Body)
 		return res, nil
 	}
 
