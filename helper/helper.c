@@ -36,6 +36,7 @@
 #include <mach/vm_region.h>
 #include <mach/exception_types.h>
 #include <mach/thread_status.h>
+#include <libkern/OSByteOrder.h>
 
 // ----- SDK-missing SPI forward decls -----------------------------------
 
@@ -70,6 +71,17 @@ extern char **environ;
 #define LC_ENCRYPTION_INFO_64 0x2C
 #endif
 
+#ifndef FAT_MAGIC_64
+#define FAT_MAGIC_64 0xcafebabf
+#endif
+#ifndef FAT_CIGAM_64
+#define FAT_CIGAM_64 0xbfbafeca
+#endif
+
+#ifndef CPU_SUBTYPE_MASK
+#define CPU_SUBTYPE_MASK 0xff000000
+#endif
+
 // ----- logging ---------------------------------------------------------
 
 static int g_verbose = 0;
@@ -78,15 +90,45 @@ static int g_verbose = 0;
 #define ERR(fmt, ...) fprintf(stderr, "[helper] ERROR: " fmt "\n", ##__VA_ARGS__)
 #define EVT(fmt, ...) do { fprintf(stdout, "@evt " fmt "\n", ##__VA_ARGS__); fflush(stdout); } while (0)
 
-// ----- Mach-O encryption info parsing ---------------------------------
+// ----- Mach-O metadata types ------------------------------------------
+
+// Arch fingerprint of a loaded image, read from the target task.
+typedef struct {
+    uint32_t cputype;
+    uint32_t cpusubtype;
+    int      is_64;
+} runtime_image_t;
+
+// Thin Mach-O slice geometry within a file (whole file for thin Mach-O).
+typedef struct {
+    off_t    slice_offset;
+    uint64_t slice_size;
+    int      is_64;
+    uint32_t cputype;
+    uint32_t cpusubtype;
+} slice_meta_t;
+
+// LC_ENCRYPTION_INFO[_64] findings. has_crypt=0 means no such load command.
+typedef struct {
+    int      has_crypt;
+    uint32_t cryptoff;
+    uint32_t cryptsize;
+    uint32_t cryptid;
+    off_t    cryptid_file_offset;
+} crypt_meta_t;
 
 typedef struct {
-    off_t slice_offset;             // offset within file (thin: 0, fat: slice start)
-    uint32_t cryptoff;              // offset from slice start to encrypted pages
-    uint32_t cryptsize;
-    uint32_t cputype, cpusubtype;
-    off_t cryptid_file_offset;      // absolute byte offset of cryptid field in file
-} encinfo_t;
+    slice_meta_t slice;
+    crypt_meta_t crypt;
+} mach_slice_t;
+
+// Outcome of slice selection. any_slice_encrypted flags whether a fat
+// input still has an encrypted sibling that thinning must drop.
+typedef struct {
+    mach_slice_t selected;
+    int          is_fat;
+    int          any_slice_encrypted;
+} selected_slice_t;
 
 // dump_image outcomes. decrypt_bundle maps these to reason= attrs on
 // image phase=failed events so users get actionable context instead of
@@ -115,15 +157,37 @@ static const char *dump_reason(dump_result_t r) {
     }
 }
 
-static uint32_t bswap32(uint32_t x) {
-    return ((x & 0xff) << 24) | ((x & 0xff00) << 8) |
-           ((x & 0xff0000) >> 8) | ((x & 0xff000000) >> 24);
+// ----- slice selection helpers ----------------------------------------
+
+// Strip CPU capability bits so arm64/arm64e and signed variants compare
+// on their base subtype.
+static uint32_t cpusubtype_base(uint32_t subtype) {
+    return subtype & ~(uint32_t)CPU_SUBTYPE_MASK;
 }
 
-// Fill `out` for the first slice with LC_ENCRYPTION_INFO{_64} cryptid != 0.
-// Returns 1 encrypted, 0 not encrypted / not Mach-O, -1 on error.
-static int parse_slice(const uint8_t *slice, size_t slice_len, off_t slice_off, encinfo_t *out) {
+static int slice_matches_runtime(const slice_meta_t *slice,
+                                 const runtime_image_t *rt) {
+    return slice->is_64 == rt->is_64 &&
+           slice->cputype == rt->cputype &&
+           cpusubtype_base(slice->cpusubtype) == cpusubtype_base(rt->cpusubtype);
+}
+
+// True when the matched slice is encrypted, or when the file is fat with
+// any encrypted slice (we will thin to drop the sibling).
+static int slice_needs_dump(const selected_slice_t *sel) {
+    if (sel->selected.crypt.has_crypt && sel->selected.crypt.cryptid != 0) return 1;
+    return sel->is_fat && sel->any_slice_encrypted;
+}
+
+// ----- Mach-O parsing -------------------------------------------------
+
+// Parse one thin Mach-O slice. Returns 1 on success, 0 if the bytes
+// aren't a Mach-O, -1 if malformed.
+static int parse_thin_slice(const uint8_t *slice, size_t slice_len,
+                            off_t slice_off, uint64_t slice_size,
+                            mach_slice_t *out) {
     if (slice_len < sizeof(struct mach_header)) return 0;
+
     struct mach_header mh;
     memcpy(&mh, slice, sizeof(mh));
 
@@ -131,78 +195,145 @@ static int parse_slice(const uint8_t *slice, size_t slice_len, off_t slice_off, 
     size_t hdr_sz;
     uint32_t ncmds, szcmds;
     if (mh.magic == MH_MAGIC_64) {
+        if (slice_len < sizeof(struct mach_header_64)) return 0;
         struct mach_header_64 mh64;
         memcpy(&mh64, slice, sizeof(mh64));
         is_64 = 1;
         ncmds = mh64.ncmds; szcmds = mh64.sizeofcmds; hdr_sz = sizeof(mh64);
-        out->cputype = mh64.cputype; out->cpusubtype = mh64.cpusubtype;
+        out->slice.cputype = mh64.cputype;
+        out->slice.cpusubtype = mh64.cpusubtype;
     } else if (mh.magic == MH_MAGIC) {
         is_64 = 0;
         ncmds = mh.ncmds; szcmds = mh.sizeofcmds; hdr_sz = sizeof(mh);
-        out->cputype = mh.cputype; out->cpusubtype = mh.cpusubtype;
+        out->slice.cputype = mh.cputype;
+        out->slice.cpusubtype = mh.cpusubtype;
     } else {
         return 0;
     }
     if (hdr_sz + szcmds > slice_len) return -1;
 
+    out->slice.slice_offset = slice_off;
+    out->slice.slice_size = slice_size;
+    out->slice.is_64 = is_64;
+    out->crypt.has_crypt = 0;
+
+    const uint8_t *lc_end = slice + hdr_sz + szcmds;
     const uint8_t *lc_ptr = slice + hdr_sz;
+    uint32_t want = is_64 ? LC_ENCRYPTION_INFO_64 : LC_ENCRYPTION_INFO;
     for (uint32_t i = 0; i < ncmds; i++) {
+        if ((size_t)(lc_end - lc_ptr) < sizeof(struct load_command)) return -1;
         struct load_command lc;
         memcpy(&lc, lc_ptr, sizeof(lc));
-        if (lc.cmdsize == 0) return -1;
-        if ((size_t)((lc_ptr - slice) + lc.cmdsize) > hdr_sz + szcmds) return -1;
+        if (lc.cmdsize == 0 || (size_t)(lc_end - lc_ptr) < lc.cmdsize) return -1;
 
-        int want = (is_64 && lc.cmd == LC_ENCRYPTION_INFO_64) ||
-                   (!is_64 && lc.cmd == LC_ENCRYPTION_INFO);
-        if (want) {
+        if (lc.cmd == want) {
+            if (lc.cmdsize < sizeof(struct encryption_info_command)) return -1;
             struct encryption_info_command eic;
             memcpy(&eic, lc_ptr, sizeof(eic));
-            if (eic.cryptid == 0) return 0;
-            out->slice_offset = slice_off;
-            out->cryptoff = eic.cryptoff;
-            out->cryptsize = eic.cryptsize;
-            out->cryptid_file_offset = slice_off + (lc_ptr - slice) +
+            if ((uint64_t)eic.cryptoff + eic.cryptsize > slice_size) return -1;
+            out->crypt.has_crypt = 1;
+            out->crypt.cryptoff = eic.cryptoff;
+            out->crypt.cryptsize = eic.cryptsize;
+            out->crypt.cryptid = eic.cryptid;
+            out->crypt.cryptid_file_offset = slice_off + (lc_ptr - slice) +
                 offsetof(struct encryption_info_command, cryptid);
-            return 1;
+            break;
         }
         lc_ptr += lc.cmdsize;
     }
+    return 1;
+}
+
+// Resolve (file_offset, size) of the i-th fat slice. Returns -1 if the
+// table entry or slice runs past file_sz.
+static int fat_slice_range(const uint8_t *base, size_t file_sz,
+                           int is_fat64, int swap, uint32_t idx,
+                           uint64_t *out_off, uint64_t *out_size) {
+    uint64_t arch_size = is_fat64 ? sizeof(struct fat_arch_64)
+                                  : sizeof(struct fat_arch);
+    uint64_t entry_off = sizeof(struct fat_header) + arch_size * idx;
+    if (entry_off + arch_size > file_sz) return -1;
+
+    uint64_t off, sz;
+    if (is_fat64) {
+        struct fat_arch_64 fa;
+        memcpy(&fa, base + entry_off, sizeof(fa));
+        off = swap ? OSSwapBigToHostInt64(fa.offset) : fa.offset;
+        sz  = swap ? OSSwapBigToHostInt64(fa.size)   : fa.size;
+    } else {
+        struct fat_arch fa;
+        memcpy(&fa, base + entry_off, sizeof(fa));
+        off = swap ? OSSwapBigToHostInt32(fa.offset) : fa.offset;
+        sz  = swap ? OSSwapBigToHostInt32(fa.size)   : fa.size;
+    }
+    if (sz > file_sz || off > file_sz - sz) return -1;
+    *out_off = off;
+    *out_size = sz;
     return 0;
 }
 
-// Parse Mach-O (thin or fat) at path. Returns same as parse_slice.
-static int parse_macho(const char *path, encinfo_t *out) {
+// Open a Mach-O file (thin or fat[64]) and pick the slice matching `rt`.
+// Returns 1 with *out filled, 0 if no slice matches or file isn't
+// Mach-O, -1 on I/O or malformed input.
+static int select_runtime_slice(const char *path,
+                                const runtime_image_t *rt,
+                                selected_slice_t *out) {
+    memset(out, 0, sizeof(*out));
+
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
     struct stat st;
     if (fstat(fd, &st) < 0) { close(fd); return -1; }
-    void *map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (st.st_size < (off_t)sizeof(struct fat_header)) { close(fd); return 0; }
+
+    size_t file_sz = (size_t)st.st_size;
+    void *map = mmap(NULL, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
     if (map == MAP_FAILED) return -1;
 
     int rc = 0;
     const uint8_t *base = map;
-    if ((size_t)st.st_size >= 4) {
-        uint32_t magic; memcpy(&magic, base, 4);
-        if (magic == FAT_CIGAM || magic == FAT_MAGIC) {
-            int swap = (magic == FAT_CIGAM);
-            struct fat_header fh; memcpy(&fh, base, sizeof(fh));
-            uint32_t nfat = swap ? bswap32(fh.nfat_arch) : fh.nfat_arch;
-            for (uint32_t i = 0; i < nfat; i++) {
-                struct fat_arch fa;
-                memcpy(&fa, base + sizeof(struct fat_header) + i * sizeof(struct fat_arch),
-                       sizeof(fa));
-                uint32_t off = swap ? bswap32(fa.offset) : fa.offset;
-                uint32_t sz = swap ? bswap32(fa.size) : fa.size;
-                if ((size_t)(off + sz) > (size_t)st.st_size) { rc = -1; break; }
-                rc = parse_slice(base + off, sz, off, out);
-                if (rc == 1) break;
+    uint32_t magic;
+    memcpy(&magic, base, 4);
+
+    if (magic == FAT_MAGIC || magic == FAT_CIGAM ||
+        magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64) {
+        int is_fat64 = (magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64);
+        int swap = (magic == FAT_CIGAM || magic == FAT_CIGAM_64);
+        struct fat_header fh;
+        memcpy(&fh, base, sizeof(fh));
+        uint32_t nfat = swap ? OSSwapBigToHostInt32(fh.nfat_arch) : fh.nfat_arch;
+
+        out->is_fat = 1;
+        for (uint32_t i = 0; i < nfat; i++) {
+            uint64_t s_off, s_sz;
+            if (fat_slice_range(base, file_sz, is_fat64, swap, i, &s_off, &s_sz) != 0) {
+                rc = -1; goto done;
             }
-        } else {
-            rc = parse_slice(base, st.st_size, 0, out);
+            mach_slice_t slice;
+            int sr = parse_thin_slice(base + s_off, (size_t)s_sz,
+                                      (off_t)s_off, s_sz, &slice);
+            if (sr < 0) { rc = -1; goto done; }
+            if (sr == 0) continue;
+            if (slice.crypt.has_crypt && slice.crypt.cryptid != 0)
+                out->any_slice_encrypted = 1;
+            if (rc == 0 && slice_matches_runtime(&slice.slice, rt)) {
+                out->selected = slice;
+                rc = 1;
+            }
         }
+    } else {
+        mach_slice_t slice;
+        int sr = parse_thin_slice(base, file_sz, 0, file_sz, &slice);
+        if (sr <= 0) { rc = sr; goto done; }
+        if (!slice_matches_runtime(&slice.slice, rt)) goto done;
+        out->any_slice_encrypted = slice.crypt.has_crypt && slice.crypt.cryptid != 0;
+        out->selected = slice;
+        rc = 1;
     }
-    munmap(map, st.st_size);
+
+done:
+    munmap(map, file_sz);
     return rc;
 }
 
@@ -213,7 +344,9 @@ static int is_macho(const char *path) {
     ssize_t n = read(fd, &m, sizeof(m));
     close(fd);
     return n == sizeof(m) &&
-        (m == MH_MAGIC || m == MH_MAGIC_64 || m == FAT_CIGAM || m == FAT_MAGIC);
+        (m == MH_MAGIC || m == MH_MAGIC_64 ||
+         m == FAT_MAGIC || m == FAT_CIGAM ||
+         m == FAT_MAGIC_64 || m == FAT_CIGAM_64);
 }
 
 // ----- filesystem helpers ---------------------------------------------
@@ -569,6 +702,23 @@ static int find_main_base(task_t task, mach_vm_address_t *out) {
     }
 }
 
+// Read mach_header[_64] at a runtime base and capture its arch.
+static int read_runtime_image(task_t task, mach_vm_address_t base,
+                              runtime_image_t *out) {
+    struct mach_header_64 hdr;
+    mach_vm_size_t got = 0;
+    if (mach_vm_read_overwrite(task, base, sizeof(hdr),
+            (mach_vm_address_t)(uintptr_t)&hdr, &got) != KERN_SUCCESS ||
+        got != sizeof(hdr)) {
+        return -1;
+    }
+    if (hdr.magic != MH_MAGIC && hdr.magic != MH_MAGIC_64) return -1;
+    out->is_64 = (hdr.magic == MH_MAGIC_64);
+    out->cputype = hdr.cputype;
+    out->cpusubtype = hdr.cpusubtype;
+    return 0;
+}
+
 // Enumerate images loaded in target via TASK_DYLD_INFO. Writes count of
 // images into *out_count and returns a heap-allocated infoArray + path
 // strings buffer (caller frees). Returns NULL on error.
@@ -621,72 +771,96 @@ static struct dyld_image_info *list_images(task_t task, uint32_t *out_count,
 
 // ----- dump an encrypted image ----------------------------------------
 
-// Read cryptsize bytes at image_base+cryptoff from target, splice onto a
-// copy of the source file's bytes, zero cryptid, write to dst.
-static dump_result_t dump_image(const char *src, const char *dst, task_t task,
-                                mach_vm_address_t image_base, const encinfo_t *info) {
-    int fd = open(src, O_RDONLY);
-    if (fd < 0) { ERR("open %s: %s", src, strerror(errno)); return DUMP_OPEN_SRC_FAIL; }
-    struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return DUMP_OPEN_SRC_FAIL; }
-    uint8_t *buf = malloc(st.st_size);
-    if (!buf) { close(fd); return DUMP_OOM; }
-    if (read(fd, buf, st.st_size) != st.st_size) {
-        ERR("read %s: %s", src, strerror(errno));
-        free(buf); close(fd); return DUMP_READ_SRC_FAIL;
-    }
-    close(fd);
-
-    // Read decrypted pages from the target task, splice over the encrypted
-    // bytes in the file-image buffer.
-    mach_vm_address_t src_addr = image_base + info->cryptoff;
-    mach_vm_address_t dst_addr = (mach_vm_address_t)(uintptr_t)(buf + info->slice_offset + info->cryptoff);
-    mach_vm_size_t remaining = info->cryptsize;
+// Splice cryptsize decrypted bytes from the target into `buf` at the
+// slice's absolute file offset.
+static dump_result_t vm_read_crypt_region(task_t task, mach_vm_address_t image_base,
+                                          const mach_slice_t *slice, uint8_t *buf) {
+    mach_vm_address_t src = image_base + slice->crypt.cryptoff;
+    mach_vm_address_t dst = (mach_vm_address_t)(uintptr_t)
+        (buf + slice->slice.slice_offset + slice->crypt.cryptoff);
+    mach_vm_size_t remaining = slice->crypt.cryptsize;
     while (remaining > 0) {
         mach_vm_size_t chunk = remaining > 0x100000 ? 0x100000 : remaining;
         mach_vm_size_t got = 0;
-        kern_return_t kr = mach_vm_read_overwrite(task, src_addr, chunk, dst_addr, &got);
+        kern_return_t kr = mach_vm_read_overwrite(task, src, chunk, dst, &got);
         if (kr != KERN_SUCCESS || got == 0) {
-            ERR("mach_vm_read @0x%llx size=0x%llx kr=%d", src_addr, chunk, kr);
-            free(buf); return DUMP_VM_READ_FAIL;
+            ERR("mach_vm_read @0x%llx size=0x%llx kr=%d", src, chunk, kr);
+            return DUMP_VM_READ_FAIL;
         }
-        src_addr += got; dst_addr += got; remaining -= got;
+        src += got; dst += got; remaining -= got;
     }
-    // Sanity: scan the whole cryptoff region. If every byte is zero the
-    // cryptoff pages were never page-faulted by the target (kernel returned
-    // us the zero-filled backing store, not the decrypted content). Skip
-    // writing so the dst stays as the original encrypted file - user gets a
-    // cryptid=1 framework which at least surfaces the failure rather than a
-    // cryptid=0 with broken bytes.
-    {
-        const uint8_t *p = buf + info->slice_offset + info->cryptoff;
-        int nonzero = 0;
-        for (uint32_t k = 0; k < info->cryptsize; k++) {
-            if (p[k]) { nonzero = 1; break; }
-        }
-        if (!nonzero) {
-            ERR("cryptoff read all zeros for %s - target hadn't faulted the pages yet", src);
-            free(buf); return DUMP_ZERO_PAGES;
-        }
+    return DUMP_OK;
+}
+
+// All-zero cryptoff means the target never faulted those pages and the
+// kernel handed us the zero-filled backing store, not decrypted bytes.
+static int crypt_region_has_data(const uint8_t *buf, const mach_slice_t *slice) {
+    const uint8_t *p = buf + slice->slice.slice_offset + slice->crypt.cryptoff;
+    for (uint32_t i = 0; i < slice->crypt.cryptsize; i++) {
+        if (p[i]) return 1;
     }
+    return 0;
+}
 
-    uint32_t zero = 0;
-    memcpy(buf + info->cryptid_file_offset, &zero, sizeof(zero));
-
+// Write the matched slice's bytes for fat input (thinning the output) or
+// the whole buffer for thin input.
+static dump_result_t write_output(const char *dst, const uint8_t *buf,
+                                  size_t file_sz, const selected_slice_t *sel) {
     char parent[4096];
     snprintf(parent, sizeof(parent), "%s", dst);
     char *slash = strrchr(parent, '/');
     if (slash) { *slash = '\0'; mkdirs(parent); }
 
-    int out = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0755);
-    if (out < 0) { ERR("open dst %s: %s", dst, strerror(errno)); free(buf); return DUMP_OPEN_DST_FAIL; }
-    if (write(out, buf, st.st_size) != st.st_size) {
+    int fd = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (fd < 0) { ERR("open dst %s: %s", dst, strerror(errno)); return DUMP_OPEN_DST_FAIL; }
+
+    const uint8_t *p = sel->is_fat ? buf + sel->selected.slice.slice_offset : buf;
+    size_t n = sel->is_fat ? (size_t)sel->selected.slice.slice_size : file_sz;
+    if (write(fd, p, n) != (ssize_t)n) {
         ERR("write dst %s: %s", dst, strerror(errno));
-        close(out); free(buf); return DUMP_WRITE_DST_FAIL;
+        close(fd); return DUMP_WRITE_DST_FAIL;
     }
-    close(out);
-    free(buf);
+    close(fd);
     return DUMP_OK;
+}
+
+// Decrypt the matched slice into a thin Mach-O at `dst`. Fat siblings
+// are dropped on the way out.
+static dump_result_t dump_image(const char *src, const char *dst, task_t task,
+                                mach_vm_address_t image_base,
+                                const selected_slice_t *sel) {
+    const mach_slice_t *slice = &sel->selected;
+
+    int fd = open(src, O_RDONLY);
+    if (fd < 0) { ERR("open %s: %s", src, strerror(errno)); return DUMP_OPEN_SRC_FAIL; }
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return DUMP_OPEN_SRC_FAIL; }
+    size_t file_sz = (size_t)st.st_size;
+    uint8_t *buf = malloc(file_sz);
+    if (!buf) { close(fd); return DUMP_OOM; }
+    if (read(fd, buf, file_sz) != (ssize_t)file_sz) {
+        ERR("read %s: %s", src, strerror(errno));
+        free(buf); close(fd); return DUMP_READ_SRC_FAIL;
+    }
+    close(fd);
+
+    if (slice->crypt.has_crypt && slice->crypt.cryptid != 0 && slice->crypt.cryptsize) {
+        dump_result_t dr = vm_read_crypt_region(task, image_base, slice, buf);
+        if (dr != DUMP_OK) { free(buf); return dr; }
+        if (!crypt_region_has_data(buf, slice)) {
+            ERR("cryptoff read all zeros for %s - target hadn't faulted the pages yet", src);
+            free(buf); return DUMP_ZERO_PAGES;
+        }
+    }
+
+    if (slice->crypt.has_crypt) {
+        uint32_t zero = 0;
+        memcpy(buf + slice->crypt.cryptid_file_offset, &zero, sizeof(zero));
+    }
+
+    dump_result_t dr = write_output(dst, buf, file_sz, sel);
+    free(buf);
+    return dr;
 }
 
 // ----- dyld resume + exception-port watch -----------------------------
@@ -792,7 +966,7 @@ static int find_main_name(const char *bundle, char *out, size_t cap) {
 // dylibs (e.g. iOS 14.8 lacks /usr/lib/swift/libswift_Concurrency.dylib
 // which iOS-16.4-minos apps strict-link against).
 static dump_result_t mmap_dump(const char *src, const char *dst,
-                                const encinfo_t *info) {
+                               const selected_slice_t *sel) {
     int fd = open(src, O_RDONLY);
     if (fd < 0) { ERR("open %s: %s", src, strerror(errno)); return DUMP_OPEN_SRC_FAIL; }
     struct stat st;
@@ -803,8 +977,9 @@ static dump_result_t mmap_dump(const char *src, const char *dst,
         ERR("mmap %s: %s", src, strerror(errno));
         return DUMP_VM_READ_FAIL;
     }
-    mach_vm_address_t image_base = (mach_vm_address_t)(uintptr_t)map + info->slice_offset;
-    dump_result_t dr = dump_image(src, dst, mach_task_self(), image_base, info);
+    mach_vm_address_t image_base = (mach_vm_address_t)(uintptr_t)map +
+                                   sel->selected.slice.slice_offset;
+    dump_result_t dr = dump_image(src, dst, mach_task_self(), image_base, sel);
     munmap(map, st.st_size);
     return dr;
 }
@@ -814,8 +989,11 @@ static dump_result_t mmap_dump(const char *src, const char *dst,
 // aborted before mapping all @rpath deps - typical when the binary
 // strict-links a system swift dylib the device doesn't ship
 static int rescue_unmapped_frameworks(const char *bundle_src, const char *bundle_dst,
-                                       size_t bs_len,
-                                       const char **dumped, int n_dumped) {
+                                      size_t bs_len,
+                                      const runtime_image_t *runtime,
+                                      const char **dumped, int n_dumped) {
+    if (!runtime) return 0;
+
     char fw_root[4096];
     snprintf(fw_root, sizeof(fw_root), "%s/Frameworks", bundle_src);
     DIR *d = opendir(fw_root);
@@ -843,8 +1021,9 @@ static int rescue_unmapped_frameworks(const char *bundle_src, const char *bundle
         snprintf(main_path, sizeof(main_path), "%s/%s", fw_dir, fw_name);
         if (!is_macho(main_path)) continue;
 
-        encinfo_t ri;
-        if (parse_macho(main_path, &ri) != 1) continue;
+        selected_slice_t sel;
+        if (select_runtime_slice(main_path, runtime, &sel) != 1) continue;
+        if (!slice_needs_dump(&sel)) continue;
 
         // rel = path relative to bundle_src ("Frameworks/X.framework/X").
         if (strncmp(main_path, bundle_src, bs_len) != 0) continue;
@@ -860,11 +1039,11 @@ static int rescue_unmapped_frameworks(const char *bundle_src, const char *bundle
 
         char rel_dst[4096];
         snprintf(rel_dst, sizeof(rel_dst), "%s/%s", bundle_dst, rel);
-        dump_result_t dr = mmap_dump(main_path, rel_dst, &ri);
+        dump_result_t dr = mmap_dump(main_path, rel_dst, &sel);
         if (dr == DUMP_OK) {
             rescued++;
             EVT("event=image phase=done name=\"%s\" kind=framework size=%u source=rescue",
-                rel, ri.cryptsize);
+                rel, sel.selected.crypt.cryptsize);
         } else {
             EVT("event=image phase=failed name=\"%s\" kind=framework reason=\"%s\" source=rescue",
                 rel, dump_reason(dr));
@@ -902,30 +1081,37 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
         return 0; // non-fatal; continue with rest of the IPA
     }
 
-    // 1) Dump the main exec by reading cryptoff pages out of the VM image.
-    //    Works even before dyld starts binding; FairPlay decrypts on page
-    //    fault during mach_vm_read_overwrite.
-    encinfo_t info;
-    int er = parse_macho(main_src, &info);
-    if (er == 1) {
-        mach_vm_address_t base = 0;
-        if (find_main_base(task, &base) == 0) {
+    // 1) Dump the main exec. Fingerprint runtime arch from the loaded
+    //    mach_header so slice selection matches what dyld actually mapped.
+    //    FairPlay decrypts on page fault during mach_vm_read_overwrite,
+    //    so this works even before dyld starts binding.
+    runtime_image_t bundle_rt;
+    int have_bundle_rt = 0;
+    mach_vm_address_t main_base = 0;
+    if (find_main_base(task, &main_base) == 0 &&
+        read_runtime_image(task, main_base, &bundle_rt) == 0) {
+        have_bundle_rt = 1;
+
+        selected_slice_t sel;
+        int sr = select_runtime_slice(main_src, &bundle_rt, &sel);
+        if (sr == 1 && slice_needs_dump(&sel)) {
             LOG("[helper] dumping main %s (load=0x%llx, cryptsize=0x%x)\n",
-                main_name, (unsigned long long)base, info.cryptsize);
+                main_name, (unsigned long long)main_base,
+                sel.selected.crypt.cryptsize);
             EVT("event=image phase=start name=\"%s\" kind=main", main_name);
-            dump_result_t dr = dump_image(main_src, main_dst, task, base, &info);
+            dump_result_t dr = dump_image(main_src, main_dst, task, main_base, &sel);
             if (dr == DUMP_OK) {
                 EVT("event=image phase=done name=\"%s\" kind=main size=%u",
-                    main_name, info.cryptsize);
+                    main_name, sel.selected.crypt.cryptsize);
             } else {
                 EVT("event=image phase=failed name=\"%s\" kind=main reason=\"%s\"",
                     main_name, dump_reason(dr));
             }
-        } else {
-            ERR("could not locate MH_EXECUTE base in %s", bundle_src);
-            EVT("event=image phase=failed name=\"%s\" kind=main reason=\"no_exec_base\"",
-                main_name);
         }
+    } else {
+        ERR("could not locate MH_EXECUTE base in %s", bundle_src);
+        EVT("event=image phase=failed name=\"%s\" kind=main reason=\"no_exec_base\"",
+            main_name);
     }
 
     // 2) Resume dyld so it maps Frameworks/* into the target's address
@@ -969,31 +1155,34 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
         char rel_src[4096], rel_dst[4096];
         snprintf(rel_src, sizeof(rel_src), "%s/%s", bundle_src, rel);
         snprintf(rel_dst, sizeof(rel_dst), "%s/%s", bundle_dst, rel);
-        encinfo_t ri;
-        if (parse_macho(rel_src, &ri) != 1) continue;
-        // Sanity-read header at load_addr to confirm the framework is really
-        // mapped there. mach_vm_read of an unmapped region silently returns
-        // zero-filled data which would produce a cryptid=0 IPA with broken
-        // pages.
+
+        // Reading the loaded header at imageLoadAddress doubles as a
+        // sanity check (mach_vm_read of an unmapped region returns zeros)
+        // and as the per-image runtime arch fingerprint.
         mach_vm_address_t base = (mach_vm_address_t)(uintptr_t)imgs[i].imageLoadAddress;
-        struct mach_header_64 mhchk;
-        mach_vm_size_t got = 0;
-        if (mach_vm_read_overwrite(task, base, sizeof(mhchk),
-                (mach_vm_address_t)(uintptr_t)&mhchk, &got) != KERN_SUCCESS ||
-            got != sizeof(mhchk) ||
-            (mhchk.magic != MH_MAGIC_64 && mhchk.magic != MH_MAGIC)) {
-            LOG("[helper] skip %s: header at 0x%llx not mapped (magic=0x%x)\n",
-                rel, (unsigned long long)base, mhchk.magic);
+        runtime_image_t img_rt;
+        if (read_runtime_image(task, base, &img_rt) != 0) {
+            LOG("[helper] skip %s: header at 0x%llx not mapped\n",
+                rel, (unsigned long long)base);
             continue;
         }
+        if (!have_bundle_rt) {
+            bundle_rt = img_rt;
+            have_bundle_rt = 1;
+        }
+
+        selected_slice_t sel;
+        if (select_runtime_slice(rel_src, &img_rt, &sel) != 1) continue;
+        if (!slice_needs_dump(&sel)) continue;
+
         LOG("[helper] dumping %s (load=0x%llx, cryptsize=0x%x)\n", rel,
-            (unsigned long long)base, ri.cryptsize);
+            (unsigned long long)base, sel.selected.crypt.cryptsize);
         EVT("event=image phase=start name=\"%s\" kind=framework", rel);
-        dump_result_t dr = dump_image(rel_src, rel_dst, task, base, &ri);
+        dump_result_t dr = dump_image(rel_src, rel_dst, task, base, &sel);
         if (dr == DUMP_OK) {
             extra++;
             EVT("event=image phase=done name=\"%s\" kind=framework size=%u",
-                rel, ri.cryptsize);
+                rel, sel.selected.crypt.cryptsize);
             if (n_dumped >= dumped_cap) {
                 dumped_cap = dumped_cap ? dumped_cap * 2 : 16;
                 char **nb = realloc(dumped_rel, dumped_cap * sizeof(*nb));
@@ -1026,6 +1215,7 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     //    before mapping all @rpath frameworks. mmap them ourselves and
     //    decrypt via FairPlay page-fault on memcpy.
     int rescued = rescue_unmapped_frameworks(bundle_src, bundle_dst, bs_len,
+        have_bundle_rt ? &bundle_rt : NULL,
         (const char **)dumped_rel, n_dumped);
     extra += rescued;
 
