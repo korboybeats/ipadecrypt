@@ -340,6 +340,10 @@ func StripMetadata(ipaPath string) (bool, error) {
 	return n > 0, err
 }
 
+func StripWatch(ipaPath string) (int, error) {
+	return rewriteIPA(ipaPath, isWatchPath)
+}
+
 func isWatchPath(name string) bool {
 	parts := strings.Split(name, "/")
 	if len(parts) < 3 {

@@ -518,6 +518,16 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 	}
 
+	if !decryptKeepWatch {
+		live.Spin("stripping Watch/")
+
+		if _, err := pipeline.StripWatch(outLocal); err != nil {
+			live.Fail("strip watch failed")
+			tui.Err("strip watch: %v", err)
+			return
+		}
+	}
+
 	live.OK("→ %s", outLocal)
 
 	if !decryptNoVerify {
