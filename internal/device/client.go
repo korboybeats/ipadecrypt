@@ -380,13 +380,6 @@ func (c *Client) Exists(path string) bool {
 	return err == nil
 }
 
-func (c *Client) Remove(path string) error { return c.sftp.Remove(path) }
-
-func expandHome(p string) string {
-	if strings.HasPrefix(p, "~/") {
-		if h, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(h, p[2:])
-		}
-	}
-	return p
+func (c *Client) Remove(path string) error {
+	return c.sftp.Remove(path)
 }
