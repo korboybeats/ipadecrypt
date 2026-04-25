@@ -547,7 +547,7 @@ static int sbs_launch(const char *bundle_id, const char *exec_path,
         LOG("[helper] SBSLaunch(%s)=%d\n", bundle_id, rc);
         return -1;
     }
-    pid_t pid = find_pid_by_path(exec_path, 10000);
+    pid_t pid = find_pid_by_path(exec_path, 2000);
     if (pid == 0) { LOG("[helper] SBS launch did not produce a pid\n"); return -1; }
     task_t task = MACH_PORT_NULL;
     if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
@@ -1121,7 +1121,7 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     mach_port_t exc = via_ptrace ? MACH_PORT_NULL : make_exception_port(task);
     LOG("[helper] resuming %s (via_ptrace=%d)\n", bundle_src, via_ptrace);
     EVT("event=dyld phase=resuming src=\"%s\" via_ptrace=%d", bundle_src, via_ptrace);
-    run_and_suspend(task, pid, via_ptrace, exc, 10000);
+    run_and_suspend(task, pid, via_ptrace, exc, 2000);
 
     // 3) Enumerate images loaded in the (now suspended or dead) target task
     //    and dump every encrypted one whose path is inside this bundle.
