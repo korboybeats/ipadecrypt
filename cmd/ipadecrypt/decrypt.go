@@ -135,11 +135,13 @@ func isAllDigits(s string) bool {
 	if s == "" {
 		return false
 	}
+
 	for _, r := range s {
 		if r < '0' || r > '9' {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -147,6 +149,7 @@ func transferProgressText(label string, cur, total int64) string {
 	if total <= 0 {
 		return label
 	}
+
 	return fmt.Sprintf("%s (%s / %s)", label, humanBytes(cur), humanBytes(total))
 }
 
@@ -295,6 +298,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			tui.Err("read IPA: %v", err)
 			return
 		}
+
 		encPath = target.localPath
 
 		tui.OK("%s v%s", appBundleID, appVersion)
@@ -305,7 +309,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		tui.OK("signed in as %s", cfg.Apple.Account.Email)
+		appStoreCountry, err := appstore.CountryCodeFromStoreFront(cfg.Apple.Account.StoreFront)
+		if err != nil {
+			tui.Err("resolve appstore country code: %v", err)
+			return
+		}
+
+		tui.OK("signed in as %s (%s storefront)", cfg.Apple.Account.Email, appStoreCountry)
 
 		live = tui.NewLive()
 
@@ -317,7 +327,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		app, err := lookupTargetApp(as, cfg.Apple.Account, target)
 		if err != nil {
-			live.Fail("lookup failed: %v", err)
+			live.Fail("lookup failed (%s): %v", appStoreCountry, err)
 			return
 		}
 

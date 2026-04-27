@@ -5,16 +5,16 @@ import (
 	"strings"
 )
 
-// countryCodeFromStoreFront extracts the two-letter country code from an
-// X-Set-Apple-Store-Front header (format: "<storefrontID>-<lang>[,<flag>]").
-func countryCodeFromStoreFront(storeFront string) (string, error) {
-	first := strings.SplitN(storeFront, "-", 2)[0]
-	for code, id := range storeFronts {
-		if id == first {
-			return code, nil
+func CountryCodeFromStoreFront(storeFront string) (string, error) {
+	for key, val := range storeFronts {
+		parts := strings.Split(storeFront, "-")
+
+		if len(parts) >= 1 && parts[0] == val {
+			return key, nil
 		}
 	}
-	return "", fmt.Errorf("country code for storefront %q not found", storeFront)
+
+	return "", fmt.Errorf("country code mapping for store front (%s) was not found", storeFront)
 }
 
 var storeFronts = map[string]string{

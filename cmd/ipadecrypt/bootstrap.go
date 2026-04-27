@@ -93,10 +93,16 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	cfg.Apple.Account = account
 
+	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
+	if err != nil {
+		tui.Err("resolve appstore country code: %v", err)
+		return
+	}
+
 	tui.Fields(
 		"Apple ID", account.Email,
 		"Name", account.Name,
-		"Storefront", account.StoreFront,
+		"Storefront", fmt.Sprintf("%s (%s)", account.StoreFront, appStoreCountry),
 	)
 
 	if err := cfg.Save(); err != nil {

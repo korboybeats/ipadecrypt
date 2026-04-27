@@ -11,7 +11,7 @@ type lookupResult struct {
 }
 
 func (c *Client) LookupByBundleID(acc *Account, bundleID string) (App, error) {
-	cc, err := countryCodeFromStoreFront(acc.StoreFront)
+	cc, err := CountryCodeFromStoreFront(acc.StoreFront)
 	if err != nil {
 		return App{}, err
 	}
@@ -43,7 +43,7 @@ func (c *Client) LookupByBundleID(acc *Account, bundleID string) (App, error) {
 }
 
 func (c *Client) LookupByAppID(acc *Account, appID string) (App, error) {
-	cc, err := countryCodeFromStoreFront(acc.StoreFront)
+	cc, err := CountryCodeFromStoreFront(acc.StoreFront)
 	if err != nil {
 		return App{}, err
 	}
