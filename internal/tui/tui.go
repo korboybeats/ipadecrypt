@@ -440,7 +440,6 @@ func (l *Live) render(tick int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	fmt.Fprint(Out, "\r\033[2K")
 	st := l.state
 	frame := spinFrames[tick%len(spinFrames)]
 	line := "  " + paint(ansiCyan+ansiBold, frame)
@@ -456,7 +455,11 @@ func (l *Live) render(tick int) {
 			line += " " + paint(ansiDim, st.detail)
 		}
 	}
-	fmt.Fprint(Out, truncate(line, width()))
+
+	// Single write: CR, overwrite content, then erase remainder of line.
+	// Avoids the blank-line flash that "\r\033[2K" + content produces on
+	// Windows Terminal between clear and redraw.
+	fmt.Fprint(Out, "\r"+truncate(line, width())+"\x1b[K")
 }
 
 func width() int {
