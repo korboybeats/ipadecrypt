@@ -229,6 +229,21 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	live.OK("%s@%s iOS %s %s", cfg.Device.User, dev.Host(), probe.IOSVersion, probe.Arch)
 
 	//
+	// Fuzzy resolution: if target looks like a search term (no dot), match
+	// against installed apps' bundle IDs and display names. Pick a unique
+	// match automatically; prompt on ambiguity.
+	//
+
+	if target.bundleId != "" && !strings.Contains(target.bundleId, ".") {
+		resolved, err := resolveBundleByFuzzy(dev, target.bundleId)
+		if err != nil {
+			tui.Err("%v", err)
+			return
+		}
+		target.bundleId = resolved
+	}
+
+	//
 	// If a bundle-id target is already installed, offer to decrypt the
 	// on-device build (e.g. TestFlight) instead of reinstalling from the
 	// App Store. Non-TTY aborts - no way to confirm.
@@ -893,6 +908,79 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 	}
 
 	return abs, nil
+}
+
+func resolveBundleByFuzzy(dev *device.Client, term string) (string, error) {
+	live := tui.NewLive()
+	live.Spin("searching installed apps for %q", term)
+
+	apps, err := dev.ListInstalledApps()
+	if err != nil {
+		live.Fail("list installed apps: %v", err)
+		return "", err
+	}
+
+	needle := strings.ToLower(term)
+	var matches []device.InstalledApp
+	for _, a := range apps {
+		if strings.Contains(strings.ToLower(a.BundleID), needle) ||
+			strings.Contains(strings.ToLower(a.DisplayName), needle) {
+			matches = append(matches, a)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		live.Fail("no installed app matches %q", term)
+		return "", fmt.Errorf("no match")
+	case 1:
+		live.OK("matched %s (%s)", matches[0].BundleID, matches[0].DisplayName)
+		return matches[0].BundleID, nil
+	default:
+		live.OK("%d matches for %q", len(matches), term)
+		options := make([]string, len(matches))
+		for i, m := range matches {
+			options[i] = fmt.Sprintf("%s — %s", m.BundleID, m.DisplayName)
+		}
+		idx, err := tui.Select("pick the app to decrypt", options)
+		if err != nil {
+			return "", err
+		}
+		return matches[idx].BundleID, nil
+	}
+}
+
+func uploadDecrypted(dev *device.Client, outLocal string) {
+	const remoteDir = "/var/mobile/Documents/ipadecrypt"
+	remotePath := path.Join(remoteDir, filepath.Base(outLocal))
+
+	live := tui.NewLive()
+	live.Spin("uploading → %s", remotePath)
+
+	f, err := os.Open(outLocal)
+	if err != nil {
+		live.Fail("open local: %v", err)
+		return
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		live.Fail("stat local: %v", err)
+		return
+	}
+
+	pr := newProgressReader(f, st.Size(), func(cur, total int64) {
+		live.Message("%s", transferProgressText(fmt.Sprintf("uploading → %s", remotePath), cur, total))
+		live.Progress(cur, total)
+	})
+
+	if err := dev.Upload(pr, remotePath, 0o644); err != nil {
+		live.Fail("upload failed: %v", err)
+		return
+	}
+
+	live.OK("→ %s", remotePath)
 }
 
 func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote string) {
