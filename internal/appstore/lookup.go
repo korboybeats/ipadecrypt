@@ -26,6 +26,7 @@ func (c *Client) LookupByBundleID(acc *Account, bundleID string) (App, error) {
 	u := fmt.Sprintf("https://%s%s?%s", iTunesDomain, lookupPath, q.Encode())
 
 	var out lookupResult
+
 	res, err := c.send(http.MethodGet, u, nil, nil, formatJSON, &out)
 	if err != nil {
 		return App{}, fmt.Errorf("lookup: %w", err)
@@ -58,6 +59,7 @@ func (c *Client) LookupByAppID(acc *Account, appID string) (App, error) {
 	u := fmt.Sprintf("https://%s%s?%s", iTunesDomain, lookupPath, q.Encode())
 
 	var out lookupResult
+
 	res, err := c.send(http.MethodGet, u, nil, nil, formatJSON, &out)
 	if err != nil {
 		return App{}, fmt.Errorf("lookup: %w", err)

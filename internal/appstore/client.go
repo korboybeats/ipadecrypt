@@ -23,10 +23,10 @@ func New(cookiesFile string) (*Client, error) {
 	hc := &http.Client{
 		Jar: jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Let login drive its own redirect chain.
 			if req.Referer() == authURL {
 				return http.ErrUseLastResponse
 			}
+
 			return nil
 		},
 	}
@@ -40,6 +40,7 @@ func guid() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return strings.ReplaceAll(strings.ToUpper(mac), ":", ""), nil
 }
 

@@ -75,6 +75,7 @@ func PatchForInstall(src, dst, target string, deviceFamily int, patchDeviceType,
 	defer r.Close()
 
 	var infoFile *zip.File
+
 	for _, f := range r.File {
 		if isMainAppInfoPlist(f.Name) {
 			infoFile = f
@@ -118,6 +119,7 @@ func PatchForInstall(src, dst, target string, deviceFamily int, patchDeviceType,
 			if err := writeBytes(f, w, plan.data); err != nil {
 				return res, fmt.Errorf("rewrite %s: %w", f.Name, err)
 			}
+
 			continue
 		}
 
@@ -135,6 +137,7 @@ func PatchForInstall(src, dst, target string, deviceFamily int, patchDeviceType,
 
 func isMainAppInfoPlist(name string) bool {
 	parts := strings.Split(name, "/")
+
 	return len(parts) == 3 &&
 		parts[0] == "Payload" &&
 		strings.HasSuffix(parts[1], ".app") &&
@@ -170,11 +173,13 @@ func planInfoPlist(f *zip.File, target string, deviceFamily int, patchDeviceType
 
 	data, err := io.ReadAll(rc)
 	rc.Close()
+
 	if err != nil {
 		return plan, err
 	}
 
 	var m map[string]any
+
 	format, err := plist.Unmarshal(data, &m)
 	if err != nil {
 		// Not a parseable plist; pass through unchanged.
@@ -215,6 +220,7 @@ func planInfoPlist(f *zip.File, target string, deviceFamily int, patchDeviceType
 	}
 
 	plan.data = newData
+
 	return plan, nil
 }
 
@@ -223,6 +229,7 @@ func readDeviceFamily(v any) []int {
 	if !ok {
 		return nil
 	}
+
 	out := make([]int, 0, len(arr))
 	for _, e := range arr {
 		switch n := e.(type) {
@@ -234,6 +241,7 @@ func readDeviceFamily(v any) []int {
 			out = append(out, n)
 		}
 	}
+
 	return out
 }
 
@@ -242,6 +250,7 @@ func toAnySlice(in []int) []any {
 	for i, v := range in {
 		out[i] = uint64(v)
 	}
+
 	return out
 }
 
@@ -251,6 +260,7 @@ func containsInt(haystack []int, needle int) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -292,6 +302,7 @@ func MainExecSHA256(ipaPath string) (execName, hexSum string, err error) {
 
 		data, err := io.ReadAll(rc)
 		rc.Close()
+
 		if err != nil {
 			return "", "", err
 		}
@@ -359,6 +370,7 @@ func AppInfo(ipaPath string) (bundleID, version string, err error) {
 
 		data, err := io.ReadAll(rc)
 		rc.Close()
+
 		if err != nil {
 			return "", "", err
 		}
@@ -390,12 +402,14 @@ func AppDirName(ipaPath string) (string, error) {
 		return "", fmt.Errorf("open %s: %w", ipaPath, err)
 	}
 	defer r.Close()
+
 	for _, f := range r.File {
 		parts := strings.Split(f.Name, "/")
 		if len(parts) >= 2 && parts[0] == "Payload" && strings.HasSuffix(parts[1], ".app") {
 			return parts[1], nil
 		}
 	}
+
 	return "", fmt.Errorf("no Payload/*.app/ directory in %s", ipaPath)
 }
 
@@ -422,6 +436,7 @@ func rewriteIPA(ipaPath string, skip func(name string) bool) (int, error) {
 	cleanup := func() { os.Remove(tmp) }
 
 	removed := 0
+
 	for _, f := range r.File {
 		if skip(f.Name) {
 			removed++
@@ -432,6 +447,7 @@ func rewriteIPA(ipaPath string, skip func(name string) bool) (int, error) {
 			w.Close()
 			out.Close()
 			cleanup()
+
 			return 0, fmt.Errorf("copy %s: %w", f.Name, err)
 		}
 	}
@@ -439,6 +455,7 @@ func rewriteIPA(ipaPath string, skip func(name string) bool) (int, error) {
 	if err := w.Close(); err != nil {
 		out.Close()
 		cleanup()
+
 		return 0, fmt.Errorf("close zip: %w", err)
 	}
 
@@ -463,6 +480,7 @@ func StripMetadata(ipaPath string) (bool, error) {
 	n, err := rewriteIPA(ipaPath, func(name string) bool {
 		return strings.EqualFold(filepath.Base(name), "iTunesMetadata.plist")
 	})
+
 	return n > 0, err
 }
 

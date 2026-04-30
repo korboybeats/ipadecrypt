@@ -41,6 +41,7 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", defaultUserAgent)
 	}
@@ -84,6 +85,7 @@ func plistBody(content map[string]any) ([]byte, error) {
 	if err := plist.NewEncoder(buf).Encode(content); err != nil {
 		return nil, fmt.Errorf("encode plist: %w", err)
 	}
+
 	return buf.Bytes(), nil
 }
 

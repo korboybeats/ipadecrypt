@@ -9,6 +9,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Version is set via -ldflags "-X main.Version=…" by GoReleaser.
+var Version = "dev"
+
 var (
 	rootDirOverride string
 
@@ -28,9 +31,10 @@ var (
 
 func main() {
 	root := &cobra.Command{
-		Use:   "ipadecrypt",
-		Short: "End-to-end FairPlay decrypter for App Store apps",
-		Long:  "ipadecrypt is an end-to-end suite for decrypting encrypted IPAs from the App Store with minimal user interaction.\n\nRun `ipadecrypt bootstrap` first to sign in and verify your device.",
+		Use:     "ipadecrypt",
+		Short:   "End-to-end FairPlay decrypter for App Store apps",
+		Long:    "ipadecrypt is an end-to-end suite for decrypting encrypted IPAs from the App Store with minimal user interaction.\n\nRun `ipadecrypt bootstrap` first to sign in and verify your device.",
+		Version: Version,
 	}
 
 	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",

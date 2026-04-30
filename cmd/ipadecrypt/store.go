@@ -31,6 +31,7 @@ func reauth(cfg *config.Config, as *appstore.Client) error {
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
+
 	return nil
 }
 
@@ -60,6 +61,7 @@ func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) e
 // acquireLicense. Any other error returns immediately.
 func withAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, retries int, onEvent func(authEvent), fn func() (T, error)) (T, error) {
 	var zero T
+
 	notify := func(e authEvent) {
 		if onEvent != nil {
 			onEvent(e)

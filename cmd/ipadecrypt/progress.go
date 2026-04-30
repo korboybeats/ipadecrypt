@@ -28,6 +28,7 @@ func (p *progressReader) Read(b []byte) (int, error) {
 			p.onProgress(p.read, p.total)
 		}
 	}
+
 	if err == io.EOF {
 		p.onProgress(p.read, p.total)
 	}

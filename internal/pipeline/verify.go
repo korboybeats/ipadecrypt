@@ -31,6 +31,7 @@ type VerifyResult struct {
 
 func VerifyCryptid(ipaPath string) (VerifyResult, error) {
 	var res VerifyResult
+
 	r, err := zip.OpenReader(ipaPath)
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", ipaPath, err)
@@ -41,6 +42,7 @@ func VerifyCryptid(ipaPath string) (VerifyResult, error) {
 		if !strings.HasPrefix(f.Name, "Payload/") {
 			continue
 		}
+
 		if f.FileInfo().IsDir() {
 			continue
 		}
@@ -49,16 +51,20 @@ func VerifyCryptid(ipaPath string) (VerifyResult, error) {
 		if err != nil {
 			return res, fmt.Errorf("open %s: %w", f.Name, err)
 		}
+
 		head := make([]byte, 4)
 		if n, _ := io.ReadFull(rc, head); n < 4 || !isMachOMagic(head) {
 			rc.Close()
 			continue
 		}
+
 		rest, err := io.ReadAll(rc)
 		rc.Close()
+
 		if err != nil {
 			return res, fmt.Errorf("read %s: %w", f.Name, err)
 		}
+
 		data := append(head, rest...)
 
 		encrypted, err := sliceHasCryptid(data)
@@ -66,11 +72,13 @@ func VerifyCryptid(ipaPath string) (VerifyResult, error) {
 			res.Skipped = append(res.Skipped, f.Name)
 			continue
 		}
+
 		res.Scanned++
 		if encrypted {
 			res.Encrypted = append(res.Encrypted, f.Name)
 		}
 	}
+
 	return res, nil
 }
 
@@ -105,14 +113,17 @@ func sliceHasCryptid(data []byte) (bool, error) {
 	case mhCigam, mhCigam64:
 		return checkThin(data, true)
 	}
+
 	return false, errors.New("not mach-o")
 }
 
 func checkFat(data []byte, is64 bool) (bool, error) {
 	bo := binary.BigEndian // fat headers are always big-endian on disk regardless of arch
+
 	if len(data) < 8 {
 		return false, errors.New("fat header truncated")
 	}
+
 	nfat := bo.Uint32(data[4:8])
 	if nfat == 0 || nfat > 32 {
 		return false, fmt.Errorf("implausible nfat_arch=%d", nfat)
@@ -137,25 +148,30 @@ func checkFat(data []byte, is64 bool) (bool, error) {
 			sliceOff = uint64(bo.Uint32(data[off+8 : off+12]))
 			sliceSize = uint64(bo.Uint32(data[off+12 : off+16]))
 		}
+
 		off += archSize
 
 		if sliceOff+sliceSize > uint64(len(data)) {
 			return false, errors.New("fat slice out of range")
 		}
+
 		if sliceSize < 4 {
 			continue
 		}
 
 		slice := data[sliceOff : sliceOff+sliceSize]
 		m := binary.LittleEndian.Uint32(slice[:4])
+
 		enc, err := checkThin(slice, m == mhCigam || m == mhCigam64)
 		if err != nil {
 			return false, err
 		}
+
 		if enc {
 			return true, nil
 		}
 	}
+
 	return false, nil
 }
 
@@ -173,6 +189,7 @@ func checkThin(data []byte, swap bool) (bool, error) {
 	is64 := magic == mhMagic64 || magic == mhCigam64
 	ncmds := bo.Uint32(data[16:20])
 	sizeofcmds := bo.Uint32(data[20:24])
+
 	headerSize := 28
 	if is64 {
 		headerSize = 32
@@ -191,21 +208,27 @@ func checkThin(data []byte, swap bool) (bool, error) {
 		if p+8 > len(data) {
 			return false, errors.New("load cmd truncated")
 		}
+
 		cmd := bo.Uint32(data[p : p+4])
+
 		cmdSize := bo.Uint32(data[p+4 : p+8])
 		if cmdSize < 8 || int(cmdSize) > len(data)-p {
 			return false, fmt.Errorf("bad cmdsize=%d", cmdSize)
 		}
+
 		if (is64 && cmd == lcEncryptionInfo64) || (!is64 && cmd == lcEncryptionInfo) {
 			if int(cmdSize) < 20 {
 				return false, errors.New("LC_ENCRYPTION_INFO truncated")
 			}
+
 			cryptid := bo.Uint32(data[p+16 : p+20])
 			if cryptid != 0 {
 				return true, nil
 			}
 		}
+
 		p += int(cmdSize)
 	}
+
 	return false, nil
 }

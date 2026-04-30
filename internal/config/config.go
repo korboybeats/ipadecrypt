@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 )
@@ -13,12 +14,20 @@ import (
 const SchemaVersion = 1
 
 type Config struct {
-	Version  int      `json:"version"`
-	Apple    Apple    `json:"apple"`
-	Device   Device   `json:"device"`
-	Versions Versions `json:"versions,omitempty"`
+	Version     int         `json:"version"`
+	Apple       Apple       `json:"apple"`
+	Device      Device      `json:"device"`
+	Versions    Versions    `json:"versions,omitempty"`
+	UpdateCheck UpdateCheck `json:"updateCheck,omitzero"`
 
 	path string
+}
+
+type UpdateCheck struct {
+	CheckedAt  time.Time `json:"checkedAt,omitzero"`
+	LatestTag  string    `json:"latestTag,omitempty"`
+	HTMLURL    string    `json:"htmlUrl,omitempty"`
+	NotifiedAt time.Time `json:"notifiedAt,omitzero"`
 }
 
 type Versions struct {
@@ -84,6 +93,7 @@ func (c *Config) Save() error {
 	}
 
 	tmp := c.path + ".tmp"
+
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", tmp, err)

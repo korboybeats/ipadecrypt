@@ -38,6 +38,7 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 	}
 
 	url := endpoint
+
 	var (
 		res *http.Response
 		out loginResult
@@ -57,6 +58,7 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 		}
 
 		out = loginResult{}
+
 		res, err = c.send(http.MethodPost, url, map[string]string{
 			"Content-Type": "application/x-www-form-urlencoded",
 		}, body, formatXML, &out)
@@ -68,9 +70,11 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		if !retry {
 			break
 		}
+
 		if next != "" {
 			url = next
 		}
@@ -81,6 +85,7 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 	}
 
 	addr := out.Account.Address
+
 	return &Account{
 		Name:                strings.TrimSpace(addr.FirstName + " " + addr.LastName),
 		Email:               out.Account.Email,
@@ -104,6 +109,7 @@ func interpretLogin(res *http.Response, out *loginResult, attempt int, authCode 
 		if loc == "" {
 			return "", false, errors.New("login: redirect without Location")
 		}
+
 		return loc, true, nil
 	}
 
@@ -123,6 +129,7 @@ func interpretLogin(res *http.Response, out *loginResult, attempt int, authCode 
 		if out.CustomerMessage != "" {
 			return "", false, errors.New(out.CustomerMessage)
 		}
+
 		return "", false, errors.New("login failed")
 	}
 

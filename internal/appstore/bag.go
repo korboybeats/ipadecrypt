@@ -22,6 +22,7 @@ func (c *Client) bag() (string, error) {
 	url := fmt.Sprintf("https://%s%s?guid=%s", initDomain, initPath, g)
 
 	var out bagResult
+
 	res, err := c.send(http.MethodGet, url, map[string]string{"Accept": "application/xml"}, nil, formatXML, &out)
 	if err != nil {
 		return "", fmt.Errorf("bag: %w", err)

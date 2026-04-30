@@ -63,6 +63,7 @@ func (t DownloadTicket) FileSize() int64 {
 			return int64(n)
 		}
 	}
+
 	return 0
 }
 
@@ -70,6 +71,7 @@ func metaString(m map[string]any, key string) string {
 	if v, ok := m[key]; ok {
 		return fmt.Sprintf("%v", v)
 	}
+
 	return ""
 }
 
@@ -81,10 +83,12 @@ func metaIntSlice(m map[string]any, key string) []int {
 	if !ok {
 		return nil
 	}
+
 	arr, ok := v.([]any)
 	if !ok {
 		return nil
 	}
+
 	out := make([]int, 0, len(arr))
 	for _, e := range arr {
 		switch n := e.(type) {
@@ -98,6 +102,7 @@ func metaIntSlice(m map[string]any, key string) []int {
 			out = append(out, int(n))
 		}
 	}
+
 	return out
 }
 
@@ -205,6 +210,7 @@ func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath s
 	if err != nil && !os.IsNotExist(err) {
 		return DownloadOutput{}, fmt.Errorf("download: stat outPath: %w", err)
 	}
+
 	if err == nil && info.IsDir() {
 		return DownloadOutput{}, fmt.Errorf("download: outPath %q is a directory; CompleteDownload expects a file path", outPath)
 	}
@@ -267,9 +273,11 @@ func fetchToFile(hc *http.Client, url, dst string, total int64, onProgress func(
 			if err := f.Truncate(0); err != nil {
 				return fmt.Errorf("truncate %s: %w", dst, err)
 			}
+
 			if _, err := f.Seek(0, io.SeekStart); err != nil {
 				return fmt.Errorf("seek %s: %w", dst, err)
 			}
+
 			resumeFrom = 0
 		}
 	default:
@@ -314,11 +322,13 @@ type progressWriter struct {
 func (p *progressWriter) Write(b []byte) (int, error) {
 	n, err := p.w.Write(b)
 	p.written += int64(n)
+
 	now := time.Now()
 	if now.Sub(p.last) >= 100*time.Millisecond {
 		p.last = now
 		p.onProgress(p.written, p.total)
 	}
+
 	return n, err
 }
 
@@ -435,6 +445,7 @@ func writeMetadataEntry(zw *zip.Writer, metadata map[string]any, acc *Account) e
 	for k, v := range metadata {
 		out[k] = v
 	}
+
 	out["apple-id"] = acc.Email
 	out["userName"] = acc.Email
 

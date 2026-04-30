@@ -32,6 +32,7 @@ func IsTTY() bool {
 	if !ok {
 		return false
 	}
+
 	return term.IsTerminal(int(f.Fd()))
 }
 
@@ -58,7 +59,9 @@ func Spacer() { fmt.Fprintln(Out) }
 // Step prints a wizard-style step header with a leading blank line.
 func Step(n, total int, title string) {
 	head := fmt.Sprintf("Step %d/%d · %s", n, total, title)
+
 	fmt.Fprintln(Out)
+
 	if useColor() {
 		fmt.Fprintln(Out, paint(ansiCyan+ansiBold, "▎")+" "+paint(ansiBold, head))
 	} else {
@@ -86,22 +89,28 @@ func Fields(kv ...string) {
 	if len(kv)%2 != 0 {
 		return
 	}
+
 	var rows [][2]string
+
 	for i := 0; i < len(kv); i += 2 {
 		if kv[i+1] == "" {
 			continue
 		}
+
 		rows = append(rows, [2]string{kv[i], kv[i+1]})
 	}
+
 	if len(rows) == 0 {
 		return
 	}
+
 	maxKey := 0
 	for _, r := range rows {
 		if len(r[0]) > maxKey {
 			maxKey = len(r[0])
 		}
 	}
+
 	for _, r := range rows {
 		pad := strings.Repeat(" ", maxKey-len(r[0]))
 		fmt.Fprintln(Out, "    "+paint(ansiDim, r[0]+":")+pad+"  "+r[1])
@@ -138,6 +147,7 @@ func Erase(n int) {
 	if !IsTTY() || n <= 0 {
 		return
 	}
+
 	fmt.Fprintf(Out, "\x1b[%dA\x1b[0J", n)
 }
 
@@ -147,10 +157,12 @@ func Erase(n int) {
 // Prompt adds ": " itself.
 func Prompt(label string) (string, error) {
 	writePrompt(label)
+
 	s, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", err
 	}
+
 	return strings.TrimRight(strings.TrimRight(s, "\n"), "\r"), nil
 }
 
@@ -160,13 +172,16 @@ func PromptDefault(label, def string) (string, error) {
 	if def != "" {
 		shown = fmt.Sprintf("%s [%s]", label, def)
 	}
+
 	s, err := Prompt(shown)
 	if err != nil {
 		return "", err
 	}
+
 	if s == "" {
 		return def, nil
 	}
+
 	return s, nil
 }
 
@@ -174,18 +189,24 @@ func PromptDefault(label, def string) (string, error) {
 // when stdin isn't a TTY (e.g. piped).
 func PromptPassword(label string) (string, error) {
 	writePrompt(label)
+
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		s, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil && err != io.EOF {
 			return "", err
 		}
+
 		return strings.TrimRight(strings.TrimRight(s, "\n"), "\r"), nil
 	}
+
 	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+
 	fmt.Fprintln(Out)
+
 	if err != nil {
 		return "", err
 	}
+
 	return string(pw), nil
 }
 
@@ -196,6 +217,7 @@ func Select(label string, options []string) (int, error) {
 	if len(options) == 0 {
 		return -1, fmt.Errorf("select: no options")
 	}
+
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
 		return 0, nil
@@ -212,14 +234,18 @@ func Select(label string, options []string) (int, error) {
 		if !first {
 			fmt.Fprintf(Out, "\x1b[%dA", len(options)+1)
 		}
+
 		fmt.Fprint(Out, "\r\x1b[K  "+paint(ansiCyan, "▸")+" "+label+"\r\n")
+
 		for i, opt := range options {
 			fmt.Fprint(Out, "\r\x1b[K")
+
 			if i == cursor {
 				fmt.Fprint(Out, "    "+paint(ansiCyan, "›")+" "+paint(ansiBold, opt))
 			} else {
 				fmt.Fprint(Out, "      "+paint(ansiDim, opt))
 			}
+
 			fmt.Fprint(Out, "\r\n")
 		}
 	}
@@ -232,9 +258,11 @@ func Select(label string, options []string) (int, error) {
 		if err != nil {
 			return -1, err
 		}
+
 		if n == 0 {
 			continue
 		}
+
 		switch {
 		case buf[0] == '\r' || buf[0] == '\n':
 			return cursor, nil
@@ -253,15 +281,18 @@ func Select(label string, options []string) (int, error) {
 					cursor++
 				}
 			}
+
 			draw(false)
 		case buf[0] == 'k':
 			if cursor > 0 {
 				cursor--
+
 				draw(false)
 			}
 		case buf[0] == 'j':
 			if cursor < len(options)-1 {
 				cursor++
+
 				draw(false)
 			}
 		}
@@ -271,7 +302,9 @@ func Select(label string, options []string) (int, error) {
 // PressEnter prints a dim message and waits for the user to hit Enter.
 func PressEnter(msg string) error {
 	fmt.Fprint(Out, "  "+paint(ansiCyan, "▸")+" "+paint(ansiDim, msg+" (press Enter)")+" ")
+
 	_, err := bufio.NewReader(os.Stdin).ReadString('\n')
+
 	return err
 }
 
@@ -311,6 +344,7 @@ func NewLive() *Live {
 	} else {
 		close(l.done)
 	}
+
 	return l
 }
 
@@ -343,6 +377,7 @@ func (l *Live) setMessage(msg string, clearBar bool) {
 	l.mu.Lock()
 
 	prev := l.state
+
 	l.state.msg = msg
 	if clearBar {
 		l.state.cur = 0
@@ -422,9 +457,12 @@ var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"
 
 func (l *Live) loop() {
 	defer close(l.done)
+
 	t := time.NewTicker(80 * time.Millisecond)
 	defer t.Stop()
+
 	i := 0
+
 	for {
 		select {
 		case <-l.stop:
@@ -450,6 +488,7 @@ func (l *Live) render(tick int) {
 
 	if st.hasBar {
 		line += " "
+
 		line += renderBar(st.cur, st.max)
 		if st.detail != "" {
 			line += " " + paint(ansiDim, st.detail)
@@ -501,20 +540,26 @@ func truncate(s string, max int) string {
 	}
 
 	var b strings.Builder
+
 	inEsc := false
 	visible := 0
+
 	for _, r := range s {
 		if r == '\x1b' {
 			inEsc = true
+
 			b.WriteRune(r)
+
 			continue
 		}
 
 		if inEsc {
 			b.WriteRune(r)
+
 			if r == 'm' {
 				inEsc = false
 			}
+
 			continue
 		}
 
@@ -523,6 +568,7 @@ func truncate(s string, max int) string {
 		}
 
 		b.WriteRune(r)
+
 		visible++
 	}
 
@@ -534,6 +580,7 @@ func truncate(s string, max int) string {
 func visibleWidth(s string) int {
 	n := 0
 	inEsc := false
+
 	for _, r := range s {
 		if r == '\x1b' {
 			inEsc = true
@@ -544,6 +591,7 @@ func visibleWidth(s string) int {
 			if r == 'm' {
 				inEsc = false
 			}
+
 			continue
 		}
 

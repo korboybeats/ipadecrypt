@@ -85,6 +85,7 @@ func sshAuthMethods(a config.DeviceAuth) ([]ssh.AuthMethod, error) {
 		} else {
 			signer, err = ssh.ParsePrivateKey(data)
 		}
+
 		if err != nil {
 			return nil, fmt.Errorf("parse key %s: %w", path, err)
 		}
@@ -122,17 +123,18 @@ func (c *Client) Run(cmd string) (string, string, int, error) {
 	defer sess.Close()
 
 	var so, se bytes.Buffer
+
 	sess.Stdout = &so
 	sess.Stderr = &se
 
 	err = sess.Run(cmd)
 
 	exit := 0
+
 	if err != nil {
 		var ee *ssh.ExitError
 		if errors.As(err, &ee) {
 			exit = ee.ExitStatus()
-			err = nil
 		} else {
 			return so.String(), se.String(), -1, err
 		}
@@ -170,6 +172,7 @@ func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, 
 	} else {
 		sess.Stdout = &soBuf
 	}
+
 	if stderrW != nil {
 		sess.Stderr = io.MultiWriter(stderrW, &seBuf)
 	} else {
@@ -179,11 +182,11 @@ func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, 
 	err = sess.Run(full)
 
 	exit := 0
+
 	if err != nil {
 		var ee *ssh.ExitError
 		if errors.As(err, &ee) {
 			exit = ee.ExitStatus()
-			err = nil
 		} else {
 			return soBuf.String(), seBuf.String(), -1, err
 		}
@@ -218,6 +221,7 @@ func (c *Client) Upload(src io.Reader, dst string, mode os.FileMode) error {
 	if _, err := f.ReadFromWithConcurrency(src, 0); err != nil {
 		f.Close()
 		c.Remove(dst)
+
 		return fmt.Errorf("upload %s: %w", dst, err)
 	}
 

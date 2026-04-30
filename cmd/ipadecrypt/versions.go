@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/londek/ipadecrypt/internal/tui"
+	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -28,6 +30,7 @@ func parseVersionsArg(raw string) (versionsTarget, error) {
 	if err != nil {
 		return versionsTarget{}, err
 	}
+
 	if dt.localPath != "" {
 		return versionsTarget{}, errors.New("versions: local IPA paths are not supported - pass a bundle-id, app-store-id, or app-store-url")
 	}
@@ -42,6 +45,9 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	upd := updater.Start(context.Background(), Version, cfg)
+	defer upd.Wait()
+
 	target, err := parseVersionsArg(args[0])
 	if err != nil {
 		tui.Err("%v", err)
@@ -51,6 +57,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 	if cfg.Apple.Account == nil {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to sign in")
+
 		return
 	}
 
@@ -58,6 +65,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		if err := showVersionsWarning(); err != nil {
 			return
 		}
+
 		cfg.Versions.WarningAccepted = true
 		if err := cfg.Save(); err != nil {
 			tui.Err("save config: %v", err)
@@ -80,20 +88,21 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 
 	app, err := lookupVersionsTargetApp(as, cfg.Apple.Account, target)
 	if err != nil {
-		live.Fail("lookup failed")
-		tui.Err("lookup: %v", err)
+		live.Fail("lookup failed: %v", err)
 		return
 	}
 
 	live.OK("found %s (%s)", app.BundleID, app.Name)
 
 	var logPath string
+
 	if versionsLogResponses {
 		p, err := paths.VersionsLog()
 		if err != nil {
 			tui.Err("log path: %v", err)
 			return
 		}
+
 		logPath = p
 	}
 
@@ -102,8 +111,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 
 	list, err := listVersionsWithAuth(cfg, as, app)
 	if err != nil {
-		live.Fail("list versions failed")
-		tui.Err("list: %v", err)
+		live.Fail("list versions failed: %v", err)
 		return
 	}
 
@@ -120,11 +128,14 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 	cache, err := loadVersionsCache(cachePath)
 	if err != nil {
 		tui.Warn("load cache: %v (starting fresh)", err)
+
 		cache = &versionsCache{BundleID: app.BundleID, Versions: map[string]cachedVersion{}}
 	}
+
 	if cache.Versions == nil {
 		cache.Versions = map[string]cachedVersion{}
 	}
+
 	cache.BundleID = app.BundleID
 
 	if err := runVersionsTUI(cfg, as, app, list, cache, cachePath, logPath); err != nil {
@@ -136,6 +147,7 @@ func lookupVersionsTargetApp(as *appstore.Client, acc *appstore.Account, target 
 	if target.appId != "" {
 		return as.LookupByAppID(acc, target.appId)
 	}
+
 	return as.LookupByBundleID(acc, target.bundleId)
 }
 
@@ -185,9 +197,11 @@ func showVersionsWarning() error {
 		if err != nil {
 			return err
 		}
+
 		if n == 0 {
 			continue
 		}
+
 		switch buf[0] {
 		case '\r', '\n':
 			fmt.Fprintln(w)
@@ -224,16 +238,19 @@ func (v *cachedVersion) reconcileFromRaw() {
 	if v.Raw == nil {
 		return
 	}
+
 	if v.DisplayVersion == "" {
 		if s, ok := v.Raw["bundleShortVersionString"].(string); ok {
 			v.DisplayVersion = s
 		}
 	}
+
 	if v.BundleVersion == "" {
 		if s, ok := v.Raw["bundleVersion"].(string); ok {
 			v.BundleVersion = s
 		}
 	}
+
 	if len(v.SupportedDevices) == 0 {
 		if arr, ok := v.Raw["softwareSupportedDeviceIds"].([]any); ok {
 			for _, e := range arr {
@@ -256,6 +273,7 @@ func loadVersionsCache(path string) (*versionsCache, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return &versionsCache{Versions: map[string]cachedVersion{}}, nil
 		}
+
 		return nil, err
 	}
 
@@ -263,13 +281,16 @@ func loadVersionsCache(path string) (*versionsCache, error) {
 	if err := json.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+
 	if c.Versions == nil {
 		c.Versions = map[string]cachedVersion{}
 	}
+
 	for k, v := range c.Versions {
 		v.reconcileFromRaw()
 		c.Versions[k] = v
 	}
+
 	return c, nil
 }
 
@@ -286,21 +307,26 @@ func (c *versionsCache) save(path string) error {
 	}
 
 	tmp := path + ".tmp"
+
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
+
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		return err
 	}
+
 	if err := f.Sync(); err != nil {
 		f.Close()
 		return err
 	}
+
 	if err := f.Close(); err != nil {
 		return err
 	}
+
 	return os.Rename(tmp, path)
 }
 

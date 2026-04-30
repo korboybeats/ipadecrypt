@@ -17,6 +17,7 @@ func NewPaths(root string) (*Paths, error) {
 		if err != nil {
 			return nil, fmt.Errorf("home dir: %w", err)
 		}
+
 		root = filepath.Join(home, ".ipadecrypt")
 	}
 
