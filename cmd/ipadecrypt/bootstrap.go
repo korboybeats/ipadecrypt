@@ -33,7 +33,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	// ---- Step 1: App Store sign-in -----------------------------------
 
-	tui.Step(1, 4, "Sign in to the App Store")
+	tui.Step(1, 5, "Sign in to the App Store")
 	tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
 
 	if cfg.Apple.Email == "" {
@@ -113,7 +113,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	// ---- Step 2: connect to device -----------------------------------
 
-	tui.Step(2, 4, "Connect to the jailbroken device")
+	tui.Step(2, 5, "Connect to the jailbroken device")
 	tui.Info("ipadecrypt drives the iPhone over SSH. On the device install from Sileo:")
 	tui.Bullet("OpenSSH   search \"OpenSSH\" in Sileo")
 	tui.Info("Find the device IP in Settings → Wi-Fi.")
@@ -249,7 +249,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	// ---- Step 3: device prerequisites --------------------------------
 
-	tui.Step(3, 4, "Install device prerequisites")
+	tui.Step(3, 5, "Install device prerequisites")
 	tui.Info("ipadecrypt needs these packages on the jailbroken device:")
 	tui.Bullet("AppSync Unified   bypasses installd's signature check")
 	tui.Bullet("                  add repo: https://lukezgd.github.io/repo")
@@ -321,7 +321,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	// ---- Step 4: helper upload + verify ------------------------------
 
-	tui.Step(4, 4, "Install the decrypt helper")
+	tui.Step(4, 5, "Install the decrypt helper")
 	tui.Info("A small embedded C binary that reads FairPlay-decrypted pages from a\nsuspended task. Uploaded once to /var/mobile/Media/ipadecrypt/helpers/\nand cached by SHA thereafter.")
 
 	dev, err := device.Connect(context.Background(), cfg.Device)
@@ -348,6 +348,29 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	}
 
 	live.OK("helper ready at %s", helperPath)
+
+	// ---- Step 5: auto-confirm tweak ----------------------------------
+
+	tui.Step(5, 5, "Install the auto-confirm tweak")
+	tui.Info("A SpringBoard tweak that auto-dismisses the App Store \"Download an\nolder version\" prompt during the StoreKit decrypt path. Without it,\nyou tap Download manually each time.")
+
+	if dev.IsAutoalertInstalled() {
+		tui.OK("ipadecryptautoalert already installed")
+	} else {
+		live = tui.NewLive()
+		live.Spin("installing ipadecryptautoalert")
+		if err := dev.EnsureAutoalert(); err != nil {
+			live.Fail("install: %v", err)
+			tui.Info("StoreKit downloads will still work but you'll have to tap 'Download' manually")
+		} else {
+			live.Spin("respringing to load tweak")
+			if err := dev.Respring(); err != nil {
+				live.Fail("respring: %v", err)
+			} else {
+				live.OK("installed and respringing")
+			}
+		}
+	}
 
 	tui.Spacer()
 	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>` to decrypt an app")

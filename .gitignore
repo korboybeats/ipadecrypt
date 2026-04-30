@@ -2,3 +2,8 @@
 .claude
 dist/
 .grepai/
+
+# theos build artifacts
+.theos/
+helper/ipadecryptautoalert/packages/
+helper/ipadecryptautoalert/obj/

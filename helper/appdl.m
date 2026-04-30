@@ -65,8 +65,12 @@ static BOOL isAllDigits(NSString *s) {
 // Initiate the purchase. Returns 0 on accepted-by-appstored, 2 on error
 // reported in the completion block.
 static int performAppDownload(NSString *appID) {
+    // STDRDL = redownload from library: no purchase transaction, no Face ID
+    // prompt, no install confirmation. Apps must already be in the user's
+    // App Store library (free apps you've previously gotten count). For
+    // never-acquired apps appstored returns an error.
     NSString *buyParams = [NSString stringWithFormat:
-        @"productType=C&price=0&salableAdamId=%@&pricingParameters=STDQ", appID];
+        @"productType=C&price=0&salableAdamId=%@&pricingParameters=STDRDL", appID];
 
     NSDictionary *lookupDict = @{
         @"kind": @"iosSoftware",
