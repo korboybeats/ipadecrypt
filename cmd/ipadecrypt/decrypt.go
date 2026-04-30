@@ -229,7 +229,12 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	//
 
 	if target.bundleId != "" && !strings.Contains(target.bundleId, ".") {
-		resolved, err := resolveBundleByFuzzy(dev, target.bundleId)
+		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+		if err != nil {
+			tui.Err("appstore client: %v", err)
+			return
+		}
+		resolved, err := resolveBundleByFuzzy(dev, as, cfg.Apple.Account, target.bundleId)
 		if err != nil {
 			tui.Err("%v", err)
 			return
@@ -975,9 +980,17 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 
 	live.Spin("requesting App Store download for %s", bundleID)
 
+	var lastErrorReason string
 	code, err := dev.RunAppdl(appdlPath, bundleID, func(line string) {
 		if strings.HasPrefix(line, "@evt ") {
-			tui.Info("  %s", strings.TrimPrefix(line, "@evt "))
+			ev := strings.TrimPrefix(line, "@evt ")
+			if strings.HasPrefix(ev, "event=error") {
+				if r := extractAttr(ev, "reason"); r != "" {
+					lastErrorReason = r
+				}
+			} else {
+				tui.Info("  %s", ev)
+			}
 		}
 	})
 	if err != nil {
@@ -985,7 +998,12 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 		return false
 	}
 	if code != 0 {
-		live.Fail("appdl exit %d", code)
+		if lastErrorReason != "" {
+			live.Fail("App Store rejected the download: %s", lastErrorReason)
+			tui.Info("often this means the device's iOS is older than the app's MinimumOSVersion and no compatible build is available for this Apple ID")
+		} else {
+			live.Fail("appdl exit %d", code)
+		}
 		return false
 	}
 
@@ -1036,7 +1054,33 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 	return false
 }
 
-func resolveBundleByFuzzy(dev *device.Client, term string) (string, error) {
+// extractAttr pulls a "key=\"value\"" or "key=value" out of a one-line @evt
+// payload. Returns empty string if the key isn't found.
+func extractAttr(line, key string) string {
+	prefix := key + "="
+	idx := strings.Index(line, prefix)
+	if idx < 0 {
+		return ""
+	}
+	rest := line[idx+len(prefix):]
+	if strings.HasPrefix(rest, "\"") {
+		rest = rest[1:]
+		end := strings.Index(rest, "\"")
+		if end < 0 {
+			return rest
+		}
+		return rest[:end]
+	}
+	end := strings.Index(rest, " ")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
+// resolveBundleByFuzzy first searches installed apps; if nothing matches,
+// it falls back to the public iTunes search API.
+func resolveBundleByFuzzy(dev *device.Client, as *appstore.Client, acc *appstore.Account, term string) (string, error) {
 	live := tui.NewLive()
 	live.Spin("searching installed apps for %q", term)
 
@@ -1055,25 +1099,58 @@ func resolveBundleByFuzzy(dev *device.Client, term string) (string, error) {
 		}
 	}
 
-	switch len(matches) {
-	case 0:
-		live.Fail("no installed app matches %q", term)
-		return "", fmt.Errorf("no match")
-	case 1:
-		live.OK("matched %s (%s)", matches[0].BundleID, matches[0].DisplayName)
-		return matches[0].BundleID, nil
-	default:
-		live.OK("%d matches for %q", len(matches), term)
-		options := make([]string, len(matches))
-		for i, m := range matches {
-			options[i] = fmt.Sprintf("%s — %s", m.BundleID, m.DisplayName)
-		}
-		idx, err := tui.Select("pick the app to decrypt", options)
-		if err != nil {
-			return "", err
-		}
-		return matches[idx].BundleID, nil
+	if len(matches) == 0 {
+		live.OK("no installed match - searching App Store")
+		return resolveBundleByAppStoreSearch(as, acc, term)
 	}
+
+	live.OK("%d installed match(es) for %q", len(matches), term)
+	options := make([]string, len(matches)+1)
+	for i, m := range matches {
+		options[i] = fmt.Sprintf("%s — %s", m.BundleID, m.DisplayName)
+	}
+	options[len(matches)] = "(none of these — search App Store)"
+	idx, err := tui.Select("pick the app to decrypt", options)
+	if err != nil {
+		return "", err
+	}
+	if idx == len(matches) {
+		return resolveBundleByAppStoreSearch(as, acc, term)
+	}
+	return matches[idx].BundleID, nil
+}
+
+func resolveBundleByAppStoreSearch(as *appstore.Client, acc *appstore.Account, term string) (string, error) {
+	live := tui.NewLive()
+	live.Spin("App Store search for %q", term)
+
+	results, err := as.Search(acc, term, 10)
+	if err != nil {
+		live.Fail("search: %v", err)
+		return "", err
+	}
+	if len(results) == 0 {
+		live.Fail("no App Store matches for %q", term)
+		return "", fmt.Errorf("no match")
+	}
+
+	live.OK("%d App Store matches for %q", len(results), term)
+
+	if len(results) == 1 {
+		r := results[0]
+		tui.Info("→ %s — %s by %s", r.BundleID, r.Name, r.ArtistName)
+		return r.BundleID, nil
+	}
+
+	options := make([]string, len(results))
+	for i, r := range results {
+		options[i] = fmt.Sprintf("%s — %s by %s", r.BundleID, r.Name, r.ArtistName)
+	}
+	idx, err := tui.Select("pick the app to decrypt", options)
+	if err != nil {
+		return "", err
+	}
+	return results[idx].BundleID, nil
 }
 
 func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote string) {
