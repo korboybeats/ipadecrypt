@@ -357,17 +357,28 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	if dev.IsAutoalertInstalled() {
 		tui.OK("ipadecryptautoalert already installed")
 	} else {
-		live = tui.NewLive()
-		live.Spin("installing ipadecryptautoalert")
-		if err := dev.EnsureAutoalert(); err != nil {
-			live.Fail("install: %v", err)
-			tui.Info("StoreKit downloads will still work but you'll have to tap 'Download' manually")
+		idx, err := tui.Select("install ipadecryptautoalert?", []string{
+			"yes (installs the .deb and resprings SpringBoard)",
+			"skip (you'll tap Download manually each time)",
+		})
+		if err != nil {
+			return
+		}
+		if idx == 1 {
+			tui.Info("skipped - you can re-run bootstrap any time to install it")
 		} else {
-			live.Spin("respringing to load tweak")
-			if err := dev.Respring(); err != nil {
-				live.Fail("respring: %v", err)
+			live = tui.NewLive()
+			live.Spin("installing ipadecryptautoalert")
+			if err := dev.EnsureAutoalert(); err != nil {
+				live.Fail("install: %v", err)
+				tui.Info("StoreKit downloads will still work but you'll have to tap 'Download' manually")
 			} else {
-				live.OK("installed and respringing")
+				live.Spin("respringing to load tweak")
+				if err := dev.Respring(); err != nil {
+					live.Fail("respring: %v", err)
+				} else {
+					live.OK("installed and respringing")
+				}
 			}
 		}
 	}
