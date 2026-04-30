@@ -117,6 +117,7 @@ static int performAppDownload(NSString *appID) {
 
         if (responses.count == 0) {
             ERR("no responses from appstored");
+            EVT("event=error reason=\"no responses from appstored\"");
             rc = 2;
             dispatch_semaphore_signal(sem);
             return;
@@ -126,8 +127,11 @@ static int performAppDownload(NSString *appID) {
             NSError *responseError = ((NSError * (*)(id, SEL))objc_msgSend)(
                 response, sel_registerName("error"));
             if (responseError) {
-                ERR("appstored: %s",
-                    [[responseError localizedDescription] UTF8String] ?: "(unknown error)");
+                NSString *desc = [responseError localizedDescription] ?: @"(unknown)";
+                NSString *escaped = [desc stringByReplacingOccurrencesOfString:@"\"" withString:@"'"];
+                ERR("appstored: %s", desc.UTF8String);
+                EVT("event=error reason=\"%s\" code=%ld",
+                    escaped.UTF8String, (long)responseError.code);
                 rc = 2;
             }
         }
