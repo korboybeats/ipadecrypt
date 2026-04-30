@@ -22,7 +22,8 @@ This fork adds a handful of QoL features on top of upstream:
 
 - **SSH port + multi-host failover.** Bootstrap prompts for a non-default SSH port. `host` accepts a comma-separated list of IPs; the first reachable one is used (handy if your phone hops between Wi-Fi networks).
 - **Fuzzy target resolution.** `ipadecrypt decrypt messenger` scans installed apps and matches against bundle ID + display name. Single match auto-selects; multiple matches prompt to pick.
-- **On-device StoreKit download path.** New menu option that triggers the device's own App Store flow via `SKUIItem` + `SKUIItemStateCenter`. Apple's CDN serves the latest version compatible with the device's iOS. You confirm the install prompt on the device; ipadecrypt then decrypts the freshly-installed bundle.
+- **On-device StoreKit download path.** New menu option that triggers the device's own App Store flow via `SKUIItem` + `SKUIItemStateCenter`. Apple's CDN serves the latest version compatible with the device's iOS. The download uses `STDRDL` (redownload-from-library) pricing, which skips the Face ID purchase confirmation. ipadecrypt then decrypts the freshly-installed bundle.
+- **Auto-confirm tweak (`ipadecryptautoalert`).** Bundled SpringBoard tweak (auto-installed via dpkg during bootstrap) that dismisses the "Download an older version of this app?" prompt automatically during the StoreKit path. Gated by a sentinel file so it only fires while ipadecrypt is actively running, and only on that specific alert.
 - **Decrypted IPA stays on device.** The output IPA is written to `/var/mobile/Documents/ipadecrypt/` and not cleaned up — easy to grab from the device later.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
 - **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions).
