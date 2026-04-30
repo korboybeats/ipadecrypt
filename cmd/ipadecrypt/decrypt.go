@@ -226,7 +226,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	live.OK("%s@%s iOS %s %s", cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch)
+	live.OK("%s@%s iOS %s %s", cfg.Device.User, dev.Host(), probe.IOSVersion, probe.Arch)
 
 	//
 	// If a bundle-id target is already installed, offer to decrypt the
