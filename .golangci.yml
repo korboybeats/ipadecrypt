@@ -1,0 +1,6 @@
+version: "2"
+linters:
+  enable:
+    - wsl_v5
+  disable:
+    - errcheck
