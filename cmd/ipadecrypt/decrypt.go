@@ -997,6 +997,10 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 	live = tui.NewLive()
 	live.Spin("waiting for install")
 
+	disarm := func() {
+		_, _, _, _ = dev.RunSudo("rm -f /var/mobile/.ipadecryptautoalert-arm")
+	}
+
 	deadline := time.Now().Add(3 * time.Minute)
 	stableSince := time.Time{}
 	for time.Now().Before(deadline) {
@@ -1011,6 +1015,7 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 		// Re-install (new UUID) or version bump → success.
 		if (beforePath != "" && p != beforePath) || (v != "" && v != beforeVersion) {
 			live.OK("installed v%s", v)
+			disarm()
 			return true
 		}
 
@@ -1021,11 +1026,13 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 		}
 		if time.Since(stableSince) > 15*time.Second {
 			live.OK("already at latest compatible v%s (no install needed)", beforeVersion)
+			disarm()
 			return true
 		}
 	}
 
 	live.Fail("timed out waiting for install")
+	disarm()
 	return false
 }
 

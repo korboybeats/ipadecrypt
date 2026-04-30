@@ -21,6 +21,11 @@ var helperArm64 []byte
 //go:embed appdl-arm64
 var appdlArm64 []byte
 
+//go:embed ipadecryptautoalert.deb
+var autoalertDeb []byte
+
+const autoalertPackage = "com.korboy.ipadecryptautoalert"
+
 type ProbeResult struct {
 	IOSVersion string
 	Arch       string // "arm64" or "arm64e"
@@ -170,6 +175,45 @@ func (c *Client) EnsureHelper() (string, error) {
 	return remote, nil
 }
 
+// IsAutoalertInstalled checks if the SpringBoard auto-confirm tweak is
+// installed via dpkg.
+func (c *Client) IsAutoalertInstalled() bool {
+	out, _, code, _ := c.RunSudo(fmt.Sprintf("dpkg -s %s 2>/dev/null | grep -q '^Status: install ok installed' && echo yes", autoalertPackage))
+	return code == 0 && strings.TrimSpace(out) == "yes"
+}
+
+// EnsureAutoalert installs the SpringBoard auto-confirm tweak via dpkg.
+// Caller is responsible for respringing SpringBoard afterward.
+func (c *Client) EnsureAutoalert() error {
+	if c.IsAutoalertInstalled() {
+		return nil
+	}
+	remote := path.Join(RemoteRoot, "tweaks", "ipadecryptautoalert.deb")
+	if err := c.Upload(bytes.NewReader(autoalertDeb), remote, 0o644); err != nil {
+		return fmt.Errorf("upload tweak deb: %w", err)
+	}
+	_, errOut, code, err := c.RunSudo(fmt.Sprintf("dpkg -i %q", remote))
+	if err != nil {
+		return fmt.Errorf("dpkg -i: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("dpkg -i exit %d: %s", code, strings.TrimSpace(errOut))
+	}
+	return nil
+}
+
+// Respring kills SpringBoard so it relaunches.
+func (c *Client) Respring() error {
+	_, errOut, code, err := c.RunSudo("killall SpringBoard")
+	if err != nil {
+		return fmt.Errorf("killall: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("killall exit %d: %s", code, strings.TrimSpace(errOut))
+	}
+	return nil
+}
+
 // EnsureAppdl uploads the StoreKit download helper if not already present and
 // adds its CDHash to Dopamine's trust cache so AMFI honors its entitlements.
 // Returns the remote path. Trust cache add is idempotent and harmless on
@@ -205,7 +249,21 @@ func (c *Client) appdlCDHash(remote string) (string, error) {
 
 // RunAppdl runs the StoreKit download helper for a bundle ID or app ID.
 // stdout/stderr is streamed via onLine. Returns the helper's exit code.
+//
+// Arms the autoinstaller tweak (if installed in SpringBoard) by touching a
+// sentinel file. The tweak watches for UIAlertControllers in SpringBoard and
+// auto-confirms the "Download an older version" prompt that appears when
+// the device's iOS is older than the latest version's MinimumOSVersion.
+// Sentinel is removed when this function returns.
 func (c *Client) RunAppdl(appdlPath, target string, onLine func(line string)) (int, error) {
+	// The tweak's sentinel: touching it tells the SpringBoard tweak to
+	// auto-confirm any UIAlertController with a Download/Install button for
+	// the next 60 seconds. We don't proactively remove it - the mtime check
+	// in the tweak will let it lapse naturally, and any subsequent run just
+	// re-touches it.
+	const sentinel = "/var/mobile/.ipadecryptautoalert-arm"
+	_, _, _, _ = c.RunSudo(fmt.Sprintf("touch %q", sentinel))
+
 	cmd := fmt.Sprintf("%s %q", appdlPath, target)
 	stdout, stderr, code, err := c.RunSudo(cmd)
 	if onLine != nil {
