@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/londek/ipadecrypt/internal/device"
 	"github.com/londek/ipadecrypt/internal/tui"
-	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
 )
 
@@ -22,13 +22,9 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	upd := updater.Start(context.Background(), Version, cfg)
-	defer upd.Wait()
-
 	if bootstrapReset {
 		cfg.Apple = config.Apple{}
-
-		cfg.Device = config.Device{Port: 22, User: "mobile", AcceptNewHostKey: true}
+		cfg.Device = config.Device{AcceptNewHostKey: true}
 		if err := cfg.Save(); err != nil {
 			tui.Err("reset config: %v", err)
 			return
@@ -45,7 +41,6 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		if err != nil {
 			return
 		}
-
 		cfg.Apple.Email = strings.TrimSpace(s)
 	}
 
@@ -54,7 +49,6 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		if err != nil {
 			return
 		}
-
 		cfg.Apple.Password = s
 	}
 
@@ -123,14 +117,27 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	tui.Info("ipadecrypt drives the iPhone over SSH. On the device install from Sileo:")
 	tui.Bullet("OpenSSH   search \"OpenSSH\" in Sileo")
 	tui.Info("Find the device IP in Settings → Wi-Fi.")
+	tui.Info("Multiple IPs may be entered comma-separated; the first reachable one is used.")
 
 	if cfg.Device.Host == "" {
 		s, err := tui.Prompt("device IP/host")
 		if err != nil {
 			return
 		}
-
 		cfg.Device.Host = strings.TrimSpace(s)
+	}
+
+	if cfg.Device.Port == 0 {
+		s, err := tui.PromptDefault("device SSH port", "22")
+		if err != nil {
+			return
+		}
+		p, perr := strconv.Atoi(strings.TrimSpace(s))
+		if perr != nil || p < 1 || p > 65535 {
+			tui.Err("invalid port: %s", s)
+			return
+		}
+		cfg.Device.Port = p
 	}
 
 	if cfg.Device.User == "" {
@@ -138,7 +145,6 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		if err != nil {
 			return
 		}
-
 		cfg.Device.User = u
 	}
 
@@ -198,14 +204,9 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	if cfg.Device.Port == 0 {
-		cfg.Device.Port = 22
-	}
-
 	var probe device.ProbeResult
-
+	var connectedHost string
 	connected := false
-
 	func() {
 		live := tui.NewLive()
 		live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
@@ -214,14 +215,13 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		if err != nil {
 			live.Fail("ssh connect failed: %v", err)
 			tui.Info("check that OpenSSH is running on the device and the password is correct")
-
 			return
 		}
-
 		defer dev.Close()
 
-		live.Spin("probing device")
+		connectedHost = dev.Host()
 
+		live.Spin("probing device")
 		probe, err = dev.Probe()
 		if err != nil {
 			live.Fail("probe failed: %v", err)
@@ -234,16 +234,14 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		}
 
 		live.OK("connected")
-
 		connected = true
 	}()
-
 	if !connected {
 		return
 	}
 
 	tui.Fields(
-		"Host", fmt.Sprintf("%s@%s", cfg.Device.User, cfg.Device.Host),
+		"Host", fmt.Sprintf("%s@%s", cfg.Device.User, connectedHost),
 		"iOS", probe.IOSVersion,
 		"Arch", probe.Arch,
 		"Model", probe.Model,
@@ -275,7 +273,6 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		pdev, err := device.Connect(context.Background(), cfg.Device)
 		if err != nil {
 			tui.Err("ssh connect failed: %v", err)
-
 			printed = 1
 			connectionFailed = true
 		} else {
@@ -292,19 +289,15 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 				switch {
 				case err != nil:
 					tui.Err("%s - %v", c.name, err)
-
 					missing++
 				case p == "":
 					tui.Err("%s - not found", c.name)
-
 					missing++
 				default:
 					tui.OK("%s → %s", c.name, p)
 				}
-
 				printed++
 			}
-
 			pdev.Close()
 		}
 
@@ -331,19 +324,16 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	tui.Step(4, 4, "Install the decrypt helper")
 	tui.Info("A small embedded C binary that reads FairPlay-decrypted pages from a\nsuspended task. Uploaded once to /var/mobile/Media/ipadecrypt/helpers/\nand cached by SHA thereafter.")
 
-	live := tui.NewLive()
-	live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
-
 	dev, err := device.Connect(context.Background(), cfg.Device)
 	if err != nil {
-		live.Fail("ssh connect failed: %v", err)
+		tui.Err("ssh connect failed: %v", err)
 		return
 	}
 
 	defer dev.Close()
 
+	live := tui.NewLive()
 	live.Spin("uploading helper binary")
-
 	helperPath, err := dev.EnsureHelper()
 	if err != nil {
 		live.Fail("upload failed: %v", err)
@@ -351,11 +341,9 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	}
 
 	live.Spin("verifying helper can exec")
-
 	if err := dev.VerifyHelper(helperPath); err != nil {
 		live.Fail("verify failed: %v", err)
 		tui.Info("the device's code-signing layer rejected the helper's entitlements")
-
 		return
 	}
 

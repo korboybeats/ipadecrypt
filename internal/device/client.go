@@ -42,29 +42,57 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 		Timeout:         15 * time.Second,
 	}
 
-	addr := net.JoinHostPort(dev.Host, strconv.Itoa(dev.Port))
-	dialer := &net.Dialer{Timeout: 15 * time.Second}
-
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", addr, err)
+	hosts := splitHosts(dev.Host)
+	if len(hosts) == 0 {
+		return nil, errors.New("no host configured")
 	}
 
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("ssh handshake: %w", err)
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	var lastErr error
+	for _, host := range hosts {
+		addr := net.JoinHostPort(host, strconv.Itoa(dev.Port))
+
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			lastErr = fmt.Errorf("dial %s: %w", addr, err)
+			continue
+		}
+
+		sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+		if err != nil {
+			conn.Close()
+			lastErr = fmt.Errorf("ssh handshake %s: %w", addr, err)
+			continue
+		}
+
+		sshClient := ssh.NewClient(sshConn, chans, reqs)
+
+		sftpClient, err := sftp.NewClient(sshClient)
+		if err != nil {
+			sshClient.Close()
+			lastErr = fmt.Errorf("sftp open %s: %w", addr, err)
+			continue
+		}
+
+		// Persist the host that worked so subsequent operations report it.
+		used := dev
+		used.Host = host
+		return &Client{cfg: used, ssh: sshClient, sftp: sftpClient}, nil
 	}
 
-	sshClient := ssh.NewClient(sshConn, chans, reqs)
+	return nil, lastErr
+}
 
-	sftpClient, err := sftp.NewClient(sshClient)
-	if err != nil {
-		sshClient.Close()
-		return nil, fmt.Errorf("sftp open: %w", err)
+func splitHosts(raw string) []string {
+	parts := strings.Split(raw, ",")
+	hosts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			hosts = append(hosts, p)
+		}
 	}
-
-	return &Client{cfg: dev, ssh: sshClient, sftp: sftpClient}, nil
+	return hosts
 }
 
 func sshAuthMethods(a config.DeviceAuth) ([]ssh.AuthMethod, error) {
@@ -107,6 +135,10 @@ func expandUser(path string) (string, error) {
 	}
 
 	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
+}
+
+func (c *Client) Host() string {
+	return c.cfg.Host
 }
 
 func (c *Client) Close() {
