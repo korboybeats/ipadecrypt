@@ -235,6 +235,51 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 	return "", errors.New("installed version not found")
 }
 
+// InstalledApp describes one installed app.
+type InstalledApp struct {
+	BundleID    string
+	DisplayName string // CFBundleDisplayName, falling back to CFBundleName
+	Path        string // /var/containers/Bundle/Application/<UUID>/<Name>.app
+}
+
+// ListInstalledApps enumerates every installed .app under
+// /var/containers/Bundle/Application and returns its CFBundleIdentifier and
+// display name. Uses python3's plistlib to parse all Info.plists in a single
+// process (~0.2s for ~100 apps).
+func (c *Client) ListInstalledApps() ([]InstalledApp, error) {
+	const script = `python3 -c '
+import os, plistlib, glob
+for app in sorted(glob.glob("/var/containers/Bundle/Application/*/*.app")):
+    p = os.path.join(app, "Info.plist")
+    try:
+        with open(p, "rb") as f:
+            d = plistlib.load(f)
+        bid = d.get("CFBundleIdentifier", "")
+        name = d.get("CFBundleDisplayName") or d.get("CFBundleName") or ""
+        if bid: print(f"{bid}\t{name}\t{app}")
+    except: pass
+' 2>/dev/null`
+	out, _, code, err := c.RunSudo(script)
+	if err != nil {
+		return nil, fmt.Errorf("list installed: %w", err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("list installed exit %d", code)
+	}
+	var apps []InstalledApp
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		apps = append(apps, InstalledApp{BundleID: parts[0], DisplayName: parts[1], Path: parts[2]})
+	}
+	return apps, nil
+}
+
 // FindInstalledByBundleID returns the first installed .app whose Info.plist
 // contains bundleID. Single grep over all top-level Info.plists is ~60x faster
 // than a shell loop with per-file fork/exec. grep -aF works for both XML and
