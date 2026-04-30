@@ -16,6 +16,17 @@
 
 </div>
 
+## Fork changes (korboybeats)
+
+This fork adds a handful of QoL features on top of upstream:
+
+- **SSH port + multi-host failover.** Bootstrap prompts for a non-default SSH port. `host` accepts a comma-separated list of IPs; the first reachable one is used (handy if your phone hops between Wi-Fi networks).
+- **Fuzzy target resolution.** `ipadecrypt decrypt messenger` scans installed apps and matches against bundle ID + display name. Single match auto-selects; multiple matches prompt to pick.
+- **On-device StoreKit download path.** New menu option that triggers the device's own App Store flow via `SKUIItem` + `SKUIItemStateCenter`. Apple's CDN serves the latest version compatible with the device's iOS. You confirm the install prompt on the device; ipadecrypt then decrypts the freshly-installed bundle.
+- **Decrypted IPA stays on device.** The output IPA is written to `/var/mobile/Documents/ipadecrypt/` and not cleaned up — easy to grab from the device later.
+- **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
+- **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions).
+
 ## The trick
 
 You don't have to *run* an encrypted iOS app to decrypt it. Spawn it suspended via `SBSLaunchApplicationWithIdentifier` (main apps) or `fork` + `ptrace(PT_TRACE_ME)` + `execve` (extensions) - then `mach_vm_read` the `__TEXT` segment to get plaintext. The page-fault path through the kernel decrypts FairPlay on your behalf. It's my braindead way of calling `mremap_encrypted` without `mremap_encrypted`.
