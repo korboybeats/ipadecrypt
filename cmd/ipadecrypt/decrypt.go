@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
@@ -279,6 +280,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				[]string{
 					fmt.Sprintf("Installed build v%s (no App Store reinstall)", version),
 					"Latest from App Store (will reinstall, overwriting installed)",
+					"Latest iOS-compatible via on-device StoreKit (no patching)",
 				},
 			)
 			if err != nil {
@@ -286,7 +288,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				return
 			}
 
-			if idx == 0 {
+			switch idx {
+			case 0:
 				live = tui.NewLive()
 				live.Spin("preparing helper")
 
@@ -301,9 +304,83 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "")
 
 				return
+
+			case 2:
+				if ok := runStoreKitInstall(dev, target.bundleId, version); !ok {
+					return
+				}
+				// re-resolve installed path/version after the install
+				installedPath, _ = dev.FindInstalledByBundleID(target.bundleId)
+				if installedPath == "" {
+					tui.Err("%s no longer installed after StoreKit download", target.bundleId)
+					return
+				}
+				newVersion, _ := dev.InstalledVersion(installedPath)
+				if newVersion == "" {
+					newVersion = "unknown"
+				}
+
+				live = tui.NewLive()
+				live.Spin("preparing helper")
+
+				helperPath, err := dev.EnsureHelper()
+				if err != nil {
+					live.Fail("helper upload: %v", err)
+					return
+				}
+
+				live.OK("helper ready")
+
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, newVersion, "")
+
+				return
 			}
+			// idx == 1 falls through to the existing App Store reinstall path
 		} else {
-			live.OK("%s not installed; will fetch from App Store", target.bundleId)
+			live.OK("%s not installed", target.bundleId)
+
+			if tui.IsTTY() {
+				idx, err := tui.Select(
+					fmt.Sprintf("which build of %s do you want decrypted?", target.bundleId),
+					[]string{
+						"Latest from App Store (will patch MinimumOSVersion if needed)",
+						"Latest iOS-compatible via on-device StoreKit (no patching)",
+					},
+				)
+				if err != nil {
+					tui.Err("%v", err)
+					return
+				}
+
+				if idx == 1 {
+					if ok := runStoreKitInstall(dev, target.bundleId, ""); !ok {
+						return
+					}
+					installedPath, _ := dev.FindInstalledByBundleID(target.bundleId)
+					if installedPath == "" {
+						tui.Err("%s not found after StoreKit download", target.bundleId)
+						return
+					}
+					version, _ := dev.InstalledVersion(installedPath)
+					if version == "" {
+						version = "unknown"
+					}
+
+					live = tui.NewLive()
+					live.Spin("preparing helper")
+
+					helperPath, err := dev.EnsureHelper()
+					if err != nil {
+						live.Fail("helper upload: %v", err)
+						return
+					}
+
+					live.OK("helper ready")
+
+					runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "")
+					return
+				}
+			}
 		}
 	}
 
@@ -908,6 +985,78 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 	}
 
 	return abs, nil
+}
+
+// runStoreKitInstall triggers an on-device StoreKit download (which surfaces
+// as an "Install" prompt on the device that the user must confirm), then
+// polls until the install changes. Detects re-installs (path/UUID changes)
+// and version bumps. Returns true on success.
+func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool {
+	live := tui.NewLive()
+	live.Spin("uploading StoreKit helper")
+
+	appdlPath, err := dev.EnsureAppdl()
+	if err != nil {
+		live.Fail("appdl upload: %v", err)
+		return false
+	}
+
+	beforePath, _ := dev.FindInstalledByBundleID(bundleID)
+
+	live.Spin("requesting App Store download for %s", bundleID)
+
+	code, err := dev.RunAppdl(appdlPath, bundleID, func(line string) {
+		if strings.HasPrefix(line, "@evt ") {
+			tui.Info("  %s", strings.TrimPrefix(line, "@evt "))
+		}
+	})
+	if err != nil {
+		live.Fail("appdl: %v", err)
+		return false
+	}
+	if code != 0 {
+		live.Fail("appdl exit %d", code)
+		return false
+	}
+
+	live.OK("download requested - confirm the install prompt on your device")
+
+	// Poll until install path changes (re-install gets a new UUID dir) or
+	// version bumps. If the app was already at latest, the device may show
+	// no prompt at all - so allow the user to skip the wait.
+	live = tui.NewLive()
+	live.Spin("waiting for install")
+
+	deadline := time.Now().Add(3 * time.Minute)
+	stableSince := time.Time{}
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		p, err := dev.FindInstalledByBundleID(bundleID)
+		if err != nil || p == "" {
+			stableSince = time.Time{}
+			continue
+		}
+		v, _ := dev.InstalledVersion(p)
+
+		// Re-install (new UUID) or version bump → success.
+		if (beforePath != "" && p != beforePath) || (v != "" && v != beforeVersion) {
+			live.OK("installed v%s", v)
+			return true
+		}
+
+		// Same path & same version: either nothing happened or already latest.
+		// Wait 15s of stable state before assuming "already latest" and proceeding.
+		if stableSince.IsZero() {
+			stableSince = time.Now()
+		}
+		if time.Since(stableSince) > 15*time.Second {
+			live.OK("already at latest compatible v%s (no install needed)", beforeVersion)
+			return true
+		}
+	}
+
+	live.Fail("timed out waiting for install")
+	return false
 }
 
 func resolveBundleByFuzzy(dev *device.Client, term string) (string, error) {

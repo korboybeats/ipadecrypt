@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- platform identity for AMFI / loader -->
+    <key>platform-application</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+
+    <!-- StoreKit / appstored access -->
+    <key>com.apple.appstored.jobmanager</key>
+    <true/>
+    <key>com.apple.appstored.private</key>
+    <true/>
+    <key>com.apple.appstored.xpc.updates</key>
+    <true/>
+    <key>com.apple.itunesstored.private</key>
+    <true/>
+
+    <!-- Account access (required by StoreKit purchase flow) -->
+    <key>com.apple.accounts.appleaccount.fullaccess</key>
+    <true/>
+    <key>com.apple.authkit.client.internal</key>
+    <true/>
+    <key>com.apple.private.accounts.allaccounts</key>
+    <true/>
+</dict>
+</plist>

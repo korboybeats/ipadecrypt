@@ -18,6 +18,9 @@ import (
 //go:embed ipadecrypt-helper-arm64
 var helperArm64 []byte
 
+//go:embed appdl-arm64
+var appdlArm64 []byte
+
 type ProbeResult struct {
 	IOSVersion string
 	Arch       string // "arm64" or "arm64e"
@@ -165,6 +168,55 @@ func (c *Client) EnsureHelper() (string, error) {
 	}
 
 	return remote, nil
+}
+
+// EnsureAppdl uploads the StoreKit download helper if not already present and
+// adds its CDHash to Dopamine's trust cache so AMFI honors its entitlements.
+// Returns the remote path. Trust cache add is idempotent and harmless on
+// jailbreaks where it's not needed.
+func (c *Client) EnsureAppdl() (string, error) {
+	sum := sha256.Sum256(appdlArm64)
+	remote := path.Join(RemoteRoot, "helpers",
+		fmt.Sprintf("ipadecrypt-appdl-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
+
+	if !c.Exists(remote) {
+		if err := c.Upload(bytes.NewReader(appdlArm64), remote, 0o755); err != nil {
+			return "", fmt.Errorf("upload appdl: %w", err)
+		}
+	}
+
+	// Best-effort: try to add to Dopamine's trust cache. Ignore errors
+	// (jailbreak may not be Dopamine, or jbctl may already have it).
+	cdhash, err := c.appdlCDHash(remote)
+	if err == nil && cdhash != "" {
+		_, _, _, _ = c.RunSudo(fmt.Sprintf("/var/jb/basebin/jbctl trustcache add %s 2>/dev/null", cdhash))
+	}
+
+	return remote, nil
+}
+
+func (c *Client) appdlCDHash(remote string) (string, error) {
+	out, _, _, err := c.RunSudo(fmt.Sprintf("ldid -h %q 2>/dev/null | grep '^CDHash=' | cut -d= -f2", remote))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// RunAppdl runs the StoreKit download helper for a bundle ID or app ID.
+// stdout/stderr is streamed via onLine. Returns the helper's exit code.
+func (c *Client) RunAppdl(appdlPath, target string, onLine func(line string)) (int, error) {
+	cmd := fmt.Sprintf("%s %q", appdlPath, target)
+	stdout, stderr, code, err := c.RunSudo(cmd)
+	if onLine != nil {
+		for _, line := range strings.Split(strings.TrimSpace(stdout+"\n"+stderr), "\n") {
+			if line == "" {
+				continue
+			}
+			onLine(line)
+		}
+	}
+	return code, err
 }
 
 // HashFile computes the sha256 of a path on-device. Installed bundles under
