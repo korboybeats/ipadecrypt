@@ -29,7 +29,21 @@ var (
 	versionsLogResponses bool
 )
 
+// shortCmdAliases maps -<letter> shortcuts to subcommand names so users can
+// write `ipadecrypt -d kick` instead of `ipadecrypt decrypt kick`.
+var shortCmdAliases = map[string]string{
+	"-d": "decrypt",
+	"-b": "bootstrap",
+	"-v": "versions",
+}
+
 func main() {
+	if len(os.Args) > 1 {
+		if full, ok := shortCmdAliases[os.Args[1]]; ok {
+			os.Args[1] = full
+		}
+	}
+
 	root := &cobra.Command{
 		Use:     "ipadecrypt",
 		Short:   "End-to-end FairPlay decrypter for App Store apps",
@@ -41,17 +55,19 @@ func main() {
 		"config root directory path (default: ~/.ipadecrypt)")
 
 	bootstrap := &cobra.Command{
-		Use:   "bootstrap",
-		Short: "Interactive setup. App Store sign-in, device probe, prerequisite checks",
-		Run:   bootstrapHandler,
+		Use:     "bootstrap",
+		Aliases: []string{"b"},
+		Short:   "Interactive setup. App Store sign-in, device probe, prerequisite checks",
+		Run:     bootstrapHandler,
 	}
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
 
 	decrypt := &cobra.Command{
-		Use:   "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",
-		Short: "Download, install, decrypt, and retrieve an app by bundle ID, App Store ID, or App Store URL",
-		Args:  cobra.ExactArgs(1),
-		Run:   decryptHandler,
+		Use:     "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",
+		Aliases: []string{"d"},
+		Short:   "Download, install, decrypt, and retrieve an app by bundle ID, App Store ID, or App Store URL",
+		Args:    cobra.ExactArgs(1),
+		Run:     decryptHandler,
 	}
 	decrypt.Flags().StringVar(&decryptExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
 	decrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA (default: ./<bundleID>_<version>.decrypted.ipa)")
@@ -63,11 +79,12 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptPatchDevType, "patch-device-type", false, "if the IPA's UIDeviceFamily excludes this device, append the device's family (iPadOS apps then run on iOS)")
 
 	versions := &cobra.Command{
-		Use:   "versions <bundle-id|app-store-id|app-store-url>",
-		Short: "Browse the App Store version history of an app",
-		Long:  "Opens an interactive table of every App Store release of the given app. Metadata for the 3 newest versions is fetched eagerly; older versions are fetched on-demand (Enter on a row) and cached on disk.",
-		Args:  cobra.ExactArgs(1),
-		Run:   versionsHandler,
+		Use:     "versions <bundle-id|app-store-id|app-store-url>",
+		Aliases: []string{"v"},
+		Short:   "Browse the App Store version history of an app",
+		Long:    "Opens an interactive table of every App Store release of the given app. Metadata for the 3 newest versions is fetched eagerly; older versions are fetched on-demand (Enter on a row) and cached on disk.",
+		Args:    cobra.ExactArgs(1),
+		Run:     versionsHandler,
 	}
 	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/.ipadecrypt/logs/versions.log")
 
