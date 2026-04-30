@@ -18,12 +18,11 @@ import (
 	"github.com/londek/ipadecrypt/internal/device"
 	"github.com/londek/ipadecrypt/internal/pipeline"
 	"github.com/londek/ipadecrypt/internal/tui"
-	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
 )
 
 var (
-	appStoreIdRegex = regexp.MustCompile(`/id(\d+)`)
+	appStoreIDRe = regexp.MustCompile(`/id(\d+)`)
 
 	errAppinstNotFound = errors.New("appinst not found")
 )
@@ -102,7 +101,7 @@ func parseDecryptArg(raw string) (decryptTarget, error) {
 			return decryptTarget{}, fmt.Errorf("parse url: %w", err)
 		}
 
-		m := appStoreIdRegex.FindStringSubmatch(u.Path)
+		m := appStoreIDRe.FindStringSubmatch(u.Path)
 		if m == nil {
 			return decryptTarget{}, fmt.Errorf("no /id<digits> in url %s", raw)
 		}
@@ -116,7 +115,6 @@ func parseDecryptArg(raw string) (decryptTarget, error) {
 		if err != nil {
 			return decryptTarget{}, fmt.Errorf("local IPA %s: %w", raw, err)
 		}
-
 		if info.IsDir() {
 			return decryptTarget{}, fmt.Errorf("local IPA %s is a directory", raw)
 		}
@@ -125,7 +123,6 @@ func parseDecryptArg(raw string) (decryptTarget, error) {
 		if err != nil {
 			return decryptTarget{}, err
 		}
-
 		return decryptTarget{localPath: abs}, nil
 	}
 
@@ -188,9 +185,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	upd := updater.Start(context.Background(), Version, cfg)
-	defer upd.Wait()
-
 	target, err := parseDecryptArg(args[0])
 	if err != nil {
 		tui.Err("%v", err)
@@ -200,7 +194,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	if cfg.Apple.Account == nil || cfg.Device.Host == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
-
 		return
 	}
 
@@ -253,7 +246,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	if target.bundleId != "" && !decryptForce {
 		live = tui.NewLive()
 		live.Spin("checking if %s is installed", target.bundleId)
-
 		installedPath, err := dev.FindInstalledByBundleID(target.bundleId)
 		if err != nil {
 			live.Fail("scan failed: %v", err)
@@ -271,7 +263,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			if !tui.IsTTY() {
 				tui.Err("%s v%s is already installed on the device.", target.bundleId, version)
 				tui.Info("Non-TTY runs can't prompt. Uninstall the app first, pass a local .ipa path, or re-run in a TTY.")
-
 				return
 			}
 
@@ -465,7 +456,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			}
 
 			live.Fail("prepare failed: %v", err)
-
 			return
 		}
 
@@ -493,15 +483,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		if errors.As(err, &dfErr) {
 			live.Fail("device family mismatch: app supports %v, device is %d (%s) — pass --patch-device-type to install anyway",
 				dfErr.Supported, dfErr.Device, pipeline.DeviceFamilyName(dfErr.Device))
-
 			return
 		}
-
 		live.Fail("patch MinimumOSVersion failed: %v", err)
-
 		return
 	}
-
 	defer func() {
 		if patch.patchedPath != "" {
 			os.Remove(patch.patchedPath)
@@ -533,7 +519,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		default:
 			live.Fail("prepare install: %v", err)
 		}
-
 		return
 	}
 
@@ -600,16 +585,13 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		if update.note != "" {
 			live.Note("%s", update.note)
 		}
-
 		if update.spin != "" {
 			live.Spin("%s", update.spin)
 		}
-
 		if update.progress {
 			if update.progressText != "" {
 				live.Message("%s", update.progressText)
 			}
-
 			live.Progress(update.progressCur, update.progressMax)
 		}
 	}
@@ -634,6 +616,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	}
 
 	live = tui.NewLive()
+
 	live.Spin("pulling → %s", filepath.Base(outLocal))
 
 	remoteSt, err := dev.Stat(outRemote)
@@ -661,7 +644,6 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	if err := dev.Download(outRemote, pw); err != nil {
 		outFile.Close()
 		live.Fail("pull failed: %v", err)
-
 		return
 	}
 
@@ -695,20 +677,16 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	if !decryptNoVerify {
 		live = tui.NewLive()
 		live.Spin("checking cryptid on every Mach-O")
-
 		res, err := pipeline.VerifyCryptid(outLocal)
 		if err != nil {
 			live.Fail("verify failed: %v", err)
 			return
 		}
-
 		if len(res.Encrypted) > 0 {
 			live.Fail("%d binary(ies) still have cryptid != 0", len(res.Encrypted))
-
 			for _, n := range res.Encrypted {
 				tui.Info("  %s", n)
 			}
-
 			return
 		}
 
@@ -716,11 +694,12 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		if len(res.Skipped) > 0 {
 			suffix = fmt.Sprintf(" (%d skipped)", len(res.Skipped))
 		}
-
 		live.OK("%d Mach-O(s) verified cryptid=0%s", res.Scanned, suffix)
 	}
 
-	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote, outRemote)
+	tui.OK("kept on device → %s", outRemote)
+
+	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote)
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
@@ -788,7 +767,6 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 
 func patchSourceForDevice(encPath, iosVersion string, deviceFamily int, patchDeviceType bool) (patchResult, error) {
 	pattern := strings.TrimSuffix(filepath.Base(encPath), ".ipa") + "-patched-*.ipa"
-
 	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return patchResult{}, fmt.Errorf("create temp ipa: %w", err)
@@ -799,7 +777,6 @@ func patchSourceForDevice(encPath, iosVersion string, deviceFamily int, patchDev
 		os.Remove(tmp)
 		return patchResult{}, fmt.Errorf("close temp ipa: %w", err)
 	}
-
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return patchResult{}, fmt.Errorf("prepare temp ipa: %w", err)
 	}
@@ -842,7 +819,6 @@ func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error
 	if err != nil {
 		return installPlan{}, fmt.Errorf("locate appinst: %w", err)
 	}
-
 	if appinstPath == "" {
 		return installPlan{}, errAppinstNotFound
 	}
@@ -873,16 +849,13 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 
 	if !decryptForce {
 		notify(installHashIPA)
-
 		execName, wantSum, err := pipeline.MainExecSHA256(uploadPath)
 		if err != nil {
 			return installResult{}, fmt.Errorf("hash ipa: %w", err)
 		}
 
 		remoteExec := path.Join(plan.bundlePath, execName)
-
 		notify(installHashInstalled)
-
 		gotSum, err := dev.HashFile(remoteExec)
 		if err != nil {
 			return installResult{}, fmt.Errorf("hash device: %w", err)
@@ -896,14 +869,12 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 	}
 
 	notify(installReadInstalledVersion)
-
 	previousVersion, err := dev.InstalledVersion(plan.bundlePath)
 	if err != nil {
 		previousVersion = ""
 	}
 
 	notify(installReplaceInstalled)
-
 	return installUploadedBundle(dev, plan, uploadPath, true, previousVersion, notify, onProgress)
 }
 
@@ -958,7 +929,7 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 }
 
 func remoteOutputPath(bundleID, version string) string {
-	return path.Join(device.RemoteRoot, "work", fmt.Sprintf("%s_%s.ipa", bundleID, version))
+	return path.Join("/var/mobile/Documents/ipadecrypt", fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version))
 }
 
 func localOutputPath(override, bundleID, version string) (string, error) {
@@ -969,7 +940,6 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-
 		return filepath.Join(cwd, defaultName), nil
 	}
 
@@ -1099,50 +1069,13 @@ func resolveBundleByFuzzy(dev *device.Client, term string) (string, error) {
 	}
 }
 
-func uploadDecrypted(dev *device.Client, outLocal string) {
-	const remoteDir = "/var/mobile/Documents/ipadecrypt"
-	remotePath := path.Join(remoteDir, filepath.Base(outLocal))
-
-	live := tui.NewLive()
-	live.Spin("uploading → %s", remotePath)
-
-	f, err := os.Open(outLocal)
-	if err != nil {
-		live.Fail("open local: %v", err)
-		return
-	}
-	defer f.Close()
-
-	st, err := f.Stat()
-	if err != nil {
-		live.Fail("stat local: %v", err)
-		return
-	}
-
-	pr := newProgressReader(f, st.Size(), func(cur, total int64) {
-		live.Message("%s", transferProgressText(fmt.Sprintf("uploading → %s", remotePath), cur, total))
-		live.Progress(cur, total)
-	})
-
-	if err := dev.Upload(pr, remotePath, 0o644); err != nil {
-		live.Fail("upload failed: %v", err)
-		return
-	}
-
-	live.OK("→ %s", remotePath)
-}
-
-func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote string) {
+func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote string) {
 	if noCleanup {
 		return
 	}
 
 	if stagingRemote != "" {
 		dev.Remove(stagingRemote)
-	}
-
-	if outRemote != "" {
-		dev.Remove(outRemote)
 	}
 }
 
@@ -1155,7 +1088,6 @@ func pluralize(count, noun string) string {
 	if count == "1" {
 		return count + " " + noun
 	}
-
 	return count + " " + noun + "s"
 }
 
@@ -1172,19 +1104,16 @@ func prettyImageName(name string) string {
 		start := strings.LastIndex(name[:i], "/") + 1
 		return name[start:i] + ".framework"
 	}
-
 	if i := strings.Index(name, ".appex/"); i >= 0 {
 		start := strings.LastIndex(name[:i], "/") + 1
 		return name[start:i] + ".appex"
 	}
-
 	return name
 }
 
 func parseInt64(s string) int64 {
 	var n int64
 	fmt.Sscanf(s, "%d", &n)
-
 	return n
 }
 
@@ -1197,7 +1126,6 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 			if extras == "0" {
 				return helperUpdate{}
 			}
-
 			return helperUpdate{note: fmt.Sprintf("bundle done (%s)", pluralize(extras, "framework"))}
 		case "skipped":
 			return helperUpdate{note: fmt.Sprintf("bundle skipped: %s (%s)", path.Base(ev.Attr("src")), ev.Attr("reason"))}
@@ -1237,13 +1165,11 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 	case "image":
 		name := ev.Attr("name")
 		pretty := prettyImageName(name)
-
 		switch ev.Attr("phase") {
 		case "start":
 			return helperUpdate{spin: fmt.Sprintf("decrypting %s", pretty)}
 		case "done":
 			p.dumpedTotal.Add(1)
-
 			switch ev.Attr("kind") {
 			case "main":
 				p.dumpedMain.Add(1)
@@ -1252,9 +1178,7 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 			default:
 				p.dumpedOther.Add(1)
 			}
-
 			size := parseInt64(ev.Attr("size"))
-
 			return helperUpdate{
 				note: fmt.Sprintf("decrypted %s (%s)", pretty, humanBytes(size)),
 				spin: fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load()),
@@ -1263,7 +1187,6 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 			if reason := ev.Attr("reason"); reason != "" {
 				return helperUpdate{note: fmt.Sprintf("failed to decrypt %s (%s)", pretty, reason)}
 			}
-
 			return helperUpdate{note: fmt.Sprintf("failed to decrypt %s", pretty)}
 		}
 
