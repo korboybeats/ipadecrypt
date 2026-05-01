@@ -415,8 +415,36 @@ func AppDirName(ipaPath string) (string, error) {
 
 // rewriteIPA rebuilds ipaPath in place, dropping entries for which skip returns
 // true. It returns the number of entries dropped; when zero, the source file
-// is left untouched and no rename happens.
+// is left untouched and no rewrite happens.
 func rewriteIPA(ipaPath string, skip func(name string) bool) (int, error) {
+	r, err := zip.OpenReader(ipaPath)
+	if err != nil {
+		return 0, fmt.Errorf("open %s: %w", ipaPath, err)
+	}
+
+	removed := 0
+	for _, f := range r.File {
+		if skip(f.Name) {
+			removed++
+		}
+	}
+
+	if removed == 0 {
+		if err := r.Close(); err != nil {
+			return 0, fmt.Errorf("close %s: %w", ipaPath, err)
+		}
+
+		return 0, nil
+	}
+
+	if err := r.Close(); err != nil {
+		return 0, fmt.Errorf("close %s: %w", ipaPath, err)
+	}
+
+	return rewriteIPAKnown(ipaPath, skip)
+}
+
+func rewriteIPAKnown(ipaPath string, skip func(name string) bool) (int, error) {
 	r, err := zip.OpenReader(ipaPath)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", ipaPath, err)
@@ -436,7 +464,6 @@ func rewriteIPA(ipaPath string, skip func(name string) bool) (int, error) {
 	cleanup := func() { os.Remove(tmp) }
 
 	removed := 0
-
 	for _, f := range r.File {
 		if skip(f.Name) {
 			removed++
@@ -464,16 +491,107 @@ func rewriteIPA(ipaPath string, skip func(name string) bool) (int, error) {
 		return 0, fmt.Errorf("close file: %w", err)
 	}
 
-	if removed == 0 {
-		cleanup()
-		return 0, nil
-	}
-
 	if err := os.Rename(tmp, ipaPath); err != nil {
 		return 0, fmt.Errorf("rename: %w", err)
 	}
 
 	return removed, nil
+}
+
+type CleanupOptions struct {
+	StripMetadata bool
+	StripWatch    bool
+	Debug         func(string)
+}
+
+type CleanupResult struct {
+	MetadataRemoved bool
+	WatchRemoved    int
+	EntriesScanned  int
+	RemovedEntries  int
+	Rewritten       bool
+}
+
+func CleanupIPA(ipaPath string, opts CleanupOptions) (CleanupResult, error) {
+	var res CleanupResult
+
+	cleanupDebug(opts, "cleanup: begin metadata=%t watch=%t", opts.StripMetadata, opts.StripWatch)
+
+	if !opts.StripMetadata && !opts.StripWatch {
+		cleanupDebug(opts, "cleanup: disabled")
+		return res, nil
+	}
+
+	cleanupDebug(opts, "cleanup: scanning zip entries")
+
+	r, err := zip.OpenReader(ipaPath)
+	if err != nil {
+		return res, fmt.Errorf("open %s: %w", ipaPath, err)
+	}
+
+	for _, f := range r.File {
+		res.EntriesScanned++
+		switch cleanupEntryKind(f.Name, opts) {
+		case cleanupEntryMetadata:
+			res.MetadataRemoved = true
+			res.RemovedEntries++
+		case cleanupEntryWatch:
+			res.WatchRemoved++
+			res.RemovedEntries++
+		}
+	}
+
+	if err := r.Close(); err != nil {
+		return res, fmt.Errorf("close %s: %w", ipaPath, err)
+	}
+
+	cleanupDebug(opts, "cleanup: scan done entries=%d remove=%d metadata=%t watch=%d",
+		res.EntriesScanned, res.RemovedEntries, res.MetadataRemoved, res.WatchRemoved)
+
+	if !res.MetadataRemoved && res.WatchRemoved == 0 {
+		cleanupDebug(opts, "cleanup: rewrite skipped (nothing to remove)")
+		return res, nil
+	}
+
+	cleanupDebug(opts, "cleanup: rewrite start")
+
+	_, err = rewriteIPAKnown(ipaPath, func(name string) bool {
+		return cleanupEntryKind(name, opts) != cleanupEntryNone
+	})
+	if err != nil {
+		return CleanupResult{}, err
+	}
+
+	res.Rewritten = true
+	cleanupDebug(opts, "cleanup: rewrite done")
+
+	return res, nil
+}
+
+func cleanupDebug(opts CleanupOptions, format string, args ...any) {
+	if opts.Debug != nil {
+		opts.Debug(fmt.Sprintf(format, args...))
+	}
+}
+
+type cleanupEntry int
+
+const (
+	cleanupEntryNone cleanupEntry = iota
+	cleanupEntryMetadata
+	cleanupEntryWatch
+)
+
+func cleanupEntryKind(name string, opts CleanupOptions) cleanupEntry {
+	if opts.StripMetadata && strings.EqualFold(filepath.Base(name), "iTunesMetadata.plist") {
+		return cleanupEntryMetadata
+	}
+
+	if opts.StripWatch && isWatchPath(name) {
+		return cleanupEntryWatch
+	}
+
+	return cleanupEntryNone
 }
 
 func StripMetadata(ipaPath string) (bool, error) {

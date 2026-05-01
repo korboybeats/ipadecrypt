@@ -677,21 +677,36 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 
 	pw.Flush()
 
-	if !decryptKeepMetadata {
-		live.Spin("stripping iTunesMetadata.plist")
+	if !decryptKeepMetadata || !decryptKeepWatch {
+		live.Spin("cleaning IPA")
 
-		if _, err := pipeline.StripMetadata(outLocal); err != nil {
-			live.Fail("strip metadata failed: %v", err)
+		cleanup, err := pipeline.CleanupIPA(outLocal, pipeline.CleanupOptions{
+			StripMetadata: !decryptKeepMetadata,
+			StripWatch:    !decryptKeepWatch,
+			Debug: func(msg string) {
+				live.Note("%s", msg)
+			},
+		})
+		if err != nil {
+			live.Fail("IPA cleanup failed: %v", err)
 			return
 		}
-	}
 
-	if !decryptKeepWatch {
-		live.Spin("stripping Watch/")
+		live.Note("cleanup: rewritten=%t", cleanup.Rewritten)
 
-		if _, err := pipeline.StripWatch(outLocal); err != nil {
-			live.Fail("strip watch failed: %v", err)
-			return
+		if cleanup.MetadataRemoved || cleanup.WatchRemoved > 0 {
+			parts := make([]string, 0, 2)
+			if cleanup.MetadataRemoved {
+				parts = append(parts, "iTunesMetadata.plist")
+			}
+			if cleanup.WatchRemoved > 0 {
+				entryWord := "entry"
+				if cleanup.WatchRemoved != 1 {
+					entryWord = "entries"
+				}
+				parts = append(parts, fmt.Sprintf("%d Watch/ %s", cleanup.WatchRemoved, entryWord))
+			}
+			live.Note("stripped %s", strings.Join(parts, ", "))
 		}
 	}
 
@@ -700,12 +715,14 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	if !decryptNoVerify {
 		live = tui.NewLive()
 		live.Spin("checking cryptid on every Mach-O")
+		live.Note("verify: begin")
 
 		res, err := pipeline.VerifyCryptid(outLocal)
 		if err != nil {
 			live.Fail("verify failed: %v", err)
 			return
 		}
+		live.Note("verify: scanned=%d encrypted=%d skipped=%d", res.Scanned, len(res.Encrypted), len(res.Skipped))
 
 		if len(res.Encrypted) > 0 {
 			live.Fail("%d binary(ies) still have cryptid != 0", len(res.Encrypted))
