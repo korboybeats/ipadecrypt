@@ -989,12 +989,12 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 	defaultName := fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version)
 
 	if override == "" {
-		cwd, err := os.Getwd()
+		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
 
-		return filepath.Join(cwd, defaultName), nil
+		return filepath.Join(home, "ipadecrypt", defaultName), nil
 	}
 
 	abs, err := filepath.Abs(override)
