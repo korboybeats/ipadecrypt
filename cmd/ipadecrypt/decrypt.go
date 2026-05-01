@@ -976,8 +976,22 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 		return helperUpdate{note: fmt.Sprintf("SBS failed on %s, falling back to ptrace", path.Base(ev.Attr("exec")))}
 
 	case "dyld":
-		if ev.Attr("phase") == "resuming" {
+		switch ev.Attr("phase") {
+		case "resuming":
 			return helperUpdate{spin: fmt.Sprintf("running %s so dyld binds frameworks", path.Base(ev.Attr("src")))}
+		case "trapped":
+			exc := ev.Attr("exception")
+			sig := ev.Attr("signal")
+
+			if exc == "" {
+				exc = "unparsed"
+			}
+
+			if sig != "" && sig != "0" {
+				return helperUpdate{note: fmt.Sprintf("target trapped before dyld bound frameworks: %s signal=%s", exc, sig)}
+			}
+
+			return helperUpdate{note: fmt.Sprintf("target trapped before dyld bound frameworks: %s", exc)}
 		}
 
 	case "spawn_failed":

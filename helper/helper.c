@@ -139,6 +139,7 @@ typedef enum {
     DUMP_READ_SRC_FAIL,
     DUMP_VM_READ_FAIL,
     DUMP_ZERO_PAGES,
+    DUMP_FAIRPLAY_NOT_FIRED,
     DUMP_OPEN_DST_FAIL,
     DUMP_WRITE_DST_FAIL,
     DUMP_OOM,
@@ -146,12 +147,13 @@ typedef enum {
 
 static const char *dump_reason(dump_result_t r) {
     switch (r) {
-    case DUMP_OPEN_SRC_FAIL:  return "open_src_fail";
-    case DUMP_READ_SRC_FAIL:  return "read_src_fail";
-    case DUMP_VM_READ_FAIL:   return "vm_read_err";
-    case DUMP_ZERO_PAGES:     return "zero_pages";
-    case DUMP_OPEN_DST_FAIL:  return "open_dst_fail";
-    case DUMP_WRITE_DST_FAIL: return "write_dst_fail";
+    case DUMP_OPEN_SRC_FAIL:      return "open_src_fail";
+    case DUMP_READ_SRC_FAIL:      return "read_src_fail";
+    case DUMP_VM_READ_FAIL:       return "vm_read_err";
+    case DUMP_ZERO_PAGES:         return "cryptoff_zero_pages";
+    case DUMP_FAIRPLAY_NOT_FIRED: return "fairplay_not_fired";
+    case DUMP_OPEN_DST_FAIL:      return "open_dst_fail";
+    case DUMP_WRITE_DST_FAIL:     return "write_dst_fail";
     case DUMP_OOM:            return "oom";
     default:                  return "ok";
     }
@@ -806,12 +808,32 @@ static dump_result_t dump_image(const char *src, const char *dst, task_t task,
     close(fd);
 
     if (slice->crypt.has_crypt && slice->crypt.cryptid != 0 && slice->crypt.cryptsize) {
+        // Snapshot the on-disk ciphertext so we can verify the vm_read
+        // actually returned plaintext. FairPlay decrypt-on-fault doesn't
+        // fire reliably across all jailbreak/iOS combos (notably iOS 15
+        // dopamine); without this check we'd write cryptid=0 over still-
+        // encrypted bytes and ship an IPA that looks decrypted but isn't.
+        size_t crypt_off = (size_t)slice->slice.slice_offset +
+                           (size_t)slice->crypt.cryptoff;
+        size_t crypt_sz  = (size_t)slice->crypt.cryptsize;
+        uint8_t *raw_copy = malloc(crypt_sz);
+        if (!raw_copy) { free(buf); return DUMP_OOM; }
+        memcpy(raw_copy, buf + crypt_off, crypt_sz);
+
         dump_result_t dr = vm_read_crypt_region(task, image_base, slice, buf);
-        if (dr != DUMP_OK) { free(buf); return dr; }
+        if (dr != DUMP_OK) { free(raw_copy); free(buf); return dr; }
         if (!crypt_region_has_data(buf, slice)) {
             ERR("cryptoff read all zeros for %s - target hadn't faulted the pages yet", src);
-            free(buf); return DUMP_ZERO_PAGES;
+            free(raw_copy); free(buf); return DUMP_ZERO_PAGES;
         }
+        if (memcmp(raw_copy, buf + crypt_off, crypt_sz) == 0) {
+            ERR("FairPlay decrypt-on-page-fault did not fire for %s "
+                "(cross-task vm_read returned the on-disk ciphertext "
+                "verbatim); cryptid not patched, staged copy left "
+                "encrypted", src);
+            free(raw_copy); free(buf); return DUMP_FAIRPLAY_NOT_FIRED;
+        }
+        free(raw_copy);
     }
 
     if (slice->crypt.has_crypt) {
@@ -845,6 +867,51 @@ static mach_port_t make_exception_port(task_t task) {
     return port;
 }
 
+// Map an exception_type_t to a short tag for events/logs.
+static const char *exc_tag(int exc) {
+    switch (exc) {
+    case EXC_BAD_ACCESS:      return "EXC_BAD_ACCESS";
+    case EXC_BAD_INSTRUCTION: return "EXC_BAD_INSTRUCTION";
+    case EXC_ARITHMETIC:      return "EXC_ARITHMETIC";
+    case EXC_EMULATION:       return "EXC_EMULATION";
+    case EXC_SOFTWARE:        return "EXC_SOFTWARE";
+    case EXC_BREAKPOINT:      return "EXC_BREAKPOINT";
+    case EXC_SYSCALL:         return "EXC_SYSCALL";
+    case EXC_MACH_SYSCALL:    return "EXC_MACH_SYSCALL";
+    case EXC_RPC_ALERT:       return "EXC_RPC_ALERT";
+    case EXC_CRASH:           return "EXC_CRASH";
+    case EXC_RESOURCE:        return "EXC_RESOURCE";
+    case EXC_GUARD:           return "EXC_GUARD";
+    case EXC_CORPSE_NOTIFY:   return "EXC_CORPSE_NOTIFY";
+    default:                  return "EXC_UNKNOWN";
+    }
+}
+
+// Decode an EXCEPTION_DEFAULT exception_raise (msgh_id=2401) message.
+// Layout: header(24) + body(4) + thread_port_desc(12) + task_port_desc(12)
+// + NDR(8) + exception(4) + codeCnt(4) + code[codeCnt]*4. Returns 1 if
+// parsed, 0 otherwise. signal_out non-zero only for EXC_CRASH.
+static int decode_exception(const void *buf, mach_msg_size_t buf_sz,
+                            int *exc_out, int64_t *code0_out,
+                            int64_t *code1_out, int *signal_out) {
+    if (buf_sz < 76) return 0;
+    const uint8_t *p = (const uint8_t *)buf;
+    mach_msg_header_t hdr;
+    memcpy(&hdr, p, sizeof(hdr));
+    if (hdr.msgh_id != 2401) return 0;
+    int exc; uint32_t code_cnt;
+    memcpy(&exc, p + 60, sizeof(exc));
+    memcpy(&code_cnt, p + 64, sizeof(code_cnt));
+    int32_t c0 = 0, c1 = 0;
+    if (code_cnt >= 1 && buf_sz >= 72) memcpy(&c0, p + 68, 4);
+    if (code_cnt >= 2 && buf_sz >= 76) memcpy(&c1, p + 72, 4);
+    *exc_out = exc;
+    *code0_out = c0;
+    *code1_out = c1;
+    *signal_out = (exc == EXC_CRASH) ? ((c0 >> 24) & 0xff) : 0;
+    return 1;
+}
+
 // Resume target and wait up to `ms` for either a Mach exception (cross-OS
 // bind-fail abort) or timeout, then suspend the task so the caller has a
 // stable address space to walk.
@@ -855,11 +922,17 @@ static void run_and_suspend(task_t task, pid_t pid, int via_ptrace,
         // waitpid rather than Mach exception.
         ptrace(PT_CONTINUE, pid, (void *)1, 0);
         int waited = 0;
+        int exit_sig = 0, exit_code = 0, exited = 0, signaled = 0;
         while (waited < ms) {
             int st;
             pid_t w = waitpid(pid, &st, WNOHANG | WUNTRACED);
             if (w == pid) {
-                if (WIFEXITED(st) || WIFSIGNALED(st)) break;
+                if (WIFEXITED(st)) {
+                    exited = 1; exit_code = WEXITSTATUS(st); break;
+                }
+                if (WIFSIGNALED(st)) {
+                    signaled = 1; exit_sig = WTERMSIG(st); break;
+                }
                 if (WIFSTOPPED(st)) {
                     int sig = WSTOPSIG(st);
                     int deliver = (sig == SIGTRAP || sig == SIGSTOP) ? 0 : sig;
@@ -868,6 +941,16 @@ static void run_and_suspend(task_t task, pid_t pid, int via_ptrace,
             }
             usleep(200 * 1000);
             waited += 200;
+        }
+        if (exited) {
+            LOG("[helper] target exited code=%d before suspend\n", exit_code);
+            EVT("event=dyld phase=trapped via=ptrace outcome=exited code=%d", exit_code);
+        } else if (signaled) {
+            LOG("[helper] target killed by signal=%d before suspend\n", exit_sig);
+            EVT("event=dyld phase=trapped via=ptrace outcome=signaled signal=%d",
+                exit_sig);
+        } else {
+            EVT("event=dyld phase=settled via=ptrace");
         }
     } else {
         // SBS leaves the task with potentially multiple suspensions
@@ -881,8 +964,28 @@ static void run_and_suspend(task_t task, pid_t pid, int via_ptrace,
                 MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(msg),
                 exc_port, ms, MACH_PORT_NULL);
             LOG("[helper] mach_msg wait returned 0x%x\n", mr);
+            if (mr == MACH_MSG_SUCCESS) {
+                int exc = 0, sig = 0;
+                int64_t c0 = 0, c1 = 0;
+                if (decode_exception(&msg, msg.hdr.msgh_size,
+                        &exc, &c0, &c1, &sig)) {
+                    LOG("[helper] target trapped: %s code0=0x%llx code1=0x%llx signal=%d\n",
+                        exc_tag(exc),
+                        (unsigned long long)c0, (unsigned long long)c1, sig);
+                    EVT("event=dyld phase=trapped via=mach exception=%s "
+                        "code0=0x%llx code1=0x%llx signal=%d mach_msg=0x%x",
+                        exc_tag(exc),
+                        (unsigned long long)c0, (unsigned long long)c1, sig, mr);
+                } else {
+                    EVT("event=dyld phase=trapped via=mach exception=unparsed mach_msg=0x%x",
+                        mr);
+                }
+            } else {
+                EVT("event=dyld phase=settled via=mach mach_msg=0x%x", mr);
+            }
         } else {
             usleep(ms * 1000);
+            EVT("event=dyld phase=settled via=sleep");
         }
     }
     task_suspend(task);
