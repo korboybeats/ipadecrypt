@@ -52,7 +52,7 @@ func main() {
 	}
 
 	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",
-		"config root directory path (default: ~/.ipadecrypt)")
+		"config root directory path (default: ~/ipadecrypt)")
 
 	bootstrap := &cobra.Command{
 		Use:     "bootstrap",
@@ -70,7 +70,7 @@ func main() {
 		Run:     decryptHandler,
 	}
 	decrypt.Flags().StringVar(&decryptExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
-	decrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA (default: ~/ipadecrypt/<bundleID>_<version>.decrypted.ipa)")
+	decrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA (default: ~/ipadecrypt/decrypted/<bundleID>_<version>.decrypted.ipa)")
 	decrypt.Flags().BoolVar(&decryptNoCleanup, "no-cleanup", false, "leave remote staging files in place")
 	decrypt.Flags().BoolVar(&decryptKeepMetadata, "keep-metadata", false, "keep iTunesMetadata.plist (Apple ID + purchase info) in the output IPA")
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
@@ -86,7 +86,7 @@ func main() {
 		Args:    cobra.ExactArgs(1),
 		Run:     versionsHandler,
 	}
-	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/.ipadecrypt/logs/versions.log")
+	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/ipadecrypt/logs/versions.log")
 
 	root.AddCommand(bootstrap, decrypt, versions)
 

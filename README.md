@@ -79,7 +79,7 @@ ipadecrypt bootstrap
 
 A four-step interactive wizard:
 
-1. **App Store sign-in** - prompts for Apple ID; handles 2FA. Credentials stay local in `~/.ipadecrypt/config.json`.
+1. **App Store sign-in** - prompts for Apple ID; handles 2FA. Credentials stay local in `~/ipadecrypt/config.json`.
 2. **Device connect** - SSH host / user / password; probes iOS version + arch.
 3. **Prerequisites** - verifies AppSync, `appinst`, and `zip` are installed.
 4. **Helper install** - uploads a small embedded helper binary.
