@@ -25,6 +25,8 @@ This fork adds a handful of QoL features on top of upstream:
 - **On-device StoreKit download path.** New menu option that triggers the device's own App Store flow via `SKUIItem` + `SKUIItemStateCenter`. Apple's CDN serves the latest version compatible with the device's iOS. The download uses `STDRDL` (redownload-from-library) pricing, which skips the Face ID purchase confirmation. ipadecrypt then decrypts the freshly-installed bundle.
 - **Auto-confirm tweak (`ipadecryptautoalert`).** Bundled SpringBoard tweak (auto-installed via dpkg during bootstrap) that dismisses the "Download an older version of this app?" prompt automatically during the StoreKit path. Gated by a sentinel file so it only fires while ipadecrypt is actively running, and only on that specific alert.
 - **Decrypted IPA stays on device.** The output IPA is written to `/var/mobile/Documents/ipadecrypt/` and not cleaned up — easy to grab from the device later.
+- **Single PC workspace.** CLI config, cookies, cache, and logs live under `~/ipadecrypt/`; decrypted PC outputs default to `~/ipadecrypt/decrypted/`.
+- **Faster IPA post-processing.** Metadata/Watch cleanup is combined into one scanned pass and skips rewriting entirely when there is nothing to remove. Cryptid verification streams Mach-O load commands instead of reading whole binaries into memory.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
 - **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions).
 
@@ -53,21 +55,32 @@ All installable through Sileo:
 
 ## Install
 
-Download a prebuilt binary from the [releases page](https://github.com/londek/ipadecrypt/releases/latest).
+This fork is intended to live under `~/ipadecrypt/src`, with runtime files
+under `~/ipadecrypt/` and decrypted IPAs under `~/ipadecrypt/decrypted/`.
 
-Using go install:
-
-```sh
-go install github.com/londek/ipadecrypt/cmd/ipadecrypt@latest
-```
-
-From source (refer to [BUILDING.md](BUILDING.md) for detailed instructions):
+Clone the fork:
 
 ```sh
-git clone https://github.com/londek/ipadecrypt
-cd ipadecrypt
-go build ./cmd/ipadecrypt
+mkdir -p ~/ipadecrypt
+git clone https://github.com/korboybeats/ipadecrypt ~/ipadecrypt/src
+cd ~/ipadecrypt/src
 ```
+
+Build and install the CLI:
+
+```sh
+go build -trimpath -ldflags="-s -w" -o ipadecrypt ./cmd/ipadecrypt
+mkdir -p ~/bin
+ln -sfn ~/ipadecrypt/src/ipadecrypt ~/bin/ipadecrypt
+```
+
+Make sure `~/bin` is in your `PATH`, then verify:
+
+```sh
+ipadecrypt --version
+```
+
+Refer to [BUILDING.md](BUILDING.md) for helper and release-style build details.
 
 ## Usage
 
@@ -77,18 +90,22 @@ go build ./cmd/ipadecrypt
 ipadecrypt bootstrap
 ```
 
-A four-step interactive wizard:
+A five-step interactive wizard:
 
 1. **App Store sign-in** - prompts for Apple ID; handles 2FA. Credentials stay local in `~/ipadecrypt/config.json`.
 2. **Device connect** - SSH host / user / password; probes iOS version + arch.
 3. **Prerequisites** - verifies AppSync, `appinst`, and `zip` are installed.
 4. **Helper install** - uploads a small embedded helper binary.
+5. **Auto-confirm tweak** - optionally installs `ipadecryptautoalert`, a SpringBoard tweak that auto-taps the "Download" prompt during StoreKit installs.
 
 ### Decrypt an app
 
 ```sh
 ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 ```
+
+Decrypted IPAs are saved to `~/ipadecrypt/decrypted/` on your computer and
+kept on the device under `/var/mobile/Documents/ipadecrypt/`.
 
 ## License
 
