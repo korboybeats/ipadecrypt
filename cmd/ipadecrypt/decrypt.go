@@ -994,7 +994,7 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 			return "", err
 		}
 
-		return filepath.Join(home, "ipadecrypt", defaultName), nil
+		return filepath.Join(home, "ipadecrypt", "decrypted", defaultName), nil
 	}
 
 	abs, err := filepath.Abs(override)
