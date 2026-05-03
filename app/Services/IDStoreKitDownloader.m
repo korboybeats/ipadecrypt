@@ -17,15 +17,11 @@
 
     NSString *buyParams = [NSString stringWithFormat:
         @"productType=C&price=0&salableAdamId=%ld&pricingParameters=STDRDL", (long)trackID];
-    NSString *requestNonce = nonce ?: @"";
+    (void)nonce; // nonce stays in the sentinel file; appstored rejects unknown lookup keys.
 
     NSDictionary *lookup = @{
         @"kind": @"iosSoftware",
-        @"ipadecryptAutoalertNonce": requestNonce,
-        @"offers": @[@{
-            @"buyParams": buyParams,
-            @"ipadecryptAutoalertNonce": requestNonce,
-        }],
+        @"offers": @[@{@"buyParams": buyParams}],
     };
 
     Class itemCls = NSClassFromString(@"SKUIItem");

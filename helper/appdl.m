@@ -87,15 +87,11 @@ static int performAppDownload(NSString *appID, NSString *nonce) {
     // never-acquired apps appstored returns an error.
     NSString *buyParams = [NSString stringWithFormat:
         @"productType=C&price=0&salableAdamId=%@&pricingParameters=STDRDL", appID];
-    NSString *requestNonce = nonce ?: @"";
+    (void)nonce; // nonce stays in the sentinel file; appstored rejects unknown lookup keys.
 
     NSDictionary *lookupDict = @{
         @"kind": @"iosSoftware",
-        @"ipadecryptAutoalertNonce": requestNonce,
-        @"offers": @[@{
-            @"buyParams": buyParams,
-            @"ipadecryptAutoalertNonce": requestNonce,
-        }],
+        @"offers": @[@{@"buyParams": buyParams}],
     };
 
     Class itemCls = objc_getClass("SKUIItem");
