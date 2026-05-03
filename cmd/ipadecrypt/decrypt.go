@@ -283,9 +283,9 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			idx, err := tui.Select(
 				fmt.Sprintf("%s v%s is installed - which build do you want decrypted?", target.bundleId, version),
 				[]string{
-					fmt.Sprintf("Installed build v%s (no App Store reinstall)", version),
-					"Latest from App Store (will reinstall, overwriting installed)",
-					"Latest iOS-compatible via on-device StoreKit (no patching)",
+					fmt.Sprintf("Installed build v%s", version),
+					"Latest from App Store",
+					"Latest iOS-compatible version",
 				},
 			)
 			if err != nil {
@@ -348,8 +348,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				idx, err := tui.Select(
 					fmt.Sprintf("which build of %s do you want decrypted?", target.bundleId),
 					[]string{
-						"Latest from App Store (will patch MinimumOSVersion if needed)",
-						"Latest iOS-compatible via on-device StoreKit (no patching)",
+						"Latest from App Store",
+						"Latest iOS-compatible version",
 					},
 				)
 				if err != nil {
@@ -982,7 +982,7 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 }
 
 func remoteOutputPath(bundleID, version string) string {
-	return path.Join("/var/mobile/Documents/ipadecrypt", fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version))
+	return path.Join("/var/mobile/Documents/ipadecrypt/decrypted", fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version))
 }
 
 func localOutputPath(override, bundleID, version string) (string, error) {

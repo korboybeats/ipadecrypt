@@ -2,6 +2,7 @@
 
 typedef NS_ENUM(NSInteger, IDDecryptOption) {
     IDDecryptOptionInstalled,           // decrypt the build already on disk
+    IDDecryptOptionLatestAppStore,      // download latest with Apple credentials, patch/install, then decrypt
     IDDecryptOptionLatestStoreKit,      // trigger StoreKit download then decrypt
 };
 
@@ -14,6 +15,7 @@ typedef NS_ENUM(NSInteger, IDDecryptOption) {
               title:(NSString *)title
    installedDisplay:(NSString *)installedDisplay
             trackID:(NSInteger)trackID
+  appStoreAvailable:(BOOL)appStoreAvailable
          completion:(void (^)(IDDecryptOption picked, BOOL cancelled))completion;
 
 @end

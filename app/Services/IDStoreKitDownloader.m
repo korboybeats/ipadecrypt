@@ -7,6 +7,7 @@
 @implementation IDStoreKitDownloader
 
 + (void)downloadTrackID:(NSInteger)trackID
+                  nonce:(NSString *)nonce
              completion:(void (^)(NSError *))completion {
     if (!IDLoadStoreKitUI()) {
         completion([NSError errorWithDomain:@"IDStoreKitDownloader" code:1
@@ -16,10 +17,15 @@
 
     NSString *buyParams = [NSString stringWithFormat:
         @"productType=C&price=0&salableAdamId=%ld&pricingParameters=STDRDL", (long)trackID];
+    NSString *requestNonce = nonce ?: @"";
 
     NSDictionary *lookup = @{
         @"kind": @"iosSoftware",
-        @"offers": @[@{@"buyParams": buyParams}],
+        @"ipadecryptAutoalertNonce": requestNonce,
+        @"offers": @[@{
+            @"buyParams": buyParams,
+            @"ipadecryptAutoalertNonce": requestNonce,
+        }],
     };
 
     Class itemCls = NSClassFromString(@"SKUIItem");

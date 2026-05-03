@@ -8,4 +8,9 @@
        country:(NSString *)country
          limit:(NSInteger)limit
     completion:(void (^)(NSArray<IDSearchResult *> *results, NSError *err))completion;
+
+// Exact lookup by CFBundleIdentifier. Used to resolve trackID for installed apps.
++ (void)lookupBundleID:(NSString *)bundleID
+               country:(NSString *)country
+            completion:(void (^)(IDSearchResult *result, NSError *err))completion;
 @end

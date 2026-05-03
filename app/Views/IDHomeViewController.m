@@ -7,11 +7,79 @@
 #import "IDDecryptOptionsViewController.h"
 #import "IDDecryptProgressViewController.h"
 #import "IDHelperRunner.h"
+#import "IDAppStoreHelperRunner.h"
 #import "IDStoreKitDownloader.h"
 #import "IDAutoalertArmer.h"
 #import "Logging.h"
+#import <objc/message.h>
+#import <objc/runtime.h>
 
 static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
+static NSString *const IDDecryptedOutputDirectory = @"/var/mobile/Documents/ipadecrypt/decrypted";
+
+static NSString *IDAppStoreStepTitle(NSString *name) {
+    if ([name isEqualToString:@"loading-config"]) return @"Preparing App Store session";
+    if ([name isEqualToString:@"authenticating"]) return @"Signing in to Apple ID";
+    if ([name isEqualToString:@"lookup-track"] || [name isEqualToString:@"lookup-bundle"]) return @"Checking latest App Store version";
+    if ([name isEqualToString:@"prepare-download"]) return @"Authorizing download";
+    if ([name isEqualToString:@"patch"]) return @"Preparing IPA for install";
+    if ([name isEqualToString:@"install"]) return @"Installing IPA";
+    return name.length ? name : @"Working";
+}
+
+static BOOL IDShouldShowAppinstLine(NSString *line) {
+    if (line.length == 0) return NO;
+    if ([line containsString:@"Successfully installed"]) return YES;
+    if ([line.lowercaseString containsString:@"error"] || [line.lowercaseString containsString:@"failed"]) return YES;
+    return NO;
+}
+
+static NSString *IDAppinstDisplayLine(NSString *line) {
+    if ([line containsString:@"Successfully installed"]) return @"Install completed";
+    return [NSString stringWithFormat:@"appinst: %@", line];
+}
+
+static BOOL IDIsExpectedAuthStderr(NSString *line) {
+    return [line containsString:@"Apple ID sign-in required"] ||
+           [line containsString:@"auth code required"];
+}
+
+static BOOL IDIsExpectedDecryptStderr(NSString *line) {
+    return [line containsString:@"child died during exec of "] ||
+           [line containsString:@"spawn failed for "];
+}
+
+static NSString *IDHumanBytes(long long n) {
+    double v = (double)n;
+    if (n >= (1LL << 40)) return [NSString stringWithFormat:@"%.2f TB", v / (double)(1LL << 40)];
+    if (n >= (1LL << 30)) return [NSString stringWithFormat:@"%.2f GB", v / (double)(1LL << 30)];
+    if (n >= (1LL << 20)) return [NSString stringWithFormat:@"%.1f MB", v / (double)(1LL << 20)];
+    if (n >= (1LL << 10)) return [NSString stringWithFormat:@"%.1f KB", v / (double)(1LL << 10)];
+    return [NSString stringWithFormat:@"%lld B", n];
+}
+
+static NSString *IDPluralize(NSString *count, NSString *noun) {
+    return [count isEqualToString:@"1"] ? [NSString stringWithFormat:@"%@ %@", count, noun]
+                                        : [NSString stringWithFormat:@"%@ %@s", count, noun];
+}
+
+static NSString *IDPrettyImageName(NSString *name) {
+    NSRange fw = [name rangeOfString:@".framework/"];
+    if (fw.location != NSNotFound) {
+        NSString *prefix = [name substringToIndex:fw.location];
+        NSString *base = prefix.lastPathComponent;
+        return [base stringByAppendingString:@".framework"];
+    }
+
+    NSRange appex = [name rangeOfString:@".appex/"];
+    if (appex.location != NSNotFound) {
+        NSString *prefix = [name substringToIndex:appex.location];
+        NSString *base = prefix.lastPathComponent;
+        return [base stringByAppendingString:@".appex"];
+    }
+
+    return name;
+}
 
 @interface IDHomeViewController ()
 @property (nonatomic, strong) NSArray<IDInstalledApp *> *installed;
@@ -19,6 +87,10 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 @property (nonatomic, strong) NSArray<IDSearchResult *> *appStoreHits;
 @property (nonatomic, strong) UISearchController *searchController;
 @property (nonatomic, copy) NSString *currentTerm;
+@property (nonatomic) NSInteger decryptTotal;
+@property (nonatomic) NSInteger decryptMain;
+@property (nonatomic) NSInteger decryptFrameworks;
+@property (nonatomic) NSInteger decryptOther;
 @end
 
 @implementation IDHomeViewController
@@ -40,7 +112,13 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
                                                                 target:self
                                                                 action:@selector(showSettings)];
     settings.accessibilityLabel = @"Settings";
-    self.navigationItem.rightBarButtonItem = settings;
+    UIImage *folder = [UIImage systemImageNamed:@"folder"];
+    UIBarButtonItem *openDecrypted = [[UIBarButtonItem alloc] initWithImage:folder
+                                                                      style:UIBarButtonItemStylePlain
+                                                                     target:self
+                                                                     action:@selector(openDecryptedFolder)];
+    openDecrypted.accessibilityLabel = @"Open decrypted IPAs in Filza";
+    self.navigationItem.rightBarButtonItems = @[settings, openDecrypted];
 
     UIRefreshControl *rc = [[UIRefreshControl alloc] init];
     [rc addTarget:self action:@selector(reload) forControlEvents:UIControlEventValueChanged];
@@ -64,6 +142,48 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
                                               style:UIAlertActionStyleCancel
                                             handler:nil]];
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)openDecryptedFolder {
+    [[NSFileManager defaultManager] createDirectoryAtPath:IDDecryptedOutputDirectory
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    [self openFilzaForPath:IDDecryptedOutputDirectory];
+}
+
+- (void)openFilzaForPath:(NSString *)path {
+    if (path.length == 0) return;
+
+    NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:
+        [NSCharacterSet URLPathAllowedCharacterSet]];
+    if (![encoded hasSuffix:@"/."]) {
+        encoded = [[encoded stringByAppendingString:@"/"] stringByAppendingString:@"."];
+    }
+    NSURL *url = [NSURL URLWithString:[@"filza://view" stringByAppendingString:encoded ?: path]];
+    [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL ok) {
+        if (ok) return;
+        if (![self openFilzaByBundleID:@"com.tigisoftware.FilzaTS"] &&
+            ![self openFilzaByBundleID:@"com.tigisoftware.Filza"]) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Filza unavailable"
+                                                                           message:nil
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                      style:UIAlertActionStyleCancel
+                                                    handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    }];
+}
+
+- (BOOL)openFilzaByBundleID:(NSString *)bundleID {
+    Class cls = NSClassFromString(@"LSApplicationWorkspace");
+    if (!cls) return NO;
+    id workspace = ((id (*)(Class, SEL))objc_msgSend)(cls, sel_registerName("defaultWorkspace"));
+    if (!workspace) return NO;
+    SEL sel = sel_registerName("openApplicationWithBundleID:");
+    if (![workspace respondsToSelector:sel]) return NO;
+    return ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(workspace, sel, bundleID);
 }
 
 - (void)reload {
@@ -114,7 +234,9 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 
 #pragma mark - UITableView
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
+    return self.currentTerm.length > 0 ? 2 : 1;
+}
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     if (s == 0) return @"Installed";
@@ -146,11 +268,13 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 
     NSString *title = nil;
     NSString *installedDisplay = nil;
+    NSString *bundleID = nil;
     NSInteger trackID = 0;
 
     if (ip.section == 0) {
         IDInstalledApp *a = self.installedFiltered[ip.row];
         title = a.displayName;
+        bundleID = a.bundleID;
         installedDisplay = [NSString stringWithFormat:@"v%@", a.version];
 
         // Try to find a matching App Store hit for the trackID. Best-effort.
@@ -160,9 +284,21 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
                 break;
             }
         }
+        if (trackID == 0) {
+            [IDITunesSearch lookupBundleID:bundleID country:@"US"
+                                completion:^(IDSearchResult *result, NSError *err) {
+                [self presentDecryptOptionsForTitle:title
+                                   installedDisplay:installedDisplay
+                                           bundleID:bundleID
+                                            trackID:result.trackID
+                                          indexPath:ip];
+            }];
+            return;
+        }
     } else {
         IDSearchResult *r = self.appStoreHits[ip.row];
         title = r.trackName;
+        bundleID = r.bundleID;
         trackID = r.trackID;
 
         // If the app is already installed, surface that option too.
@@ -174,32 +310,47 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
         }
     }
 
+    [self presentDecryptOptionsForTitle:title
+                       installedDisplay:installedDisplay
+                               bundleID:bundleID
+                                trackID:trackID
+                              indexPath:ip];
+}
+
+- (void)presentDecryptOptionsForTitle:(NSString *)title
+                      installedDisplay:(NSString *)installedDisplay
+                              bundleID:(NSString *)bundleID
+                               trackID:(NSInteger)trackID
+                             indexPath:(NSIndexPath *)ip {
     [IDDecryptOptionsViewController presentFrom:self
                                           title:title
                                installedDisplay:installedDisplay
                                         trackID:trackID
+                              appStoreAvailable:(bundleID.length > 0)
                                      completion:^(IDDecryptOption opt, BOOL cancelled) {
         if (cancelled) return;
         IDLOG(@"picked option=%ld for %@", (long)opt, title);
         if (opt == IDDecryptOptionInstalled) {
             IDInstalledApp *target = nil;
-            NSString *bid = ip.section == 1 ? self.appStoreHits[ip.row].bundleID : nil;
             for (IDInstalledApp *a in self.installed) {
-                if (bid && [a.bundleID isEqualToString:bid]) { target = a; break; }
-                if (!bid && [a.displayName isEqualToString:title]) { target = a; break; }
+                if ([a.bundleID isEqualToString:bundleID]) { target = a; break; }
             }
             if (target) [self decryptInstalled:target];
+        } else if (opt == IDDecryptOptionLatestAppStore) {
+            [self latestFromAppStoreBundleID:bundleID
+                                     trackID:trackID
+                                displayName:title
+                                      email:nil
+                                   password:nil
+                                   authCode:nil];
         } else if (opt == IDDecryptOptionLatestStoreKit) {
-            NSString *bid = ip.section == 1
-                ? self.appStoreHits[ip.row].bundleID
-                : self.installedFiltered[ip.row].bundleID;
-            [self downloadAndDecryptTrackID:trackID bundleID:bid displayName:title];
+            [self downloadAndDecryptTrackID:trackID bundleID:bundleID displayName:title];
         }
     }];
 }
 
 - (NSString *)outputIPAForBundle:(NSString *)bundleID version:(NSString *)version {
-    NSString *dir = @"/var/mobile/Documents/ipadecrypt";
+    NSString *dir = IDDecryptedOutputDirectory;
     [[NSFileManager defaultManager] createDirectoryAtPath:dir
                               withIntermediateDirectories:YES
                                                attributes:nil error:nil];
@@ -214,13 +365,17 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 
 - (void)decryptInstalled:(IDInstalledApp *)app reuseVC:(IDDecryptProgressViewController *)existing {
     NSString *out = [self outputIPAForBundle:app.bundleID version:app.version];
+    self.decryptTotal = 0;
+    self.decryptMain = 0;
+    self.decryptFrameworks = 0;
+    self.decryptOther = 0;
 
     IDDecryptProgressViewController *vc = existing;
     if (!vc) {
         vc = [[IDDecryptProgressViewController alloc] initWithTitle:app.displayName];
         [self.navigationController pushViewController:vc animated:YES];
     }
-    [vc appendStatus:[NSString stringWithFormat:@"decrypting %@ v%@", app.bundleID, app.version]];
+    [vc appendStatus:[NSString stringWithFormat:@"Decrypting %@ v%@", app.bundleID, app.version]];
 
     [IDHelperRunner runWithBundleID:app.bundleID
                          bundlePath:app.appBundlePath
@@ -229,33 +384,324 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
         NSString *type = ev[@"event"] ?: @"";
         NSString *phase = ev[@"phase"] ?: @"";
         NSString *name = ev[@"name"] ?: ev[@"src"] ?: @"";
+        NSString *pretty = IDPrettyImageName(name);
         if ([type isEqualToString:@"stderr"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  %@", ev[@"line"] ?: @""]];
+            NSString *line = ev[@"line"] ?: @"";
+            if (!IDIsExpectedDecryptStderr(line)) {
+                [vc appendStatus:[NSString stringWithFormat:@"  %@", line]];
+            }
+        } else if ([type isEqualToString:@"spawn_chmod"]) {
+            return;
+        } else if ([type isEqualToString:@"spawn_path"]) {
+            return;
+        } else if ([type isEqualToString:@"spawn_path_fallback"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  SBS failed on %@, falling back to ptrace",
+                              [ev[@"exec"] lastPathComponent] ?: @""]];
+        } else if ([type isEqualToString:@"dyld"] && [phase isEqualToString:@"settled"]) {
+            return;
+        } else if ([type isEqualToString:@"dyld"] && [phase isEqualToString:@"trapped"]) {
+            return;
         } else if ([type isEqualToString:@"image"] && [phase isEqualToString:@"done"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  decrypted %@", name]];
+            self.decryptTotal++;
+            NSString *kind = ev[@"kind"] ?: @"";
+            if ([kind isEqualToString:@"main"]) self.decryptMain++;
+            else if ([kind isEqualToString:@"framework"]) self.decryptFrameworks++;
+            else self.decryptOther++;
+            [vc appendStatus:[NSString stringWithFormat:@"  decrypted %@ (%@)",
+                              pretty, IDHumanBytes([ev[@"size"] longLongValue])]];
         } else if ([type isEqualToString:@"image"] && [phase isEqualToString:@"failed"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  ! failed %@ (%@)",
-                              name, ev[@"reason"] ?: @"unknown"]];
+            [vc appendStatus:[NSString stringWithFormat:@"  failed to decrypt %@ (%@)",
+                              pretty, ev[@"reason"] ?: @"unknown"]];
         } else if ([type isEqualToString:@"bundle"] && [phase isEqualToString:@"skipped"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  skipped %@ (%@)",
+            [vc appendStatus:[NSString stringWithFormat:@"  bundle skipped: %@ (%@)",
                               [name lastPathComponent] ?: name, ev[@"reason"] ?: @"unknown"]];
         } else if ([type isEqualToString:@"bundle"] && [phase isEqualToString:@"done"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  bundle done (%@ extra)",
-                              ev[@"extras"] ?: @"0"]];
+            NSString *extras = ev[@"extras"] ?: @"0";
+            if (![extras isEqualToString:@"0"]) {
+                [vc appendStatus:[NSString stringWithFormat:@"  bundle done (%@)",
+                                  IDPluralize(extras, @"framework")]];
+            }
         } else if ([type isEqualToString:@"pack"] && [phase isEqualToString:@"start"]) {
-            [vc appendStatus:@"  packaging IPA"];
+            [vc appendStatus:[NSString stringWithFormat:@"  packaging IPA -> %@",
+                              [ev[@"ipa"] lastPathComponent] ?: @""]];
+        } else if ([type isEqualToString:@"pack"] && [phase isEqualToString:@"progress"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  packaging IPA %@%%",
+                              ev[@"percent"] ?: @"0"]];
         } else if ([type isEqualToString:@"pack"] && [phase isEqualToString:@"done"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  packaged %@", [ev[@"ipa"] lastPathComponent] ?: @""]];
+            [vc appendStatus:[NSString stringWithFormat:@"  packaged -> %@", [ev[@"ipa"] lastPathComponent] ?: @""]];
         } else if ([type isEqualToString:@"pack"] && [phase isEqualToString:@"failed"]) {
-            [vc appendStatus:@"  ! packaging failed"];
+            [vc appendStatus:[NSString stringWithFormat:@"  pack failed -> %@", [ev[@"ipa"] lastPathComponent] ?: @""]];
         } else if ([type isEqualToString:@"spawn_failed"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  ! spawn failed: %@", [name lastPathComponent] ?: name]];
+            [vc appendStatus:[NSString stringWithFormat:@"  could not spawn %@ (skipped)", [name lastPathComponent] ?: name]];
         }
     }
                          completion:^(int code, NSError *err) {
         NSError *finalErr = err;
-        [vc markCompleteWithOutputIPA:out error:finalErr];
+        if (finalErr) {
+            [vc markCompleteWithOutputIPA:out error:finalErr];
+            return;
+        }
+        NSString *summary = [NSString stringWithFormat:@"decrypted %ld image(s): %ld main, %ld framework",
+                             (long)self.decryptTotal, (long)self.decryptMain, (long)self.decryptFrameworks];
+        if (self.decryptOther > 0) {
+            summary = [summary stringByAppendingFormat:@", %ld other", (long)self.decryptOther];
+        }
+        [vc appendStatus:[NSString stringWithFormat:@"  %@", summary]];
+        [self verifyDecryptedIPA:out progressVC:vc];
     }];
+}
+
+- (void)verifyDecryptedIPA:(NSString *)out progressVC:(IDDecryptProgressViewController *)vc {
+    __block NSInteger encryptedCount = 0;
+    __block NSError *verifyError = nil;
+
+    [IDAppStoreHelperRunner verifyIPA:out
+                              onEvent:^(NSDictionary *ev) {
+        NSString *type = ev[@"event"] ?: @"";
+        NSString *phase = ev[@"phase"] ?: @"";
+        if (![type isEqualToString:@"verify"]) {
+            return;
+        }
+
+        if ([phase isEqualToString:@"begin"]) {
+            [vc appendStatus:@"  verify: begin"];
+        } else if ([phase isEqualToString:@"scanned"]) {
+            encryptedCount = [ev[@"encrypted"] integerValue];
+            [vc appendStatus:[NSString stringWithFormat:@"  verify: scanned=%@ encrypted=%@ skipped=%@",
+                              ev[@"scanned"] ?: @"0", ev[@"encrypted"] ?: @"0", ev[@"skipped"] ?: @"0"]];
+            if (encryptedCount > 0) {
+                verifyError = [NSError errorWithDomain:@"IDCryptidVerify" code:1
+                                              userInfo:@{NSLocalizedDescriptionKey:
+                                                  [NSString stringWithFormat:@"%ld binary(ies) still have cryptid != 0",
+                                                   (long)encryptedCount]}];
+                [vc appendStatus:[NSString stringWithFormat:@"  %ld binary(ies) still have cryptid != 0",
+                                  (long)encryptedCount]];
+            }
+        } else if ([phase isEqualToString:@"encrypted"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"    %@", ev[@"name"] ?: @""]];
+        } else if ([phase isEqualToString:@"skipped"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"    skipped: %@", ev[@"name"] ?: @""]];
+        } else if ([phase isEqualToString:@"done"]) {
+            [vc appendStatus:@"  verified cryptid=0"];
+        }
+    }
+                           completion:^(int code, NSError *err) {
+        if (verifyError) {
+            [vc markCompleteWithOutputIPA:out error:verifyError];
+        } else if (err) {
+            [vc markCompleteWithOutputIPA:out error:err];
+        } else {
+            [vc markCompleteWithOutputIPA:out error:nil];
+        }
+    }];
+}
+
+- (void)latestFromAppStoreBundleID:(NSString *)bundleID
+                            trackID:(NSInteger)trackID
+                       displayName:(NSString *)displayName
+                              email:(NSString *)email
+                           password:(NSString *)password
+                           authCode:(NSString *)authCode {
+    IDDecryptProgressViewController *vc = [[IDDecryptProgressViewController alloc]
+        initWithTitle:displayName];
+    [self.navigationController pushViewController:vc animated:YES];
+    [vc appendStatus:[NSString stringWithFormat:@"Installing latest App Store build for %@", bundleID]];
+    [self runAppStoreHelperForBundleID:bundleID
+                               trackID:trackID
+                           displayName:displayName
+                                 email:email
+                              password:password
+                              authCode:authCode
+                                    vc:vc];
+}
+
+- (void)runAppStoreHelperForBundleID:(NSString *)bundleID
+                             trackID:(NSInteger)trackID
+                         displayName:(NSString *)displayName
+                               email:(NSString *)email
+                            password:(NSString *)password
+                            authCode:(NSString *)authCode
+                                  vc:(IDDecryptProgressViewController *)vc {
+    __block NSString *installedBundle = nil;
+    __block NSString *installedVersion = nil;
+    __block NSString *installedPath = nil;
+    __block NSString *failureReason = nil;
+    __block NSString *failureMessage = nil;
+    __block NSInteger lastDownloadPercent = -1;
+
+    [IDAppStoreHelperRunner runWithBundleID:bundleID
+                                    trackID:trackID
+                                      email:email
+                                   password:password
+                                   authCode:authCode
+                                    onEvent:^(NSDictionary *ev) {
+        NSString *phase = ev[@"phase"] ?: @"";
+        if ([phase isEqualToString:@"step"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  %@", IDAppStoreStepTitle(ev[@"name"])]];
+        } else if ([phase isEqualToString:@"auth-required"]) {
+            [vc appendStatus:@"  Apple ID sign-in required"];
+        } else if ([phase isEqualToString:@"auth"]) {
+            NSString *name = ev[@"name"] ?: @"";
+            if ([name isEqualToString:@"reauth"]) {
+                [vc appendStatus:@"  Refreshing Apple ID session"];
+            } else if ([name isEqualToString:@"license"]) {
+                [vc appendStatus:@"  Acquiring App Store license"];
+            } else if ([name isEqualToString:@"retry"]) {
+                [vc appendStatus:@"  Retrying download authorization"];
+            }
+        } else if ([phase isEqualToString:@"app"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  Latest version: %@", ev[@"version"] ?: @"unknown"]];
+        } else if ([phase isEqualToString:@"cached"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  Using cached IPA: %@", [ev[@"path"] lastPathComponent] ?: @"IPA"]];
+        } else if ([phase isEqualToString:@"download"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  Downloading version %@", ev[@"version"] ?: @""]];
+        } else if ([phase isEqualToString:@"download-progress"]) {
+            long long cur = [ev[@"current"] longLongValue];
+            long long total = [ev[@"total"] longLongValue];
+            if (total > 0) {
+                NSInteger pct = (NSInteger)((cur * 100) / total);
+                if (pct == 100 || pct >= lastDownloadPercent + 10) {
+                    lastDownloadPercent = pct;
+                    if (pct >= 100) {
+                        [vc appendStatus:@"  Download complete"];
+                    } else {
+                        [vc appendStatus:[NSString stringWithFormat:@"  Download %ld%%", (long)pct]];
+                    }
+                }
+            }
+        } else if ([phase isEqualToString:@"downloaded"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  Downloaded %@", [ev[@"path"] lastPathComponent] ?: @"IPA"]];
+        } else if ([phase isEqualToString:@"patch"]) {
+            if ([ev[@"changed"] isEqualToString:@"1"]) {
+                [vc appendStatus:@"  IPA patched for install"];
+            } else {
+                [vc appendStatus:@"  No install patch needed"];
+            }
+        } else if ([phase isEqualToString:@"appinst"]) {
+            NSString *line = ev[@"line"] ?: @"";
+            if (IDShouldShowAppinstLine(line)) {
+                [vc appendStatus:[NSString stringWithFormat:@"  %@", IDAppinstDisplayLine(line)]];
+            }
+        } else if ([phase isEqualToString:@"installed"]) {
+            installedBundle = ev[@"bundle"] ?: bundleID;
+            installedVersion = ev[@"version"] ?: @"";
+            installedPath = ev[@"path"] ?: @"";
+            [vc appendStatus:[NSString stringWithFormat:@"  Installed version %@", installedVersion.length ? installedVersion : @"unknown"]];
+        } else if ([phase isEqualToString:@"failed"]) {
+            failureReason = ev[@"reason"];
+            failureMessage = ev[@"message"];
+        } else if ([phase isEqualToString:@"stderr"]) {
+            NSString *line = ev[@"line"] ?: @"";
+            if (!IDIsExpectedAuthStderr(line)) {
+                [vc appendStatus:[NSString stringWithFormat:@"  %@", line]];
+            }
+        }
+    }
+                                 completion:^(int code, NSError *err) {
+        BOOL needsCredentials = code == 20 ||
+            [failureReason isEqualToString:@"auth-required"] ||
+            [failureMessage containsString:@"Apple ID sign-in required"];
+        BOOL needsCode = code == 21 || [failureReason isEqualToString:@"auth-code-required"];
+
+        if (needsCredentials || needsCode) {
+            if (needsCode) {
+                [vc appendStatus:@"  Apple ID verification code required"];
+            }
+            [self promptAppleAuthForBundleID:bundleID
+                                     trackID:trackID
+                                 displayName:displayName
+                                         code:(needsCode && email.length && password.length)
+                                           vc:vc
+                                        email:email
+                                     password:password];
+            return;
+        }
+
+        if (err) {
+            [vc markCompleteWithOutputIPA:@"" error:err];
+            return;
+        }
+
+        if (installedPath.length == 0) {
+            NSError *missing = [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:4
+                                               userInfo:@{NSLocalizedDescriptionKey:
+                                                   @"helper finished without installed bundle path"}];
+            [vc markCompleteWithOutputIPA:@"" error:missing];
+            return;
+        }
+
+        IDInstalledApp *installed = [[IDInstalledApp alloc] init];
+        installed.bundleID = installedBundle ?: bundleID;
+        installed.displayName = displayName;
+        installed.version = installedVersion ?: @"";
+        installed.appBundlePath = installedPath;
+        self.installed = [IDAppEnumerator installedApps];
+        self.installedFiltered = self.installed;
+        [self.tableView reloadData];
+        [self decryptInstalled:installed reuseVC:vc];
+    }];
+}
+
+- (void)promptAppleAuthForBundleID:(NSString *)bundleID
+                            trackID:(NSInteger)trackID
+                        displayName:(NSString *)displayName
+                                code:(BOOL)codeOnly
+                                  vc:(IDDecryptProgressViewController *)vc
+                               email:(NSString *)email
+                            password:(NSString *)password {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:(codeOnly ? @"Apple 2FA Code" : @"Apple ID Sign In")
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    if (codeOnly) {
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"Code";
+            tf.keyboardType = UIKeyboardTypeNumberPad;
+        }];
+    } else {
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"Email";
+            tf.text = email ?: @"";
+            tf.keyboardType = UIKeyboardTypeEmailAddress;
+            tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        }];
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"Password";
+            tf.secureTextEntry = YES;
+            tf.text = password ?: @"";
+        }];
+    }
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:^(UIAlertAction *a) {
+        NSError *err = [NSError errorWithDomain:@"IDAppStoreAuth" code:1
+                                       userInfo:@{NSLocalizedDescriptionKey: @"Apple ID sign-in cancelled"}];
+        [vc markCompleteWithOutputIPA:@"" error:err];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Continue"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        NSString *nextEmail = email;
+        NSString *nextPassword = password;
+        NSString *nextCode = nil;
+        if (codeOnly) {
+            nextCode = alert.textFields.firstObject.text ?: @"";
+        } else {
+            nextEmail = alert.textFields.count > 0 ? alert.textFields[0].text : @"";
+            nextPassword = alert.textFields.count > 1 ? alert.textFields[1].text : @"";
+        }
+        [self runAppStoreHelperForBundleID:bundleID
+                                   trackID:trackID
+                               displayName:displayName
+                                     email:nextEmail
+                                  password:nextPassword
+                                  authCode:nextCode
+                                        vc:vc];
+    }]];
+
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)downloadAndDecryptTrackID:(NSInteger)trackID
@@ -269,9 +715,11 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
     NSString *beforePath = [self pathForInstalledBundle:bundleID];
     NSString *beforeVersion = [self versionAtPath:beforePath];
 
-    [IDAutoalertArmer arm];
+    NSString *nonce = [IDAutoalertArmer armForBundleID:bundleID trackID:trackID];
 
+    [vc appendStatus:@"waiting for App Store confirmation..."];
     [IDStoreKitDownloader downloadTrackID:trackID
+                                    nonce:nonce
                                completion:^(NSError *err) {
         if (err) {
             [vc markCompleteWithOutputIPA:@""
@@ -318,6 +766,28 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
     return p[@"CFBundleShortVersionString"] ?: p[@"CFBundleVersion"] ?: @"";
 }
 
+- (BOOL)installedAppReadyForDecrypt:(IDInstalledApp *)app {
+    if (!app || app.bundleID.length == 0 || app.version.length == 0 || app.appBundlePath.length == 0) {
+        return NO;
+    }
+
+    NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:
+                           [app.appBundlePath stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *executable = plist[@"CFBundleExecutable"];
+    if (executable.length == 0) {
+        return NO;
+    }
+
+    NSString *binary = [app.appBundlePath stringByAppendingPathComponent:executable];
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:binary isDirectory:&isDir] || isDir) {
+        return NO;
+    }
+
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:binary error:nil];
+    return [attrs fileSize] > 0;
+}
+
 - (void)pollInstallChange:(IDDecryptProgressViewController *)vc
                  bundleID:(NSString *)bundleID
                beforePath:(NSString *)beforePath
@@ -325,7 +795,10 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
               deadlineSec:(NSTimeInterval)deadlineSec
                completion:(void (^)(IDInstalledApp *installed))completion {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:deadlineSec];
-    __block NSDate *stableSince = nil;
+    __block NSString *readyPath = nil;
+    __block NSString *readyVersion = nil;
+    __block NSDate *readySince = nil;
+    __block NSDate *unchangedSince = nil;
 
     dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
     __block void (^tick)(void);
@@ -339,23 +812,38 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
         for (IDInstalledApp *a in [IDAppEnumerator installedApps]) {
             if ([a.bundleID isEqualToString:bundleID]) { current = a; break; }
         }
-        BOOL changed = current && (![current.appBundlePath isEqualToString:beforePath ?: @""] ||
-                                   ![current.version isEqualToString:beforeVersion ?: @""]);
-        if (changed) {
-            dispatch_async(dispatch_get_main_queue(), ^{ completion(current); });
-            tick = nil;
-            return;
-        }
-        if (current) {
-            if (!stableSince) stableSince = [NSDate date];
-            if ([[NSDate date] timeIntervalSinceDate:stableSince] > 15) {
-                // Already at latest — proceed.
+        BOOL ready = [self installedAppReadyForDecrypt:current];
+        if (ready) {
+            BOOL sameReady = [current.appBundlePath isEqualToString:readyPath ?: @""] &&
+                             [current.version isEqualToString:readyVersion ?: @""];
+            if (!sameReady) {
+                readyPath = current.appBundlePath;
+                readyVersion = current.version;
+                readySince = [NSDate date];
+            }
+            BOOL changed = ![current.appBundlePath isEqualToString:beforePath ?: @""] ||
+                           ![current.version isEqualToString:beforeVersion ?: @""];
+            if (changed && [[NSDate date] timeIntervalSinceDate:readySince] > 3) {
                 dispatch_async(dispatch_get_main_queue(), ^{ completion(current); });
                 tick = nil;
                 return;
             }
         } else {
-            stableSince = nil;
+            readyPath = nil;
+            readyVersion = nil;
+            readySince = nil;
+        }
+
+        if (current && ready) {
+            if (!unchangedSince) unchangedSince = [NSDate date];
+            if ([[NSDate date] timeIntervalSinceDate:unchangedSince] > 15) {
+                // Already at latest.
+                dispatch_async(dispatch_get_main_queue(), ^{ completion(current); });
+                tick = nil;
+                return;
+            }
+        } else {
+            unchangedSince = nil;
         }
         __weak void (^weakTick)(void) = tick;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), q, ^{

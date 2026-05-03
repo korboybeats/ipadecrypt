@@ -1,0 +1,20 @@
+#!/bin/sh
+
+PATH="/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+SOCK="/var/jb/var/run/ipadecryptd.sock"
+BIN="/var/jb/usr/libexec/ipadecryptd"
+LOG="/var/jb/tmp/ipadecryptd.log"
+ERR="/var/jb/tmp/ipadecryptd.err"
+
+mkdir -p /var/jb/var/run /var/jb/tmp
+
+while :; do
+    if [ ! -S "$SOCK" ] || ! ps -axo command | grep -q '^/var/jb/usr/libexec/ipadecryptd$'; then
+        killall ipadecryptd 2>/dev/null
+        rm -f "$SOCK"
+        nohup "$BIN" >"$LOG" 2>"$ERR" &
+    fi
+    sleep 10
+done

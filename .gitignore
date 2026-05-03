@@ -1,4 +1,10 @@
 *.ipa
+*.md
+!README.md
+!BUILDING.md
+!.github/
+!.github/ISSUE_TEMPLATE/
+!.github/ISSUE_TEMPLATE/bug_report.md
 .claude
 dist/
 .grepai/

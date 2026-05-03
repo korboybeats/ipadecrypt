@@ -1,14 +1,11 @@
 #import "IDHelperRunner.h"
 #import "Logging.h"
-#import <spawn.h>
-#import <sys/wait.h>
+#import <errno.h>
+#import <sys/socket.h>
+#import <sys/un.h>
+#import <unistd.h>
 
-extern char **environ;
-
-#define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
-extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t *attr, uid_t persona_id, uint32_t flags);
-extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *attr, uid_t uid);
-extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *attr, uid_t gid);
+static NSString *const IDDecryptDaemonSocket = @"/var/jb/var/run/ipadecryptd.sock";
 
 static NSDictionary *parseEvent(NSString *line) {
     if (![line hasPrefix:@"@evt "]) return nil;
@@ -55,105 +52,87 @@ static NSDictionary *parseEvent(NSString *line) {
         return;
     }
 
-    IDLOG(@"helper: spawn %@ %@ %@ %@", helper, bundleID, bundlePath, outIPA);
+    IDLOG(@"helper: daemon %@ %@ %@", helper, bundleID, bundlePath);
 
-    int outFD[2], errFD[2];
-    if (pipe(outFD) != 0 || pipe(errFD) != 0) {
-        completion(-1, [NSError errorWithDomain:@"IDHelperRunner" code:2
-                                       userInfo:@{NSLocalizedDescriptionKey: @"pipe() failed"}]);
-        return;
-    }
-
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addclose(&fa, outFD[0]);
-    posix_spawn_file_actions_addclose(&fa, errFD[0]);
-    posix_spawn_file_actions_adddup2(&fa, outFD[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&fa, errFD[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&fa, outFD[1]);
-    posix_spawn_file_actions_addclose(&fa, errFD[1]);
-
-    char *argv[] = {
-        (char *)helper.UTF8String,
-        (char *)(bundleID.UTF8String ?: ""),
-        (char *)bundlePath.UTF8String,
-        (char *)outIPA.UTF8String,
-        NULL,
-    };
-
-    posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-    posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-    posix_spawnattr_set_persona_uid_np(&attr, 0);
-    posix_spawnattr_set_persona_gid_np(&attr, 0);
-
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, helper.UTF8String, &fa, &attr, argv, environ);
-    posix_spawnattr_destroy(&attr);
-    posix_spawn_file_actions_destroy(&fa);
-    close(outFD[1]);
-    close(errFD[1]);
-    if (rc != 0) {
-        close(outFD[0]); close(errFD[0]);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
         completion(-1, [NSError errorWithDomain:@"IDHelperRunner" code:3
                                        userInfo:@{NSLocalizedDescriptionKey:
-                                                       [NSString stringWithFormat:@"spawn rc=%d", rc]}]);
+                                                       [NSString stringWithFormat:@"socket errno=%d", errno]}]);
         return;
     }
 
-    int outRead = outFD[0];
-    int errRead = errFD[0];
-    dispatch_queue_t q = dispatch_queue_create("ipadecrypt.helper", DISPATCH_QUEUE_CONCURRENT);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", IDDecryptDaemonSocket.UTF8String);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        int e = errno;
+        close(fd);
+        completion(-1, [NSError errorWithDomain:@"IDHelperRunner" code:4
+                                       userInfo:@{NSLocalizedDescriptionKey:
+                                                       [NSString stringWithFormat:@"connect %@ errno=%d", IDDecryptDaemonSocket, e]}]);
+        return;
+    }
+
+    NSString *request = [NSString stringWithFormat:@"%@\n%@\n%@\n%@\n",
+                                                   helper,
+                                                   bundleID ?: @"",
+                                                   bundlePath ?: @"",
+                                                   outIPA ?: @""];
+    NSData *data = [request dataUsingEncoding:NSUTF8StringEncoding];
+    const uint8_t *bytes = data.bytes;
+    NSUInteger left = data.length;
+    while (left > 0) {
+        ssize_t n = write(fd, bytes, left);
+        if (n <= 0) {
+            int e = errno;
+            close(fd);
+            completion(-1, [NSError errorWithDomain:@"IDHelperRunner" code:5
+                                           userInfo:@{NSLocalizedDescriptionKey:
+                                                           [NSString stringWithFormat:@"write daemon request errno=%d", e]}]);
+            return;
+        }
+        bytes += n;
+        left -= (NSUInteger)n;
+    }
+
+    dispatch_queue_t q = dispatch_queue_create("ipadecrypt.helper", DISPATCH_QUEUE_SERIAL);
     NSMutableArray<NSString *> *stderrLines = [NSMutableArray array];
 
-    // helper.c emits @evt lines to STDOUT; ERR()s and progress text to STDERR.
-    // Read both concurrently so neither blocks the other on a full pipe.
-    dispatch_group_t g = dispatch_group_create();
-
-    dispatch_group_async(g, q, ^{
-        FILE *outStream = fdopen(outRead, "r");
+    dispatch_async(q, ^{
+        FILE *stream = fdopen(fd, "r");
+        int exitCode = -1;
         char *buf = NULL; size_t cap = 0; ssize_t n;
-        while ((n = getline(&buf, &cap, outStream)) > 0) {
+        while (stream && (n = getline(&buf, &cap, stream)) > 0) {
             NSString *line = [[NSString alloc] initWithBytes:buf length:(NSUInteger)n - 1
                                                     encoding:NSUTF8StringEncoding];
+            if ([line hasPrefix:@"__ipadecryptd_exit "]) {
+                exitCode = [[line substringFromIndex:19] intValue];
+                continue;
+            }
             NSDictionary *ev = parseEvent(line);
             if (ev) {
+                if ([ev[@"event"] isEqualToString:@"stderr"] && [ev[@"line"] length] > 0) {
+                    @synchronized (stderrLines) {
+                        [stderrLines addObject:ev[@"line"]];
+                        if (stderrLines.count > 8) {
+                            [stderrLines removeObjectAtIndex:0];
+                        }
+                    }
+                }
                 dispatch_async(dispatch_get_main_queue(), ^{ if (eventBlock) eventBlock(ev); });
             } else {
                 IDLOG(@"helper-stdout: %@", line);
             }
         }
         free(buf);
-        fclose(outStream);
-    });
-
-    dispatch_group_async(g, q, ^{
-        FILE *errStream = fdopen(errRead, "r");
-        char *buf = NULL; size_t cap = 0; ssize_t n;
-        while ((n = getline(&buf, &cap, errStream)) > 0) {
-            NSString *line = [[NSString alloc] initWithBytes:buf length:(NSUInteger)n - 1
-                                                    encoding:NSUTF8StringEncoding];
-            IDLOG(@"helper-stderr: %@", line);
-            if (line.length > 0) {
-                @synchronized (stderrLines) {
-                    [stderrLines addObject:line];
-                    if (stderrLines.count > 8) {
-                        [stderrLines removeObjectAtIndex:0];
-                    }
-                }
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (eventBlock) eventBlock(@{@"event": @"stderr", @"line": line});
-                });
-            }
+        if (stream) {
+            fclose(stream);
+        } else {
+            close(fd);
         }
-        free(buf);
-        fclose(errStream);
-    });
 
-    dispatch_group_notify(g, q, ^{
-        int status = 0;
-        waitpid(pid, &status, 0);
-        int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         IDLOG(@"helper: exit %d", exitCode);
         NSError *err = nil;
         if (exitCode != 0) {

@@ -9,6 +9,7 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, copy) NSString *outIPA;
 @property (nonatomic, strong) UIBarButtonItem *shareItem;
+@property (nonatomic, strong) UIBarButtonItem *logsItem;
 @end
 
 @implementation IDDecryptProgressViewController
@@ -48,19 +49,26 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 - (void)markCompleteWithOutputIPA:(NSString *)outIPA error:(NSError *)err {
     [self.spinner stopAnimating];
     self.outIPA = outIPA;
+    UIImage *copyImage = [UIImage systemImageNamed:@"doc.on.doc"];
+    self.logsItem = [[UIBarButtonItem alloc] initWithImage:copyImage
+                                                     style:UIBarButtonItemStylePlain
+                                                    target:self
+                                                    action:@selector(copyLogs)];
+    self.logsItem.accessibilityLabel = @"Copy logs";
     if (err) {
         [self appendStatus:[NSString stringWithFormat:@"\nFAILED: %@", err.localizedDescription]];
-        self.navigationItem.rightBarButtonItem =
+        UIBarButtonItem *doneItem =
             [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                           target:self
                                                           action:@selector(done)];
+        self.navigationItem.rightBarButtonItems = @[doneItem, self.logsItem];
     } else {
         [self appendStatus:[NSString stringWithFormat:@"\n→ %@", outIPA]];
         self.shareItem = [[UIBarButtonItem alloc]
             initWithBarButtonSystemItem:UIBarButtonSystemItemAction
                                  target:self
                                  action:@selector(share)];
-        self.navigationItem.rightBarButtonItem = self.shareItem;
+        self.navigationItem.rightBarButtonItems = @[self.shareItem, self.logsItem];
         if ([[NSUserDefaults standardUserDefaults] boolForKey:IDOpenFilzaAfterDecryptKey]) {
             [self openFilzaForPath:[outIPA stringByDeletingLastPathComponent]];
         }
@@ -78,6 +86,13 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
         initWithActivityItems:@[u] applicationActivities:nil];
     avc.popoverPresentationController.barButtonItem = self.shareItem;
     [self presentViewController:avc animated:YES completion:nil];
+}
+
+- (void)copyLogs {
+    NSString *logs = self.textView.text ?: @"";
+    if (logs.length == 0) return;
+    UIPasteboard.generalPasteboard.string = logs;
+    [self appendStatus:@"logs copied"];
 }
 
 - (void)openFilzaForPath:(NSString *)path {

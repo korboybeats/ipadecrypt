@@ -56,6 +56,17 @@ func paint(code, s string) string {
 
 func Spacer() { fmt.Fprintln(Out) }
 
+// Header prints a plain command header with a leading blank line.
+func Header(title string) {
+	fmt.Fprintln(Out)
+
+	if useColor() {
+		fmt.Fprintln(Out, paint(ansiCyan+ansiBold, "▎")+" "+paint(ansiBold, title))
+	} else {
+		fmt.Fprintln(Out, "== "+title+" ==")
+	}
+}
+
 // Step prints a wizard-style step header with a leading blank line.
 func Step(n, total int, title string) {
 	head := fmt.Sprintf("Step %d/%d · %s", n, total, title)

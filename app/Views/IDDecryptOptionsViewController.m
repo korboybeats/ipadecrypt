@@ -6,6 +6,7 @@
               title:(NSString *)title
    installedDisplay:(NSString *)installedDisplay
             trackID:(NSInteger)trackID
+  appStoreAvailable:(BOOL)appStoreAvailable
          completion:(void (^)(IDDecryptOption, BOOL))completion {
     UIAlertController *sheet = [UIAlertController
         alertControllerWithTitle:title
@@ -21,9 +22,18 @@
         }]];
     }
 
+    if (appStoreAvailable) {
+        [sheet addAction:[UIAlertAction
+            actionWithTitle:@"Latest from App Store"
+                      style:UIAlertActionStyleDefault
+                    handler:^(UIAlertAction *a) {
+            completion(IDDecryptOptionLatestAppStore, NO);
+        }]];
+    }
+
     if (trackID > 0) {
         [sheet addAction:[UIAlertAction
-            actionWithTitle:@"Latest iOS-compatible (via StoreKit)"
+            actionWithTitle:@"Latest iOS-compatible"
                       style:UIAlertActionStyleDefault
                     handler:^(UIAlertAction *a) {
             completion(IDDecryptOptionLatestStoreKit, NO);

@@ -88,7 +88,13 @@ func main() {
 	}
 	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/ipadecrypt/logs/versions.log")
 
-	root.AddCommand(bootstrap, decrypt, versions)
+	doctor := &cobra.Command{
+		Use:   "doctor",
+		Short: "Diagnose local config, SSH, jailbreak tools, helpers, and app install health",
+		Run:   doctorHandler,
+	}
+
+	root.AddCommand(bootstrap, decrypt, versions, doctor)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

@@ -12,7 +12,7 @@ ipadecrypt_FILES = main.m AppDelegate.m SceneDelegate.m Logging.m PrivateAPI.m \
                    Models/IDInstalledApp.m Models/IDSearchResult.m \
                    Services/IDAppEnumerator.m Services/IDITunesSearch.m \
                    Services/IDAutoalertArmer.m Services/IDStoreKitDownloader.m \
-                   Services/IDHelperRunner.m \
+                   Services/IDHelperRunner.m Services/IDAppStoreHelperRunner.m \
                    Views/IDAppRowCell.m Views/IDHomeViewController.m \
                    Views/IDDecryptOptionsViewController.m \
                    Views/IDDecryptProgressViewController.m

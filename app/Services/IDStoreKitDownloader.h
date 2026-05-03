@@ -8,6 +8,7 @@
 // trackID is the numeric App Store ID (e.g. from IDSearchResult.trackID).
 // Calls completion on main queue. err is nil on accepted-by-appstored.
 + (void)downloadTrackID:(NSInteger)trackID
+                  nonce:(NSString *)nonce
              completion:(void (^)(NSError *err))completion;
 
 @end

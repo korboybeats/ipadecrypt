@@ -376,7 +376,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	// ---- Step 5: auto-confirm tweak ----------------------------------
 
 	tui.Step(5, 5, "Install the auto-confirm tweak")
-	tui.Info("A SpringBoard tweak that auto-dismisses the App Store \"Download an\nolder version\" prompt during the StoreKit decrypt path. Without it,\nyou tap Download manually each time.")
+	tui.Info("An optional SpringBoard tweak that taps the App Store older-version\nDownload prompt only while ipadecrypt's Latest iOS-compatible sentinel is armed.\nWithout it, you tap Download manually each time.")
 
 	if dev.IsAutoalertInstalled() {
 		tui.OK("ipadecryptautoalert already installed")

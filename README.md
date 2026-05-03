@@ -23,8 +23,9 @@ This fork adds a handful of QoL features on top of upstream:
 - **SSH port + multi-host failover.** Bootstrap prompts for a non-default SSH port. `host` accepts a comma-separated list of IPs; the first reachable one is used (handy if your phone hops between Wi-Fi networks).
 - **Fuzzy target resolution.** `ipadecrypt decrypt messenger` scans installed apps and matches against bundle ID + display name. Single match auto-selects; multiple matches prompt to pick.
 - **On-device StoreKit download path.** New menu option that triggers the device's own App Store flow via `SKUIItem` + `SKUIItemStateCenter`. Apple's CDN serves the latest version compatible with the device's iOS. The download uses `STDRDL` (redownload-from-library) pricing, which skips the Face ID purchase confirmation. ipadecrypt then decrypts the freshly-installed bundle.
-- **Auto-confirm tweak (`ipadecryptautoalert`).** Bundled SpringBoard tweak (auto-installed via dpkg during bootstrap) that dismisses the "Download an older version of this app?" prompt automatically during the StoreKit path. Gated by a sentinel file so it only fires while ipadecrypt is actively running, and only on that specific alert.
-- **Decrypted IPA stays on device.** The output IPA is written to `/var/mobile/Documents/ipadecrypt/` and not cleaned up — easy to grab from the device later.
+- **Jailbreak app.** Offers **Latest from App Store** and **Latest iOS-compatible** actions, copyable logs, IPA sharing, and a Filza shortcut for the decrypted output folder.
+- **Auto-confirm tweak (`ipadecryptautoalert`).** Optional SpringBoard tweak installed during bootstrap via `dpkg`. When ipadecrypt starts a **Latest iOS-compatible** StoreKit download, it arms a short-lived sentinel file; the tweak only auto-taps the `Download` action on the App Store older-version alert while that sentinel is valid.
+- **Decrypted IPA stays on device.** The output IPA is written to `/var/mobile/Documents/ipadecrypt/decrypted/` and not cleaned up - easy to grab from the device later.
 - **Single PC workspace.** CLI config, cookies, cache, and logs live under `~/ipadecrypt/`; decrypted PC outputs default to `~/ipadecrypt/decrypted/`.
 - **Faster IPA post-processing.** Metadata/Watch cleanup is combined into one scanned pass and skips rewriting entirely when there is nothing to remove. Cryptid verification streams Mach-O load commands instead of reading whole binaries into memory.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
@@ -82,6 +83,23 @@ ipadecrypt --version
 
 Refer to [BUILDING.md](BUILDING.md) for helper and release-style build details.
 
+### Jailbreak app
+
+The release includes rootless `.deb` packages for the on-device app and the
+optional auto-confirm tweak:
+
+- `com.korboy.ipadecrypt_0.0.1_iphoneos-arm64.deb`
+- `com.korboy.ipadecryptautoalert_0.0.1_iphoneos-arm64.deb`
+
+To build and install the app locally:
+
+```sh
+./app/build.sh
+```
+
+The script builds the app, app-store helper, and daemon, installs the package
+on the phone, refreshes uicache, and opens `com.korboy.ipadecrypt`.
+
 ## Usage
 
 ### First-time setup
@@ -96,7 +114,7 @@ A five-step interactive wizard:
 2. **Device connect** - SSH host / user / password; probes iOS version + arch.
 3. **Prerequisites** - verifies AppSync, `appinst`, and `zip` are installed.
 4. **Helper install** - uploads a small embedded helper binary.
-5. **Auto-confirm tweak** - optionally installs `ipadecryptautoalert`, a SpringBoard tweak that auto-taps the "Download" prompt during StoreKit installs.
+5. **Auto-confirm tweak** - optionally installs `ipadecryptautoalert`, a SpringBoard tweak that auto-taps the older-version `Download` prompt during **Latest iOS-compatible** installs.
 
 ### Decrypt an app
 
@@ -105,7 +123,16 @@ ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 ```
 
 Decrypted IPAs are saved to `~/ipadecrypt/decrypted/` on your computer and
-kept on the device under `/var/mobile/Documents/ipadecrypt/`.
+kept on the device under `/var/mobile/Documents/ipadecrypt/decrypted/`.
+
+### Diagnose setup
+
+```sh
+ipadecrypt doctor
+```
+
+Checks local config, SSH/sudo, jailbreak tooling, helper execution, output
+folders, auto-confirm state, and the installed jailbreak app/daemon.
 
 ## License
 

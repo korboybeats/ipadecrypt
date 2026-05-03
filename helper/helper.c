@@ -344,6 +344,78 @@ done:
     return rc;
 }
 
+// Pick a runtime fingerprint from the file itself. This is used when an
+// extension cannot be launched at all, so there is no target task to sample.
+static int infer_file_runtime(const char *path, runtime_image_t *out) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) < 0) { close(fd); return -1; }
+    if (st.st_size < (off_t)sizeof(struct fat_header)) { close(fd); return -1; }
+
+    size_t file_sz = (size_t)st.st_size;
+    void *map = mmap(NULL, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return -1;
+
+    int rc = -1;
+    const uint8_t *base = map;
+    uint32_t magic;
+    memcpy(&magic, base, 4);
+
+    if (magic == FAT_MAGIC || magic == FAT_CIGAM ||
+        magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64) {
+        int is_fat64 = (magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64);
+        int swap = (magic == FAT_CIGAM || magic == FAT_CIGAM_64);
+        struct fat_header fh;
+        memcpy(&fh, base, sizeof(fh));
+        uint32_t nfat = swap ? OSSwapBigToHostInt32(fh.nfat_arch) : fh.nfat_arch;
+        uint64_t arch_size = is_fat64 ? sizeof(struct fat_arch_64)
+                                      : sizeof(struct fat_arch);
+        if (nfat == 0 || nfat > (file_sz - sizeof(struct fat_header)) / arch_size)
+            goto done;
+
+        mach_slice_t fallback;
+        int have_fallback = 0;
+        for (uint32_t i = 0; i < nfat; i++) {
+            uint64_t s_off, s_sz;
+            if (fat_slice_range(base, file_sz, is_fat64, swap, i, &s_off, &s_sz) != 0)
+                goto done;
+            mach_slice_t slice;
+            int sr = parse_thin_slice(base + s_off, (size_t)s_sz,
+                                      (off_t)s_off, s_sz, &slice);
+            if (sr < 0) goto done;
+            if (sr == 0) continue;
+            if (!have_fallback) {
+                fallback = slice;
+                have_fallback = 1;
+            }
+            if (slice.crypt.has_crypt && slice.crypt.cryptid != 0) {
+                fallback = slice;
+                have_fallback = 1;
+                break;
+            }
+        }
+        if (!have_fallback) goto done;
+        out->cputype = fallback.slice.cputype;
+        out->cpusubtype = fallback.slice.cpusubtype;
+        out->is_64 = fallback.slice.is_64;
+        rc = 0;
+    } else {
+        mach_slice_t slice;
+        int sr = parse_thin_slice(base, file_sz, 0, file_sz, &slice);
+        if (sr != 1) goto done;
+        out->cputype = slice.slice.cputype;
+        out->cpusubtype = slice.slice.cpusubtype;
+        out->is_64 = slice.slice.is_64;
+        rc = 0;
+    }
+
+done:
+    munmap(map, file_sz);
+    return rc;
+}
+
 static int is_macho(const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return 0;
@@ -1158,6 +1230,40 @@ static int rescue_unmapped_frameworks(const char *bundle_src, const char *bundle
     return rescued;
 }
 
+static int rescue_bundle_main(const char *bundle_src, const char *bundle_dst,
+                              const char *main_name, runtime_image_t *out_rt) {
+    char main_src[4096], main_dst[4096];
+    snprintf(main_src, sizeof(main_src), "%s/%s", bundle_src, main_name);
+    snprintf(main_dst, sizeof(main_dst), "%s/%s", bundle_dst, main_name);
+
+    runtime_image_t rt;
+    if (infer_file_runtime(main_src, &rt) != 0) {
+        EVT("event=image phase=failed name=\"%s\" kind=main reason=\"no_runtime\" source=rescue",
+            main_name);
+        return -1;
+    }
+
+    selected_slice_t sel;
+    if (select_runtime_slice(main_src, &rt, &sel) != 1 || !slice_needs_dump(&sel)) {
+        if (out_rt) *out_rt = rt;
+        return 0;
+    }
+
+    EVT("event=image phase=start name=\"%s\" kind=main source=rescue", main_name);
+    dump_result_t dr = mmap_dump(main_src, main_dst, &sel);
+    if (dr == DUMP_OK) {
+        EVT("event=image phase=done name=\"%s\" kind=main size=%u source=rescue",
+            main_name, sel.selected.crypt.cryptsize);
+        if (out_rt) *out_rt = rt;
+        return 1;
+    }
+
+    EVT("event=image phase=failed name=\"%s\" kind=main reason=\"%s\" source=rescue",
+        main_name, dump_reason(dr));
+    if (out_rt) *out_rt = rt;
+    return 0;
+}
+
 // Decrypt one bundle (main .app, .appex, or any .framework with executable).
 // bundle_src: original bundle on disk
 // bundle_dst: where to write decrypted copy (should already contain a copy
@@ -1182,6 +1288,17 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     if (spawn_suspended(bundle_id, main_src, &pid, &task, &via_ptrace) != 0) {
         ERR("spawn failed for %s", bundle_src);
         EVT("event=spawn_failed src=\"%s\"", bundle_src);
+        if (!bundle_id || !bundle_id[0]) {
+            runtime_image_t rescue_rt;
+            int rescued_main = rescue_bundle_main(bundle_src, bundle_dst, main_name, &rescue_rt);
+            int rescued_extra = 0;
+            if (rescued_main >= 0) {
+                rescued_extra = rescue_unmapped_frameworks(bundle_src, bundle_dst,
+                    &rescue_rt, NULL, 0, main_name);
+            }
+            EVT("event=bundle phase=done src=\"%s\" extras=%d",
+                bundle_src, rescued_extra);
+        }
         return 0; // non-fatal; continue with rest of the IPA
     }
 
@@ -1225,7 +1342,8 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     mach_port_t exc = via_ptrace ? MACH_PORT_NULL : make_exception_port(task);
     LOG("[helper] resuming %s (via_ptrace=%d)\n", bundle_src, via_ptrace);
     EVT("event=dyld phase=resuming src=\"%s\" via_ptrace=%d", bundle_src, via_ptrace);
-    run_and_suspend(task, pid, via_ptrace, exc, 2000);
+    run_and_suspend(task, pid, via_ptrace, exc,
+        (bundle_id && bundle_id[0]) ? 10000 : 2000);
 
     // 3) Enumerate images loaded in the (now suspended or dead) target task
     //    and dump every encrypted one whose path is inside this bundle.
@@ -1359,19 +1477,59 @@ static void decrypt_appexes(const char *bundle_src, const char *bundle_dst) {
 
 // ----- zip via /var/jb/usr/bin/zip ------------------------------------
 
+static uint64_t count_zip_entries_recursive(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return 0;
+
+    uint64_t count = 1;
+    if (!S_ISDIR(st.st_mode)) return count;
+
+    DIR *d = opendir(path);
+    if (!d) return count;
+
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char child[4096];
+        snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        count += count_zip_entries_recursive(child);
+    }
+    closedir(d);
+    return count;
+}
+
+static uint64_t count_zip_entries(const char *staging) {
+    char payload[4096];
+    snprintf(payload, sizeof(payload), "%s/Payload", staging);
+    return count_zip_entries_recursive(payload);
+}
+
 static int run_zip(const char *staging, const char *ipa_path) {
     // posix_spawn_file_actions_addchdir_np is iOS-unavailable, so chdir
     // in the parent. This is the last step of the helper so the pwd change
     // doesn't matter afterwards.
+    uint64_t total_entries = count_zip_entries(staging);
+    uint64_t seen_entries = 0;
+    int last_percent = -1;
+
     char cwd_save[4096];
     if (!getcwd(cwd_save, sizeof(cwd_save))) cwd_save[0] = '\0';
     if (chdir(staging) != 0) { ERR("chdir %s: %s", staging, strerror(errno)); return -1; }
 
+    int pipe_fds[2] = { -1, -1 };
+    if (pipe(pipe_fds) != 0) {
+        if (cwd_save[0]) chdir(cwd_save);
+        ERR("pipe: %s", strerror(errno));
+        return -1;
+    }
+
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, pipe_fds[1], 1);
+    posix_spawn_file_actions_addclose(&fa, pipe_fds[0]);
+    posix_spawn_file_actions_addclose(&fa, pipe_fds[1]);
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-    char *argv[] = { "zip", "-qr", (char *)ipa_path, "Payload", NULL };
+    char *argv[] = { "zip", "-1", "-r", (char *)ipa_path, "Payload", NULL };
     pid_t pid = 0;
     const char *zip_paths[] = { "/var/jb/usr/bin/zip", "/usr/bin/zip", NULL };
     int rc = -1;
@@ -1382,7 +1540,34 @@ static int run_zip(const char *staging, const char *ipa_path) {
     }
     posix_spawn_file_actions_destroy(&fa);
     if (cwd_save[0]) chdir(cwd_save);
-    if (rc != 0 || pid == 0) { ERR("zip not available"); return -1; }
+    close(pipe_fds[1]);
+    if (rc != 0 || pid == 0) {
+        close(pipe_fds[0]);
+        ERR("zip not available");
+        return -1;
+    }
+
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipe_fds[0], buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] != '\n') continue;
+            seen_entries++;
+            if (total_entries == 0) continue;
+            int percent = (int)((seen_entries * 100) / total_entries);
+            if (percent > 99) percent = 99;
+            if (percent > last_percent && (percent >= last_percent + 5 || percent == 99)) {
+                last_percent = percent;
+                EVT("event=pack phase=progress ipa=\"%s\" current=%llu total=%llu percent=%d",
+                    ipa_path,
+                    (unsigned long long)seen_entries,
+                    (unsigned long long)total_entries,
+                    percent);
+            }
+        }
+    }
+    close(pipe_fds[0]);
+
     int st;
     waitpid(pid, &st, 0);
     return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;

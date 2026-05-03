@@ -62,19 +62,40 @@ static BOOL isAllDigits(NSString *s) {
     return YES;
 }
 
+static NSString *writeAutoalertArm(NSString *target, NSString *appID) {
+    if (appID.length == 0) return nil;
+    NSString *bundleID = isAllDigits(target) ? @"" : target;
+    NSString *nonce = NSUUID.UUID.UUIDString;
+    NSDictionary *record = @{
+        @"operation": @"storekit-compatible-download",
+        @"bundleID": bundleID,
+        @"trackID": @([appID longLongValue]),
+        @"nonce": nonce,
+        @"createdAt": @([[NSDate date] timeIntervalSince1970]),
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
+    [data writeToFile:@"/var/mobile/.ipadecryptautoalert-arm" atomically:YES];
+    return nonce;
+}
+
 // Initiate the purchase. Returns 0 on accepted-by-appstored, 2 on error
 // reported in the completion block.
-static int performAppDownload(NSString *appID) {
+static int performAppDownload(NSString *appID, NSString *nonce) {
     // STDRDL = redownload from library: no purchase transaction, no Face ID
     // prompt, no install confirmation. Apps must already be in the user's
     // App Store library (free apps you've previously gotten count). For
     // never-acquired apps appstored returns an error.
     NSString *buyParams = [NSString stringWithFormat:
         @"productType=C&price=0&salableAdamId=%@&pricingParameters=STDRDL", appID];
+    NSString *requestNonce = nonce ?: @"";
 
     NSDictionary *lookupDict = @{
         @"kind": @"iosSoftware",
-        @"offers": @[@{@"buyParams": buyParams}],
+        @"ipadecryptAutoalertNonce": requestNonce,
+        @"offers": @[@{
+            @"buyParams": buyParams,
+            @"ipadecryptAutoalertNonce": requestNonce,
+        }],
     };
 
     Class itemCls = objc_getClass("SKUIItem");
@@ -109,7 +130,6 @@ static int performAppDownload(NSString *appID) {
 
     __block int rc = 0;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-
     ((void (*)(id, SEL, NSArray *, BOOL, id,
         void (^)(NSArray *, int)))objc_msgSend)(center,
         sel_registerName("_performPurchases:hasBundlePurchase:withClientContext:completionBlock:"),
@@ -170,9 +190,15 @@ int main(int argc, char **argv) {
                 ERR("itunes lookup failed for %s", target.UTF8String);
                 return 1;
             }
+        }
+
+        if (isAllDigits(target)) {
+            EVT("event=resolved app_id=%s", appID.UTF8String);
+        } else {
             EVT("event=resolved bundle_id=%s app_id=%s", target.UTF8String, appID.UTF8String);
         }
 
-        return performAppDownload(appID);
+        NSString *nonce = writeAutoalertArm(target, appID);
+        return performAppDownload(appID, nonce);
     }
 }

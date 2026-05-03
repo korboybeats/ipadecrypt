@@ -252,21 +252,7 @@ func (c *Client) appdlCDHash(remote string) (string, error) {
 
 // RunAppdl runs the StoreKit download helper for a bundle ID or app ID.
 // stdout/stderr is streamed via onLine. Returns the helper's exit code.
-//
-// Arms the autoinstaller tweak (if installed in SpringBoard) by touching a
-// sentinel file. The tweak watches for UIAlertControllers in SpringBoard and
-// auto-confirms the "Download an older version" prompt that appears when
-// the device's iOS is older than the latest version's MinimumOSVersion.
-// Sentinel is removed when this function returns.
 func (c *Client) RunAppdl(appdlPath, target string, onLine func(line string)) (int, error) {
-	// The tweak's sentinel: touching it tells the SpringBoard tweak to
-	// auto-confirm any UIAlertController with a Download/Install button for
-	// the next 60 seconds. We don't proactively remove it - the mtime check
-	// in the tweak will let it lapse naturally, and any subsequent run just
-	// re-touches it.
-	const sentinel = "/var/mobile/.ipadecryptautoalert-arm"
-	_, _, _, _ = c.RunSudo(fmt.Sprintf("touch %q", sentinel))
-
 	cmd := fmt.Sprintf("%s %q", appdlPath, target)
 	stdout, stderr, code, err := c.RunSudo(cmd)
 	if onLine != nil {

@@ -3,7 +3,7 @@ Name: ipadecryptautoalert
 Version: 0.0.1
 Architecture: iphoneos-arm64
 Description: Auto-confirms App Store "Download older version" prompts when armed by ipadecrypt.
-Maintainer: korboybeats
-Author: korboybeats
+Maintainer: Korboy
+Author: Korboy
 Section: Tweaks
 Depends: mobilesubstrate
