@@ -199,7 +199,31 @@ func compareMachOSlice(outData, srcData []byte) string {
 		return "diff after encrypted region (LINKEDIT/etc)"
 	}
 
+	// Now scrutinise the decrypted region itself. Helper writes cryptid=0
+	// even when the decrypt step bailed mid-flight, so cryptid==0 alone
+	// doesn't prove the bytes are plaintext.
+	outCryptBytes := outData[outCrypt.cryptoff:cryptEnd]
+	srcCryptBytes := srcSlice[srcCrypt.cryptoff : srcCrypt.cryptoff+srcCrypt.cryptsize]
+
+	if isAllZero(outCryptBytes) {
+		return "crypt region is all zeros (FairPlay decrypt-on-fault never fired in target)"
+	}
+
+	if bytes.Equal(outCryptBytes, srcCryptBytes) {
+		return "crypt region byte-equal to source ciphertext (cryptid zeroed without decrypting)"
+	}
+
 	return ""
+}
+
+func isAllZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+
+	return true
 }
 
 func readThinCpu(data []byte) (uint32, uint32, error) {
