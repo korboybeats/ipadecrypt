@@ -31,10 +31,6 @@ This fork adds a handful of QoL features on top of upstream:
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
 - **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions).
 
-## The trick
-
-You don't have to *run* an encrypted iOS app to decrypt it. Spawn it suspended via `SBSLaunchApplicationWithIdentifier` (main apps) or `fork` + `ptrace(PT_TRACE_ME)` + `execve` (extensions) - then `mach_vm_read` the `__TEXT` segment to get plaintext. The page-fault path through the kernel decrypts FairPlay on your behalf. It's my braindead way of calling `mremap_encrypted` without `mremap_encrypted`.
-
 ## Requirements
 
 ### On your computer

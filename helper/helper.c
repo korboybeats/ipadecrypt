@@ -1,10 +1,11 @@
 // ipadecrypt-helper-arm64 - on-device FairPlay decrypter.
 //
-// Spawns target suspended, reads cryptoff pages via mach_vm_read_overwrite
-// (kernel page-fault decrypts), patches cryptid=0, packs IPA. Walks
-// PlugIns/*.appex + Extensions/*.appex. Spawn-path strategy at
-// spawn_suspended(); rescue path for cross-OS dyld aborts at
-// rescue_unmapped_frameworks().
+// Spawns target suspended (SBS or ptrace), reads dyld-mapped cryptoff
+// pages via mach_vm_read_overwrite (kernel page-fault decrypts), then
+// recursively walks the bundle and decrypts every still-encrypted Mach-O
+// by injecting mremap_encrypted (syscall 489) into the target via thread
+// hijack. Patches cryptid=0, packs IPA. Walks PlugIns/*.appex +
+// Extensions/*.appex separately.
 //
 // CLI: ipadecrypt-helper-arm64 [-v] <bundle-id> <bundle-src> <out-ipa>
 //   bundle-id  - CFBundleIdentifier; "" skips the main-app pass (appex only).
@@ -52,6 +53,42 @@ extern kern_return_t mach_vm_region(vm_map_t, mach_vm_address_t *,
 // libproc SPI - not in iOS SDK.
 extern int proc_listallpids(void *, int);
 extern int proc_pidpath(int, void *, uint32_t);
+
+// pid_resume - drops the runningboardd-style "suspend whole proc" hold
+// xpcproxy leaves on SBS-launched targets. task_resume() can't clear it,
+// so target_call uses pid_resume after task_resume to ensure the
+// hijacked thread is actually scheduled.
+extern int pid_resume(int pid);
+
+// mremap_encrypted: kernel hook (#489) used by dyld to flip an existing
+// file-backed mmap into apple_protect_pager. On the next page fault the
+// kernel forwards to fairplayd which returns plaintext for cryptid=1.
+// Helper-context calls return EPERM under iOS-16 AMFI policy, but the same
+// call from the spawned target succeeds because the target's CS context
+// satisfies AMFI's text_crypter_create_hook gate. We thread-hijack the
+// target to invoke it cross-task.
+extern int mremap_encrypted(void *addr, size_t len,
+                            uint32_t cryptid, uint32_t cputype, uint32_t cpusubtype);
+
+// mach_vm cross-task primitives - SDK redirects mach_vm.h to an #error.
+extern kern_return_t mach_vm_allocate(vm_map_t, mach_vm_address_t *,
+    mach_vm_size_t, int);
+extern kern_return_t mach_vm_write(vm_map_t, mach_vm_address_t,
+    vm_offset_t, mach_msg_type_number_t);
+extern kern_return_t mach_vm_protect(vm_map_t, mach_vm_address_t,
+    mach_vm_size_t, boolean_t, vm_prot_t);
+extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t,
+    mach_vm_size_t);
+extern kern_return_t mach_vm_machine_attribute(vm_map_t,
+    mach_vm_address_t, mach_vm_size_t,
+    vm_machine_attribute_t, vm_machine_attribute_val_t *);
+
+#ifndef MATTR_CACHE
+#define MATTR_CACHE 1
+#endif
+#ifndef MATTR_VAL_CACHE_FLUSH
+#define MATTR_VAL_CACHE_FLUSH 6
+#endif
 
 // ptrace - sys/ptrace.h is iOS-hidden. We only need these two requests.
 #ifndef PT_TRACE_ME
@@ -117,9 +154,19 @@ typedef struct {
     off_t    cryptid_file_offset;
 } crypt_meta_t;
 
+// LC_CODE_SIGNATURE findings. Registered with the kernel via
+// F_ADDFILESIGS_RETURN inside the inject pass; mremap_encrypted needs
+// it to identify the file's vnode for apple_protect_pager.
+typedef struct {
+    int      has_cs;
+    uint32_t cs_offset; // file offset of the CS blob within the slice
+    uint32_t cs_size;
+} cs_meta_t;
+
 typedef struct {
     slice_meta_t slice;
     crypt_meta_t crypt;
+    cs_meta_t    cs;
 } mach_slice_t;
 
 // Outcome of slice selection. any_slice_encrypted flags whether a fat
@@ -139,7 +186,6 @@ typedef enum {
     DUMP_READ_SRC_FAIL,
     DUMP_VM_READ_FAIL,
     DUMP_ZERO_PAGES,
-    DUMP_FAIRPLAY_NOT_FIRED,
     DUMP_OPEN_DST_FAIL,
     DUMP_WRITE_DST_FAIL,
     DUMP_OOM,
@@ -147,13 +193,12 @@ typedef enum {
 
 static const char *dump_reason(dump_result_t r) {
     switch (r) {
-    case DUMP_OPEN_SRC_FAIL:      return "open_src_fail";
-    case DUMP_READ_SRC_FAIL:      return "read_src_fail";
-    case DUMP_VM_READ_FAIL:       return "vm_read_err";
-    case DUMP_ZERO_PAGES:         return "cryptoff_zero_pages";
-    case DUMP_FAIRPLAY_NOT_FIRED: return "fairplay_not_fired";
-    case DUMP_OPEN_DST_FAIL:      return "open_dst_fail";
-    case DUMP_WRITE_DST_FAIL:     return "write_dst_fail";
+    case DUMP_OPEN_SRC_FAIL:  return "open_src_fail";
+    case DUMP_READ_SRC_FAIL:  return "read_src_fail";
+    case DUMP_VM_READ_FAIL:   return "vm_read_err";
+    case DUMP_ZERO_PAGES:     return "cryptoff_zero_pages";
+    case DUMP_OPEN_DST_FAIL:  return "open_dst_fail";
+    case DUMP_WRITE_DST_FAIL: return "write_dst_fail";
     case DUMP_OOM:            return "oom";
     default:                  return "ok";
     }
@@ -218,17 +263,18 @@ static int parse_thin_slice(const uint8_t *slice, size_t slice_len,
     out->slice.slice_size = slice_size;
     out->slice.is_64 = is_64;
     out->crypt.has_crypt = 0;
+    out->cs.has_cs = 0;
 
     const uint8_t *lc_end = slice + hdr_sz + szcmds;
     const uint8_t *lc_ptr = slice + hdr_sz;
-    uint32_t want = is_64 ? LC_ENCRYPTION_INFO_64 : LC_ENCRYPTION_INFO;
+    uint32_t want_crypt = is_64 ? LC_ENCRYPTION_INFO_64 : LC_ENCRYPTION_INFO;
     for (uint32_t i = 0; i < ncmds; i++) {
         if ((size_t)(lc_end - lc_ptr) < sizeof(struct load_command)) return -1;
         struct load_command lc;
         memcpy(&lc, lc_ptr, sizeof(lc));
         if (lc.cmdsize == 0 || (size_t)(lc_end - lc_ptr) < lc.cmdsize) return -1;
 
-        if (lc.cmd == want) {
+        if (lc.cmd == want_crypt) {
             if (lc.cmdsize < sizeof(struct encryption_info_command)) return -1;
             struct encryption_info_command eic;
             memcpy(&eic, lc_ptr, sizeof(eic));
@@ -239,7 +285,14 @@ static int parse_thin_slice(const uint8_t *slice, size_t slice_len,
             out->crypt.cryptid = eic.cryptid;
             out->crypt.cryptid_file_offset = slice_off + (lc_ptr - slice) +
                 offsetof(struct encryption_info_command, cryptid);
-            break;
+        } else if (lc.cmd == LC_CODE_SIGNATURE) {
+            if (lc.cmdsize < sizeof(struct linkedit_data_command)) return -1;
+            struct linkedit_data_command ldc;
+            memcpy(&ldc, lc_ptr, sizeof(ldc));
+            if ((uint64_t)ldc.dataoff + ldc.datasize > slice_size) return -1;
+            out->cs.has_cs = 1;
+            out->cs.cs_offset = ldc.dataoff;
+            out->cs.cs_size = ldc.datasize;
         }
         lc_ptr += lc.cmdsize;
     }
@@ -337,78 +390,6 @@ static int select_runtime_slice(const char *path,
         out->any_slice_encrypted = slice.crypt.has_crypt && slice.crypt.cryptid != 0;
         out->selected = slice;
         rc = 1;
-    }
-
-done:
-    munmap(map, file_sz);
-    return rc;
-}
-
-// Pick a runtime fingerprint from the file itself. This is used when an
-// extension cannot be launched at all, so there is no target task to sample.
-static int infer_file_runtime(const char *path, runtime_image_t *out) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
-    struct stat st;
-    if (fstat(fd, &st) < 0) { close(fd); return -1; }
-    if (st.st_size < (off_t)sizeof(struct fat_header)) { close(fd); return -1; }
-
-    size_t file_sz = (size_t)st.st_size;
-    void *map = mmap(NULL, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED) return -1;
-
-    int rc = -1;
-    const uint8_t *base = map;
-    uint32_t magic;
-    memcpy(&magic, base, 4);
-
-    if (magic == FAT_MAGIC || magic == FAT_CIGAM ||
-        magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64) {
-        int is_fat64 = (magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64);
-        int swap = (magic == FAT_CIGAM || magic == FAT_CIGAM_64);
-        struct fat_header fh;
-        memcpy(&fh, base, sizeof(fh));
-        uint32_t nfat = swap ? OSSwapBigToHostInt32(fh.nfat_arch) : fh.nfat_arch;
-        uint64_t arch_size = is_fat64 ? sizeof(struct fat_arch_64)
-                                      : sizeof(struct fat_arch);
-        if (nfat == 0 || nfat > (file_sz - sizeof(struct fat_header)) / arch_size)
-            goto done;
-
-        mach_slice_t fallback;
-        int have_fallback = 0;
-        for (uint32_t i = 0; i < nfat; i++) {
-            uint64_t s_off, s_sz;
-            if (fat_slice_range(base, file_sz, is_fat64, swap, i, &s_off, &s_sz) != 0)
-                goto done;
-            mach_slice_t slice;
-            int sr = parse_thin_slice(base + s_off, (size_t)s_sz,
-                                      (off_t)s_off, s_sz, &slice);
-            if (sr < 0) goto done;
-            if (sr == 0) continue;
-            if (!have_fallback) {
-                fallback = slice;
-                have_fallback = 1;
-            }
-            if (slice.crypt.has_crypt && slice.crypt.cryptid != 0) {
-                fallback = slice;
-                have_fallback = 1;
-                break;
-            }
-        }
-        if (!have_fallback) goto done;
-        out->cputype = fallback.slice.cputype;
-        out->cpusubtype = fallback.slice.cpusubtype;
-        out->is_64 = fallback.slice.is_64;
-        rc = 0;
-    } else {
-        mach_slice_t slice;
-        int sr = parse_thin_slice(base, file_sz, 0, file_sz, &slice);
-        if (sr != 1) goto done;
-        out->cputype = slice.slice.cputype;
-        out->cpusubtype = slice.slice.cpusubtype;
-        out->is_64 = slice.slice.is_64;
-        rc = 0;
     }
 
 done:
@@ -514,6 +495,11 @@ static int copy_file(const char *src, const char *dst) {
     return n < 0 ? -1 : 0;
 }
 
+// Stage `src` at `dst`. Files are hardlinked (instant, zero I/O) on the
+// same filesystem; write_output() unlinks before O_CREAT so subsequent
+// writes break the link without touching the original. Falls back to a
+// real byte copy if link() fails (e.g. cross-filesystem). Symlinks and
+// directories are recreated structurally so the bundle layout matches.
 static int copy_tree(const char *src, const char *dst) {
     struct stat st;
     if (lstat(src, &st) != 0) return -1;
@@ -540,6 +526,7 @@ static int copy_tree(const char *src, const char *dst) {
         closedir(d);
         return rc;
     }
+    if (link(src, dst) == 0) return 0;
     return copy_file(src, dst);
 }
 
@@ -846,6 +833,11 @@ static dump_result_t write_output(const char *dst, const uint8_t *buf,
     char *slash = strrchr(parent, '/');
     if (slash) { *slash = '\0'; mkdirs(parent); }
 
+    // Break any hardlink staging set up by copy_tree before writing,
+    // otherwise O_TRUNC would also clobber the original installed bundle
+    // (same inode). unlink() removes only this directory entry; the
+    // original keeps its own.
+    unlink(dst);
     int fd = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0755);
     if (fd < 0) { ERR("open dst %s: %s", dst, strerror(errno)); return DUMP_OPEN_DST_FAIL; }
 
@@ -903,7 +895,7 @@ static dump_result_t dump_image(const char *src, const char *dst, task_t task,
                 "(cross-task vm_read returned the on-disk ciphertext "
                 "verbatim); cryptid not patched, staged copy left "
                 "encrypted", src);
-            free(raw_copy); free(buf); return DUMP_FAIRPLAY_NOT_FIRED;
+            free(raw_copy); free(buf); return DUMP_VM_READ_FAIL;
         }
         free(raw_copy);
     }
@@ -920,8 +912,15 @@ static dump_result_t dump_image(const char *src, const char *dst, task_t task,
 
 // ----- dyld resume + exception-port watch -----------------------------
 
-// Set an exception port on target and return its receive right. Catches the
-// SIGABRT dyld fires when cross-OS bind-fails.
+// Set an exception port on target and return its receive right.
+//
+// EXC_MASK_GUARD is critical: dyld's cross-OS bind-fail goes through
+// abort_with_payload() which raises EXC_GUARD on the Mach side BEFORE the
+// kernel converts it to SIGKILL. Catching EXC_GUARD freezes the target
+// mid-abort with all currently-loaded frameworks still mapped, so we can
+// vm_read them - without it, the SIGKILL terminates the process and any
+// frameworks dyld didn't fully bind are lost. The other masks cover
+// generic crashes (EXC_BAD_ACCESS, EXC_CRASH) we already saw.
 static mach_port_t make_exception_port(task_t task) {
     mach_port_t port = MACH_PORT_NULL;
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS) return MACH_PORT_NULL;
@@ -929,10 +928,18 @@ static mach_port_t make_exception_port(task_t task) {
         mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
         return MACH_PORT_NULL;
     }
+    // EXCEPTION_STATE_IDENTITY (vs EXCEPTION_DEFAULT) sends thread state in
+    // the message and lets us reply with new state. iOS 16's
+    // EXCEPTION_DEFAULT reply silently drops thread_set_state changes for
+    // EXC_CRASH'd threads (verified empirically with Swift Playgrounds);
+    // STATE_IDENTITY forces the kernel to apply our new state on
+    // exception-handled resume, which is what makes inject-rescue work
+    // for cross-OS bind-fail apps.
     if (task_set_exception_ports(task,
         EXC_MASK_CRASH | EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION |
-        EXC_MASK_SOFTWARE | EXC_MASK_ARITHMETIC | EXC_MASK_BREAKPOINT,
-        port, EXCEPTION_DEFAULT, ARM_THREAD_STATE64) != KERN_SUCCESS) {
+        EXC_MASK_SOFTWARE | EXC_MASK_ARITHMETIC | EXC_MASK_BREAKPOINT |
+        EXC_MASK_GUARD,
+        port, EXCEPTION_STATE_IDENTITY, ARM_THREAD_STATE64) != KERN_SUCCESS) {
         mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
         return MACH_PORT_NULL;
     }
@@ -959,21 +966,83 @@ static const char *exc_tag(int exc) {
     }
 }
 
-// Decode an EXCEPTION_DEFAULT exception_raise (msgh_id=2401) message.
-// Layout: header(24) + body(4) + thread_port_desc(12) + task_port_desc(12)
-// + NDR(8) + exception(4) + codeCnt(4) + code[codeCnt]*4. Returns 1 if
-// parsed, 0 otherwise. signal_out non-zero only for EXC_CRASH.
+// Reply to a received EXCEPTION_STATE_IDENTITY mach_msg, sending new
+// thread state in the reply payload. Kernel applies the new state on
+// resume - critical for iOS 16, where EXCEPTION_DEFAULT-flavor reply
+// silently drops earlier thread_set_state changes.
+//
+// Reply layout (msgh_id = original + 100, e.g. 2403->2503):
+//   mach_msg_header_t hdr (24)
+//   NDR_record (8)
+//   kern_return_t retcode (4)
+//   int flavor (4)
+//   mach_msg_type_number_t new_stateCnt (4)
+//   natural_t new_state[count] (count * 4 bytes)
+//
+// Pass new_state=NULL/state_count=0 to keep current state and only
+// release the thread (used for sentinel SEGVs we don't want to
+// re-deliver to the next handler).
+static mach_msg_return_t reply_exception_with_state(const mach_msg_header_t *received_hdr,
+                                                    const arm_thread_state64_t *new_state) {
+    if (!received_hdr || received_hdr->msgh_remote_port == MACH_PORT_NULL)
+        return MACH_SEND_INVALID_DEST;
+    struct {
+        mach_msg_header_t hdr;
+        char ndr[8];
+        int32_t retcode;
+        int32_t flavor;
+        uint32_t state_count;
+        uint32_t state_data[ARM_THREAD_STATE64_COUNT];
+    } reply;
+    memset(&reply, 0, sizeof(reply));
+    reply.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+    reply.hdr.msgh_remote_port = received_hdr->msgh_remote_port;
+    reply.hdr.msgh_local_port = MACH_PORT_NULL;
+    reply.hdr.msgh_id = received_hdr->msgh_id + 100;
+    reply.retcode = KERN_SUCCESS;
+    reply.flavor = ARM_THREAD_STATE64;
+    if (new_state) {
+        reply.state_count = ARM_THREAD_STATE64_COUNT;
+        memcpy(reply.state_data, new_state, sizeof(arm_thread_state64_t));
+        reply.hdr.msgh_size = (mach_msg_size_t)(
+            sizeof(mach_msg_header_t) + 8 + 4 + 4 + 4 +
+            sizeof(arm_thread_state64_t));
+    } else {
+        reply.state_count = 0;
+        reply.hdr.msgh_size = (mach_msg_size_t)(
+            sizeof(mach_msg_header_t) + 8 + 4 + 4 + 4);
+    }
+    return mach_msg(&reply.hdr, MACH_SEND_MSG, reply.hdr.msgh_size, 0,
+             MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+// Decode a Mach exception_raise message. Handles both EXCEPTION_DEFAULT
+// (msgh_id=2401) and EXCEPTION_STATE_IDENTITY (msgh_id=2403) - the latter
+// includes thread state inline. Returns 1 if parsed, sets *out_state if
+// non-NULL and the message carried a state payload.
 static int decode_exception(const void *buf, mach_msg_size_t buf_sz,
                             int *exc_out, int64_t *code0_out,
-                            int64_t *code1_out, int *signal_out) {
+                            int64_t *code1_out, int *signal_out,
+                            arm_thread_state64_t *out_state) {
     if (buf_sz < 76) return 0;
     const uint8_t *p = (const uint8_t *)buf;
     mach_msg_header_t hdr;
     memcpy(&hdr, p, sizeof(hdr));
-    if (hdr.msgh_id != 2401) return 0;
+    if (hdr.msgh_id != 2401 && hdr.msgh_id != 2403) return 0;
+
+    // Layout is identical up through the codes array. STATE_IDENTITY
+    // adds flavor+old_stateCnt+old_state after the codes. Codes are
+    // mach_exception_data_type_t (int64_t) on 64-bit since EXC_MASK_*
+    // is delivered as 64-bit codes in iOS 16.
     int exc; uint32_t code_cnt;
     memcpy(&exc, p + 60, sizeof(exc));
     memcpy(&code_cnt, p + 64, sizeof(code_cnt));
+
+    // iOS arm64 sends 4-byte codes when behavior doesn't include the
+    // MACH_EXCEPTION_CODES flag - we use plain EXCEPTION_STATE_IDENTITY
+    // so codes are exception_data_type_t (uint32_t). For full 64-bit
+    // PC values (e.g. EXC_BREAKPOINT fault address) the caller should
+    // use the out_state payload's __pc field instead of code1.
     int32_t c0 = 0, c1 = 0;
     if (code_cnt >= 1 && buf_sz >= 72) memcpy(&c0, p + 68, 4);
     if (code_cnt >= 2 && buf_sz >= 76) memcpy(&c1, p + 72, 4);
@@ -981,85 +1050,138 @@ static int decode_exception(const void *buf, mach_msg_size_t buf_sz,
     *code0_out = c0;
     *code1_out = c1;
     *signal_out = (exc == EXC_CRASH) ? ((c0 >> 24) & 0xff) : 0;
+
+    if (hdr.msgh_id == 2403 && out_state) {
+        // State payload offset: codes_end + flavor(4) + state_cnt(4)
+        size_t codes_end = 68 + (size_t)code_cnt * 4;
+        if (buf_sz >= codes_end + 8 + sizeof(arm_thread_state64_t)) {
+            memcpy(out_state, p + codes_end + 8, sizeof(arm_thread_state64_t));
+        }
+    }
     return 1;
 }
+
+// Stashed copy of the most recent received Mach exception header. The
+// kernel holds the faulting thread in MACH_RECV_REPLY until this header's
+// reply port gets a KERN_SUCCESS - so we can't resume that thread (e.g.
+// to hijack it for dlopen injection) until reply_exception_default is
+// called against this header. run_and_suspend stashes; inject path
+// flushes after thread_set_state.
+static mach_msg_header_t g_pending_exc_hdr;
+static int g_pending_exc_valid = 0;
 
 // Resume target and wait up to `ms` for either a Mach exception (cross-OS
 // bind-fail abort) or timeout, then suspend the task so the caller has a
 // stable address space to walk.
+//
+// Both spawn paths set up a Mach exception port now: dyld's bind-fail
+// raises EXC_GUARD via abort_with_payload BEFORE the kernel converts it
+// to SIGKILL, so catching the Mach exception freezes the target with all
+// loaded frameworks still mapped - whereas waiting for waitpid SIGKILL
+// loses everything dyld didn't already commit. The ptrace path additionally
+// drains stop-notifications via waitpid because PT_TRACE_ME steals SIGTRAP/
+// SIGSTOP routing; we PT_CONTINUE through those while polling.
 static void run_and_suspend(task_t task, pid_t pid, int via_ptrace,
                              mach_port_t exc_port, int ms) {
+    // Stale pending-exception state from a prior bundle's inject would
+    // make target_call reply to a dead port. Always start clean.
+    g_pending_exc_valid = 0;
     if (via_ptrace) {
-        // PT_CONTINUE keeps the trace relationship; signals route to us via
-        // waitpid rather than Mach exception.
+        // Kick the target out of its initial PT_TRACE_ME stop. PT_CONTINUE
+        // delivers signal=0 (no signal) and lets the child run.
         ptrace(PT_CONTINUE, pid, (void *)1, 0);
-        int waited = 0;
-        int exit_sig = 0, exit_code = 0, exited = 0, signaled = 0;
-        while (waited < ms) {
-            int st;
-            pid_t w = waitpid(pid, &st, WNOHANG | WUNTRACED);
-            if (w == pid) {
-                if (WIFEXITED(st)) {
-                    exited = 1; exit_code = WEXITSTATUS(st); break;
-                }
-                if (WIFSIGNALED(st)) {
-                    signaled = 1; exit_sig = WTERMSIG(st); break;
-                }
-                if (WIFSTOPPED(st)) {
-                    int sig = WSTOPSIG(st);
-                    int deliver = (sig == SIGTRAP || sig == SIGSTOP) ? 0 : sig;
-                    ptrace(PT_CONTINUE, pid, (void *)1, deliver);
-                }
-            }
-            usleep(200 * 1000);
-            waited += 200;
-        }
-        if (exited) {
-            LOG("[helper] target exited code=%d before suspend\n", exit_code);
-            EVT("event=dyld phase=trapped via=ptrace outcome=exited code=%d", exit_code);
-        } else if (signaled) {
-            LOG("[helper] target killed by signal=%d before suspend\n", exit_sig);
-            EVT("event=dyld phase=trapped via=ptrace outcome=signaled signal=%d",
-                exit_sig);
-        } else {
-            EVT("event=dyld phase=settled via=ptrace");
-        }
     } else {
         // SBS leaves the task with potentially multiple suspensions
         // (task itself + runningboardd assertion). Drain until suspend
         // count is 0 so threads actually run.
         while (task_resume(task) == KERN_SUCCESS) { /* loop */ }
-        if (exc_port != MACH_PORT_NULL) {
-            struct { mach_msg_header_t hdr; char body[2048]; } msg;
-            memset(&msg, 0, sizeof(msg));
-            mach_msg_return_t mr = mach_msg(&msg.hdr,
-                MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(msg),
-                exc_port, ms, MACH_PORT_NULL);
-            LOG("[helper] mach_msg wait returned 0x%x\n", mr);
-            if (mr == MACH_MSG_SUCCESS) {
-                int exc = 0, sig = 0;
-                int64_t c0 = 0, c1 = 0;
-                if (decode_exception(&msg, msg.hdr.msgh_size,
-                        &exc, &c0, &c1, &sig)) {
-                    LOG("[helper] target trapped: %s code0=0x%llx code1=0x%llx signal=%d\n",
-                        exc_tag(exc),
-                        (unsigned long long)c0, (unsigned long long)c1, sig);
-                    EVT("event=dyld phase=trapped via=mach exception=%s "
-                        "code0=0x%llx code1=0x%llx signal=%d mach_msg=0x%x",
-                        exc_tag(exc),
-                        (unsigned long long)c0, (unsigned long long)c1, sig, mr);
-                } else {
-                    EVT("event=dyld phase=trapped via=mach exception=unparsed mach_msg=0x%x",
-                        mr);
-                }
-            } else {
-                EVT("event=dyld phase=settled via=mach mach_msg=0x%x", mr);
-            }
-        } else {
-            usleep(ms * 1000);
-            EVT("event=dyld phase=settled via=sleep");
-        }
     }
+
+    if (exc_port != MACH_PORT_NULL) {
+        struct { mach_msg_header_t hdr; char body[2048]; } msg;
+        // Poll mach_msg + waitpid concurrently in 200ms slices: Mach
+        // exception fires first on dyld bind-fail, but if the kernel went
+        // straight to SIGKILL (no Mach hop) waitpid catches the exit.
+        int waited = 0;
+        int trapped_via_mach = 0;
+        int exited = 0, signaled = 0, exit_code = 0, exit_sig = 0;
+        int exc = 0, sig = 0;
+        int64_t c0 = 0, c1 = 0;
+        mach_msg_return_t mr = MACH_RCV_TIMED_OUT;
+
+        while (waited < ms) {
+            memset(&msg, 0, sizeof(msg));
+            mr = mach_msg(&msg.hdr,
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(msg),
+                exc_port, 200, MACH_PORT_NULL);
+            if (mr == MACH_MSG_SUCCESS) {
+                trapped_via_mach = 1;
+                decode_exception(&msg, msg.hdr.msgh_size,
+                    &exc, &c0, &c1, &sig, NULL);
+                // Stash header so the inject path can reply to release
+                // the faulting thread from MACH_RECV_REPLY before
+                // hijacking it.
+                g_pending_exc_hdr = msg.hdr;
+                g_pending_exc_valid = 1;
+                EVT("event=dyld phase=exc_msg msgh_bits=0x%x msgh_size=%u "
+                    "msgh_remote=0x%x msgh_local=0x%x msgh_id=%d",
+                    msg.hdr.msgh_bits, msg.hdr.msgh_size,
+                    msg.hdr.msgh_remote_port, msg.hdr.msgh_local_port,
+                    msg.hdr.msgh_id);
+                break;
+            }
+            if (via_ptrace) {
+                int st;
+                pid_t w = waitpid(pid, &st, WNOHANG | WUNTRACED);
+                if (w == pid) {
+                    if (WIFEXITED(st)) {
+                        exited = 1; exit_code = WEXITSTATUS(st); break;
+                    }
+                    if (WIFSIGNALED(st)) {
+                        signaled = 1; exit_sig = WTERMSIG(st); break;
+                    }
+                    if (WIFSTOPPED(st)) {
+                        int s = WSTOPSIG(st);
+                        int deliver = (s == SIGTRAP || s == SIGSTOP) ? 0 : s;
+                        ptrace(PT_CONTINUE, pid, (void *)1, deliver);
+                    }
+                }
+            }
+            waited += 200;
+        }
+
+        if (trapped_via_mach) {
+            const char *via = via_ptrace ? "ptrace+mach" : "mach";
+            LOG("[helper] target trapped: %s code0=0x%llx code1=0x%llx signal=%d via=%s\n",
+                exc_tag(exc),
+                (unsigned long long)c0, (unsigned long long)c1, sig, via);
+            EVT("event=dyld phase=trapped via=%s exception=%s "
+                "code0=0x%llx code1=0x%llx signal=%d mach_msg=0x%x",
+                via, exc_tag(exc),
+                (unsigned long long)c0, (unsigned long long)c1, sig, mr);
+
+            // dyld halt brk caught. Leave the exception unreplied so the
+            // kernel keeps the thread paused with full task memory still
+            // mapped for vm_read + cross-task mach_vm_allocate. Replying
+            // would resume the thread which immediately re-traps at the
+            // same brk (cs_validation re-pages it) and the kernel reaps
+            // the task. Caller dumps whatever dyld already mapped, then
+            // injects mremap_encrypted on the rest.
+        } else if (exited) {
+            EVT("event=dyld phase=trapped via=ptrace outcome=exited code=%d", exit_code);
+        } else if (signaled) {
+            EVT("event=dyld phase=trapped via=ptrace outcome=signaled signal=%d", exit_sig);
+        } else {
+            const char *via = via_ptrace ? "ptrace" : "mach";
+            EVT("event=dyld phase=settled via=%s mach_msg=0x%x", via, mr);
+        }
+        task_suspend(task);
+        return;
+    }
+
+    // Fallback for unusual paths where no exception port was created.
+    usleep(ms * 1000);
+    EVT("event=dyld phase=settled via=sleep");
     task_suspend(task);
 }
 
@@ -1100,168 +1222,731 @@ static int find_main_name(const char *bundle, char *out, size_t cap) {
     return -1;
 }
 
-// mmap-rescue dump: skip dyld, mmap the file PROT_READ in our own VM,
-// memcpy through dump_image's mach_vm_read_overwrite path. The kernel's
-// FairPlay page-fault handler decrypts on first touch - it's vnode + cdhash
-// bound, not caller-bundle-id bound, so this works from helper context.
-// Bypassing dyld dodges cross-OS bind-fail aborts on missing system
-// dylibs (e.g. iOS 14.8 lacks /usr/lib/swift/libswift_Concurrency.dylib
-// which iOS-16.4-minos apps strict-link against).
-static dump_result_t mmap_dump(const char *src, const char *dst,
-                               const selected_slice_t *sel) {
-    int fd = open(src, O_RDONLY);
-    if (fd < 0) { ERR("open %s: %s", src, strerror(errno)); return DUMP_OPEN_SRC_FAIL; }
-    struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return DUMP_OPEN_SRC_FAIL; }
-    void *map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (map == MAP_FAILED) {
-        ERR("mmap %s: %s", src, strerror(errno));
-        return DUMP_VM_READ_FAIL;
+// fcntl(F_ADDFILESIGS_RETURN) takes this layout. Pulled in here because
+// <sys/fcntl.h> hides it on iOS, and we don't want to depend on the SDK's
+// userland headers.
+#ifndef F_ADDFILESIGS_RETURN
+#define F_ADDFILESIGS_RETURN 97
+#endif
+typedef struct {
+    off_t  fs_file_start;  // file offset of Mach-O slice (0 for thin)
+    void  *fs_blob_start;  // for F_ADDFILESIGS*: file offset of CS blob
+    size_t fs_blob_size;   // CS blob size
+} helper_fsignatures_t;
+
+
+
+#define INJECT_SENTINEL_LR 0x4141414141414141ULL
+
+
+
+// Run a single function call in target context, hijacking the supplied
+// thread. Caller must already have:
+//   - exception port set on task and ours to read
+//   - any prior pending Mach exception stashed in g_pending_exc_hdr (this
+//     function replies to release the thread before resuming)
+// Returns 0 on sentinel hit, sets *out_x0 to the call's return value.
+// Returns -1 if mach_msg timed out or returned a non-sentinel exception.
+static int target_call(task_t task, thread_act_t thread, mach_port_t exc_port,
+                       mach_vm_address_t pc,
+                       uint64_t x0, uint64_t x1, uint64_t x2,
+                       uint64_t x3, uint64_t x4, uint64_t x5,
+                       mach_vm_address_t sp,
+                       uint64_t *out_x0, int wait_ms) {
+    if (thread_suspend(thread) != KERN_SUCCESS) return -1;
+    // thread_abort_safely only aborts interruptible waits (kqueue, sleep,
+    // condvar). Threads blocked in non-interruptible waits (e.g. mach_msg
+    // RECV that can't be cancelled) need thread_abort to actually leave
+    // kernel mode; without it our thread_set_state appears applied but the
+    // thread never runs because the kernel restores its saved syscall
+    // state on resume.
+    if (thread_abort_safely(thread) != KERN_SUCCESS) thread_abort(thread);
+
+    arm_thread_state64_t s = {0};
+    mach_msg_type_number_t sc = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(thread, ARM_THREAD_STATE64,
+            (thread_state_t)&s, &sc) != KERN_SUCCESS) return -1;
+    s.__pc = pc;
+    s.__lr = INJECT_SENTINEL_LR;
+    s.__sp = sp ? sp : ((s.__sp - 0x800) & ~0xfULL);
+    s.__x[0] = x0; s.__x[1] = x1; s.__x[2] = x2;
+    s.__x[3] = x3; s.__x[4] = x4; s.__x[5] = x5;
+    if (thread_set_state(thread, ARM_THREAD_STATE64,
+            (thread_state_t)&s, sc) != KERN_SUCCESS) return -1;
+    thread_resume(thread);
+
+    // Drop any extra thread suspends from the abort_safely + suspend cycle.
+    for (int i = 0; i < 8; i++) {
+        if (thread_resume(thread) != KERN_SUCCESS) break;
     }
-    mach_vm_address_t image_base = (mach_vm_address_t)(uintptr_t)map +
-                                   sel->selected.slice.slice_offset;
-    dump_result_t dr = dump_image(src, dst, mach_task_self(), image_base, sel);
-    munmap(map, st.st_size);
-    return dr;
-}
 
-// Try to mmap-dump a single Mach-O at <bundle_src>/<rel>. Returns 1 on
-// success, 0 if skipped or failed. Used by the recursive rescue walk.
-static int rescue_try_dump(const char *rel,
-                           const char *bundle_src, const char *bundle_dst,
-                           const runtime_image_t *runtime,
-                           const char **dumped, int n_dumped) {
-    for (int i = 0; i < n_dumped; i++) {
-        if (strcmp(dumped[i], rel) == 0) return 0;
+    // Reply to whatever exception is pending so the kernel schedules the
+    // thread. Use STATE_IDENTITY reply payload to deliver our new state -
+    // iOS 16's EXCEPTION_DEFAULT reply silently drops our prior
+    // thread_set_state for EXC_CRASH'd threads.
+    if (g_pending_exc_valid) {
+        reply_exception_with_state(&g_pending_exc_hdr, &s);
+        g_pending_exc_valid = 0;
     }
 
-    char abs_src[4096], abs_dst[4096];
-    snprintf(abs_src, sizeof(abs_src), "%s/%s", bundle_src, rel);
-    snprintf(abs_dst, sizeof(abs_dst), "%s/%s", bundle_dst, rel);
-
-    if (!is_macho(abs_src)) return 0;
-
-    selected_slice_t sel;
-    if (select_runtime_slice(abs_src, runtime, &sel) != 1) return 0;
-    if (!slice_needs_dump(&sel)) return 0;
-
-    EVT("event=image phase=start name=\"%s\" kind=framework source=rescue", rel);
-    dump_result_t dr = mmap_dump(abs_src, abs_dst, &sel);
-    if (dr == DUMP_OK) {
-        EVT("event=image phase=done name=\"%s\" kind=framework size=%u source=rescue",
-            rel, sel.selected.crypt.cryptsize);
-        return 1;
+    // Drain task suspends + drop the runningboardd hold (xpcproxy leaves
+    // a separate "proc suspended" assertion on SBS-launched targets that
+    // task_resume can't clear; without pid_resume, the hijacked thread
+    // stays paused even with thread+task suspend counts at zero).
+    for (int i = 0; i < 16; i++) {
+        if (task_resume(task) != KERN_SUCCESS) break;
     }
-    EVT("event=image phase=failed name=\"%s\" kind=framework reason=\"%s\" source=rescue",
-        rel, dump_reason(dr));
-    return 0;
-}
+    pid_t pid_for = 0;
+    if (pid_for_task(task, &pid_for) == KERN_SUCCESS && pid_for > 0)
+        pid_resume(pid_for);
 
-// Recursively walk a bundle directory looking for encrypted Mach-Os not
-// already covered by the target-task discovery loop. Skips top-level
-// PlugIns/ and Extensions/ (handled by decrypt_appexes) and the bundle's
-// main exec. Symlinks are not followed, to avoid loops.
-static void rescue_walk(const char *bundle_src, const char *bundle_dst,
-                        const runtime_image_t *runtime,
-                        const char **dumped, int n_dumped,
-                        const char *main_name,
-                        const char *rel_dir, int depth, int *rescued) {
-    char dir_path[4096];
-    if (rel_dir[0])
-        snprintf(dir_path, sizeof(dir_path), "%s/%s", bundle_src, rel_dir);
-    else
-        snprintf(dir_path, sizeof(dir_path), "%s", bundle_src);
-
-    DIR *d = opendir(dir_path);
-    if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-
-        // Top-level appex containers handled separately.
-        if (depth == 0 &&
-            (strcmp(e->d_name, "PlugIns") == 0 ||
-             strcmp(e->d_name, "Extensions") == 0))
-            continue;
-
-        char rel[4096];
-        if (rel_dir[0])
-            snprintf(rel, sizeof(rel), "%s/%s", rel_dir, e->d_name);
-        else
-            snprintf(rel, sizeof(rel), "%s", e->d_name);
-
-        char full[4096];
-        snprintf(full, sizeof(full), "%s/%s", dir_path, e->d_name);
-
-        struct stat st;
-        if (lstat(full, &st) != 0) continue;
-        if (S_ISLNK(st.st_mode)) continue;
-
-        if (S_ISDIR(st.st_mode)) {
-            rescue_walk(bundle_src, bundle_dst, runtime, dumped, n_dumped,
-                        main_name, rel, depth + 1, rescued);
-            continue;
+    // Wait for sentinel SEGV.
+    struct { mach_msg_header_t hdr; char body[2048]; } msg;
+    memset(&msg, 0, sizeof(msg));
+    mach_msg_return_t mr = mach_msg(&msg.hdr,
+        MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(msg),
+        exc_port, wait_ms, MACH_PORT_NULL);
+    if (mr != MACH_MSG_SUCCESS) {
+        // Read final state for context.
+        arm_thread_state64_t fs = {0};
+        mach_msg_type_number_t fsc = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(thread, ARM_THREAD_STATE64,
+                (thread_state_t)&fs, &fsc) == KERN_SUCCESS) {
+            EVT("event=inject phase=target_call_timeout pc=0x%llx lr=0x%llx x0=0x%llx mr=0x%x",
+                (unsigned long long)fs.__pc, (unsigned long long)fs.__lr,
+                (unsigned long long)fs.__x[0], mr);
+        } else {
+            EVT("event=inject phase=target_call_timeout mr=0x%x state_unreadable=1", mr);
         }
-        if (!S_ISREG(st.st_mode)) continue;
-
-        // Bundle's main exec lives at <bundle>/<name>; skip at depth 0.
-        if (depth == 0 && main_name && main_name[0] &&
-            strcmp(e->d_name, main_name) == 0) continue;
-
-        if (rescue_try_dump(rel, bundle_src, bundle_dst, runtime,
-                            dumped, n_dumped))
-            (*rescued)++;
-    }
-    closedir(d);
-}
-
-// Recursively walk the bundle on disk and dump every encrypted Mach-O the
-// target-task discovery loop didn't cover. Catches nested frameworks,
-// embedded toolchains, and Developer/ payloads (e.g. Swift Playgrounds).
-static int rescue_unmapped_frameworks(const char *bundle_src, const char *bundle_dst,
-                                      const runtime_image_t *runtime,
-                                      const char **dumped, int n_dumped,
-                                      const char *main_name) {
-    if (!runtime) return 0;
-    int rescued = 0;
-    rescue_walk(bundle_src, bundle_dst, runtime, dumped, n_dumped,
-                main_name, "", 0, &rescued);
-    return rescued;
-}
-
-static int rescue_bundle_main(const char *bundle_src, const char *bundle_dst,
-                              const char *main_name, runtime_image_t *out_rt) {
-    char main_src[4096], main_dst[4096];
-    snprintf(main_src, sizeof(main_src), "%s/%s", bundle_src, main_name);
-    snprintf(main_dst, sizeof(main_dst), "%s/%s", bundle_dst, main_name);
-
-    runtime_image_t rt;
-    if (infer_file_runtime(main_src, &rt) != 0) {
-        EVT("event=image phase=failed name=\"%s\" kind=main reason=\"no_runtime\" source=rescue",
-            main_name);
         return -1;
     }
 
-    selected_slice_t sel;
-    if (select_runtime_slice(main_src, &rt, &sel) != 1 || !slice_needs_dump(&sel)) {
-        if (out_rt) *out_rt = rt;
+    int exc = 0, sig = 0;
+    int64_t c0 = 0, c1 = 0;
+    decode_exception(&msg, msg.hdr.msgh_size, &exc, &c0, &c1, &sig, NULL);
+    g_pending_exc_hdr = msg.hdr;
+    g_pending_exc_valid = 1;
+
+    unsigned long long fault = (unsigned long long)c1;
+    if (exc != EXC_BAD_ACCESS ||
+        (fault != INJECT_SENTINEL_LR &&
+         fault != (INJECT_SENTINEL_LR & 0xfffffffful))) {
+        // Not our sentinel - syscall faulted somewhere unexpected.
+        arm_thread_state64_t fs = {0};
+        mach_msg_type_number_t fsc = ARM_THREAD_STATE64_COUNT;
+        if (thread_get_state(thread, ARM_THREAD_STATE64,
+                (thread_state_t)&fs, &fsc) == KERN_SUCCESS) {
+            EVT("event=inject phase=target_call_crashed exc=%d code1=0x%llx pc=0x%llx x0=0x%llx",
+                exc, fault, (unsigned long long)fs.__pc,
+                (unsigned long long)fs.__x[0]);
+        } else {
+            EVT("event=inject phase=target_call_crashed exc=%d code1=0x%llx",
+                exc, fault);
+        }
+        return -1;
+    }
+
+    arm_thread_state64_t fs = {0};
+    mach_msg_type_number_t fsc = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(thread, ARM_THREAD_STATE64,
+            (thread_state_t)&fs, &fsc) != KERN_SUCCESS) return -1;
+    if (out_x0) *out_x0 = fs.__x[0];
+    EVT("event=inject phase=target_call_returned x0=0x%llx", (unsigned long long)fs.__x[0]);
+    return 0;
+}
+
+#ifndef VM_PROT_COPY
+#define VM_PROT_COPY 0x10
+#endif
+
+// abort_with_payload - dyld's halt() routes through this for cross-OS
+// bind-fail aborts. Patched to `ret` pre-resume so dyld silently falls
+// through; mapped frameworks stay readable for vm_read instead of going
+// through SIGABRT -> EXC_CRASH -> task reaped.
+extern int abort_with_payload(uint32_t reason_namespace, uint64_t reason_code,
+    void *payload, uint32_t payload_size, const char *reason_string,
+    uint64_t reason_flags);
+
+// Find target's libdyld base via image list, falling back to
+// dyld_all_image_infos.dyldImageLoadAddress when dyld halted before
+// registering libdyld in its infoArray.
+static mach_vm_address_t find_target_dlopen_image(task_t task,
+                                                  struct dyld_image_info *imgs,
+                                                  uint32_t img_count,
+                                                  const char *helper_path) {
+    if (helper_path) {
+        const char *helper_base = strrchr(helper_path, '/');
+        helper_base = helper_base ? helper_base + 1 : helper_path;
+        for (uint32_t i = 0; i < img_count; i++) {
+            const char *p = imgs[i].imageFilePath;
+            if (!p) continue;
+            const char *b = strrchr(p, '/');
+            b = b ? b + 1 : p;
+            if (strcmp(b, helper_base) == 0)
+                return (mach_vm_address_t)(uintptr_t)imgs[i].imageLoadAddress;
+        }
+    }
+    static const char *needles[] = { "libdyld.dylib", "/usr/lib/dyld", NULL };
+    for (int n = 0; needles[n]; n++) {
+        for (uint32_t i = 0; i < img_count; i++) {
+            const char *p = imgs[i].imageFilePath;
+            if (p && strstr(p, needles[n]))
+                return (mach_vm_address_t)(uintptr_t)imgs[i].imageLoadAddress;
+        }
+    }
+    struct task_dyld_info tdi;
+    mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
+    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&tdi, &cnt) == KERN_SUCCESS) {
+        struct dyld_all_image_infos aii = {0};
+        mach_vm_size_t got = 0;
+        if (mach_vm_read_overwrite(task, tdi.all_image_info_addr, sizeof(aii),
+                (mach_vm_address_t)(uintptr_t)&aii, &got) == KERN_SUCCESS &&
+            aii.dyldImageLoadAddress) {
+            return (mach_vm_address_t)(uintptr_t)aii.dyldImageLoadAddress;
+        }
+    }
+    return 0;
+}
+
+// Compute target-side address of a helper-linked function via dladdr +
+// shared-cache slide assumption. Helper and target share one slide so
+// (target_libdyld_base + (helper_func - helper_libdyld_base)) is correct
+// for any function in the shared cache.
+static mach_vm_address_t target_func_addr(task_t task,
+                                          struct dyld_image_info *imgs,
+                                          uint32_t img_count,
+                                          void *helper_func,
+                                          mach_vm_address_t target_libdyld_fb,
+                                          mach_vm_address_t helper_libdyld_fb) {
+    if (!helper_func) return 0;
+    Dl_info info = {0};
+    if (dladdr(helper_func, &info) && info.dli_fbase) {
+        mach_vm_address_t target_base = find_target_dlopen_image(task, imgs,
+            img_count, info.dli_fname);
+        if (target_base) {
+            mach_vm_address_t off = (mach_vm_address_t)(uintptr_t)helper_func -
+                (mach_vm_address_t)(uintptr_t)info.dli_fbase;
+            return target_base + off;
+        }
+    }
+    if (target_libdyld_fb && helper_libdyld_fb) {
+        return target_libdyld_fb +
+            ((mach_vm_address_t)(uintptr_t)helper_func - helper_libdyld_fb);
+    }
+    return 0;
+}
+
+// COW + write `bytes` at addr in target, then restore RX. Crosses one
+// page boundary at most. Used for libc abort -> ret (4 bytes) and dyld
+// inline syscall pair -> nop;nop (8 bytes).
+static int patch_target_bytes(task_t task, mach_vm_address_t addr,
+                              const void *bytes, size_t len, const char *tag) {
+    if (!addr) {
+        EVT("event=patch phase=skip tag=%s reason=no_addr", tag);
+        return -1;
+    }
+    mach_vm_address_t page = addr & ~(mach_vm_address_t)0xfff;
+    mach_vm_size_t span = ((addr + len - page + 0xfff) & ~(mach_vm_size_t)0xfff);
+    EVT("event=patch phase=start tag=%s addr=0x%llx", tag,
+        (unsigned long long)addr);
+    if (mach_vm_protect(task, page, span, FALSE,
+            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) return -1;
+    if (mach_vm_write(task, addr, (vm_offset_t)(uintptr_t)bytes,
+            (mach_msg_type_number_t)len) != KERN_SUCCESS) return -1;
+    mach_vm_protect(task, page, span, FALSE,
+        VM_PROT_READ | VM_PROT_EXECUTE);
+    EVT("event=patch phase=done tag=%s", tag);
+    return 0;
+}
+
+// Scan dyld __TEXT for `mov x16, #N; svc #0x80` and NOP every match
+// where N is a process-killing syscall (abort_with_payload, terminate,
+// __exit, kill, __pthread_kill, __bsdthread_terminate).
+static int scan_dyld_for_abort_syscalls(task_t task, mach_vm_address_t dyld_base) {
+    if (!dyld_base) {
+        EVT("event=patch phase=scan_skip reason=no_dyld_base");
+        return 0;
+    }
+    struct mach_header_64 mh;
+    mach_vm_size_t got = 0;
+    kern_return_t kr = mach_vm_read_overwrite(task, dyld_base, sizeof(mh),
+            (mach_vm_address_t)(uintptr_t)&mh, &got);
+    if (kr != KERN_SUCCESS) {
+        EVT("event=patch phase=scan_skip reason=read_mh_fail kr=%d base=0x%llx",
+            kr, (unsigned long long)dyld_base);
+        return 0;
+    }
+    if (mh.magic != MH_MAGIC_64) {
+        EVT("event=patch phase=scan_skip reason=bad_magic magic=0x%x base=0x%llx",
+            mh.magic, (unsigned long long)dyld_base);
+        return 0;
+    }
+    // Read dyld __TEXT in 64K chunks - pages may be lazily mapped
+    // pre-resume, so a 4MB single read fails on the first not-yet-faulted
+    // page. Stop at first chunk that fails; we usually have ~1-2 MB of
+    // dyld __TEXT mapped by the time the task is suspended for us.
+    size_t text_cap = 4 * 1024 * 1024;
+    uint8_t *buf = malloc(text_cap);
+    if (!buf) return 0;
+    size_t total = 0;
+    const size_t chunk = 0x10000;
+    while (total < text_cap) {
+        mach_vm_size_t cgot = 0;
+        if (mach_vm_read_overwrite(task, dyld_base + total, chunk,
+                (mach_vm_address_t)(uintptr_t)(buf + total), &cgot) != KERN_SUCCESS ||
+            cgot == 0) break;
+        total += cgot;
+        if (cgot < chunk) break;
+    }
+    got = total;
+    if (got < 8) {
+        free(buf);
+        EVT("event=patch phase=scan_skip reason=no_text_bytes");
+        return 0;
+    }
+    EVT("event=patch phase=scan_text bytes=0x%llx", (unsigned long long)got);
+    static const uint8_t svc_pattern[4] = { 0x01, 0x10, 0x00, 0xd4 };
+    int kills = 0;
+    for (size_t i = 4; i + 4 <= got; i += 4) {
+        if (memcmp(buf + i, svc_pattern, 4) != 0) continue;
+        uint32_t prev;
+        memcpy(&prev, buf + i - 4, 4);
+        // movz x16, #imm  or  movz w16, #imm
+        if (((prev & 0xffe0001f) != (0xd2800000 | 16)) &&
+            ((prev & 0xffe0001f) != (0x52800000 | 16))) continue;
+        uint32_t imm = (prev >> 5) & 0xffff;
+        if (imm == 0x209 || imm == 0x208 || imm == 0x20c || imm == 0x20d ||
+            imm == 0x169 || imm == 0x148 || imm == 0x1   || imm == 0x25) {
+            static const uint32_t nop_pair[2] = { 0xd503201fu, 0xd503201fu };
+            char tag[64];
+            snprintf(tag, sizeof(tag), "dyld_kill_syscall_%u_%d", imm, kills);
+            if (patch_target_bytes(task, dyld_base + i - 4, nop_pair,
+                    sizeof(nop_pair), tag) == 0) kills++;
+        }
+    }
+    free(buf);
+    EVT("event=patch phase=scan_done kills=%d", kills);
+    return kills;
+}
+
+// Patch every dyld halt path so cross-OS bind-fail returns silently
+// instead of raising SIGABRT -> EXC_CRASH (which kills the task and
+// breaks the inject pass). Two layers:
+//   1. libsystem entry points (abort_with_payload/abort) -> ret
+//   2. dyld __TEXT inline syscall pairs -> nop;nop
+static int patch_target_abort(task_t task,
+                              struct dyld_image_info *imgs, uint32_t img_count,
+                              mach_vm_address_t target_libdyld_fb,
+                              mach_vm_address_t helper_libdyld_fb) {
+    int hits = 0;
+    static const char *names[] = { "abort_with_payload", "__abort_with_payload",
+                                   "abort", NULL };
+    static const uint32_t ret_op = 0xd65f03c0;
+    for (int i = 0; names[i]; i++) {
+        void *helper_fn = dlsym(RTLD_DEFAULT, names[i]);
+        if (!helper_fn) continue;
+        mach_vm_address_t a = target_func_addr(task, imgs, img_count,
+            helper_fn, target_libdyld_fb, helper_libdyld_fb);
+        if (patch_target_bytes(task, a, &ret_op, sizeof(ret_op), names[i]) == 0)
+            hits++;
+    }
+    // Use target_libdyld_fb as the dyld base. iOS 16 merges dyld and
+    // libdyld at the same shared-cache slide, so the libdyld base is
+    // also dyld's __TEXT base for our svc-pattern scan. Falling back to
+    // task_info / dyld_all_image_infos picks up the same value when dyld
+    // populated aii pre-trap.
+    mach_vm_address_t dyld_base = target_libdyld_fb;
+    if (!dyld_base) {
+        struct task_dyld_info tdi;
+        mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
+        if (task_info(task, TASK_DYLD_INFO, (task_info_t)&tdi, &cnt) == KERN_SUCCESS) {
+            struct dyld_all_image_infos aii = {0};
+            mach_vm_size_t got = 0;
+            if (mach_vm_read_overwrite(task, tdi.all_image_info_addr, sizeof(aii),
+                    (mach_vm_address_t)(uintptr_t)&aii, &got) == KERN_SUCCESS) {
+                dyld_base = (mach_vm_address_t)(uintptr_t)aii.dyldImageLoadAddress;
+            }
+        }
+    }
+    hits += scan_dyld_for_abort_syscalls(task, dyld_base);
+    return hits;
+}
+
+
+// Pick a target pthread to hijack. Prefer a non-zero idle thread
+// (TH_STATE_WAITING/HALTED/STOPPED) - picking a thread mid-syscall
+// breaks because thread_abort_safely + thread_set_state can leave it
+// resuming the original syscall instead of our injected PC. Fall back
+// to thread 0 (dyld bootstrap, only thread alive after halt) when no
+// idle non-zero thread exists.
+static thread_act_t pick_hijack_thread(task_t task) {
+    thread_act_array_t threads = NULL;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(task, &threads, &count) != KERN_SUCCESS || !threads)
+        return MACH_PORT_NULL;
+    thread_act_t chosen = MACH_PORT_NULL;
+    // Prefer the LAST non-zero idle thread - most-recently-created
+    // pthread is least likely to be holding global locks. Iterate forward
+    // and overwrite chosen so the loop ends on the latest idle match.
+    for (mach_msg_type_number_t i = 1; i < count; i++) {
+        struct thread_basic_info tbi;
+        mach_msg_type_number_t tic = THREAD_BASIC_INFO_COUNT;
+        if (thread_info(threads[i], THREAD_BASIC_INFO,
+                (thread_info_t)&tbi, &tic) != KERN_SUCCESS) continue;
+        // 2 = TH_STATE_STOPPED, 3 = TH_STATE_WAITING, 5 = TH_STATE_HALTED.
+        if (tbi.run_state == 2 || tbi.run_state == 3 || tbi.run_state == 5)
+            chosen = threads[i];
+    }
+    if (chosen == MACH_PORT_NULL) chosen = threads[0];
+    if (chosen != MACH_PORT_NULL) {
+        mach_port_mod_refs(mach_task_self(), chosen, MACH_PORT_RIGHT_SEND, +1);
+        EVT("event=inject phase=hijack_pick thread=%u total=%d", chosen, count);
+    } else {
+        EVT("event=inject phase=hijack_pick thread=NONE total=%d", count);
+    }
+    for (mach_msg_type_number_t i = 0; i < count; i++)
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(*threads));
+    return chosen;
+}
+
+
+// Inject open/fcntl/mmap syscall chain into target context to map an
+// Inject open + fcntl(F_ADDFILESIGS_RETURN) + mmap + mremap_encrypted
+// into target via the hijacked thread. The mremap call is what attaches
+// apple_protect_pager so caller's mach_vm_read returns plaintext for
+// the cryptoff range. Helper-context mremap_encrypted EPERMs under iOS 16
+// AMFI; running it from target context satisfies text_crypter_create_hook.
+//
+// Returns 0 with *out_addr = target's mapping base. Leaks scratch on
+// success - target gets task_terminate'd shortly.
+static int inject_mmap_in_target(task_t task, mach_port_t exc_port,
+                                 thread_act_t thread,
+                                 const char *path,
+                                 const selected_slice_t *sel,
+                                 mach_vm_address_t *out_addr,
+                                 size_t *out_size) {
+    if (!sel->selected.cs.has_cs) {
+        EVT("event=inject phase=mmap_skipped reason=no_cs_blob");
+        return -1;
+    }
+
+    // Allocate one scratch page for [path][fsignatures] + one trampoline
+    // page for raw syscall stubs. Raw stubs avoid libc cerror_nocancel,
+    // which derefs pthread TLS on errors - bootstrap thread has no TLS.
+    size_t path_len = strlen(path) + 1;
+    size_t scratch_size = ((path_len + sizeof(helper_fsignatures_t) + 0xfff)
+                          & ~(size_t)0xfff);
+    mach_vm_address_t scratch = 0, tramp = 0;
+    if (mach_vm_allocate(task, &scratch, scratch_size, VM_FLAGS_ANYWHERE)
+            != KERN_SUCCESS) {
+        EVT("event=inject phase=mmap_alloc_fail");
+        return -1;
+    }
+    if (mach_vm_allocate(task, &tramp, 0x4000, VM_FLAGS_ANYWHERE)
+            != KERN_SUCCESS) {
+        EVT("event=inject phase=tramp_alloc_fail");
+        mach_vm_deallocate(task, scratch, scratch_size);
+        return -1;
+    }
+
+    // Lay out scratch.
+    mach_vm_address_t target_path = scratch;
+    mach_vm_address_t target_fs   = scratch + ((path_len + 7) & ~7ULL);
+    helper_fsignatures_t fs = {
+        .fs_file_start = sel->selected.slice.slice_offset,
+        .fs_blob_start = (void *)(uintptr_t)sel->selected.cs.cs_offset,
+        .fs_blob_size  = sel->selected.cs.cs_size,
+    };
+    if (mach_vm_write(task, target_path, (vm_offset_t)(uintptr_t)path,
+            (mach_msg_type_number_t)path_len) != KERN_SUCCESS ||
+        mach_vm_write(task, target_fs, (vm_offset_t)(uintptr_t)&fs,
+            sizeof(fs)) != KERN_SUCCESS) {
+        mach_vm_deallocate(task, tramp, 0x4000);
+        mach_vm_deallocate(task, scratch, scratch_size);
+        return -1;
+    }
+
+    // Build trampolines: each 16-byte slot is `movz x16,#N; svc #0x80; ret`.
+    // Slots: 0=open(5), 1=fcntl(92), 2=mmap(197), 3=mremap_encrypted(489).
+    static const uint32_t syscalls[4] = { 5, 92, 197, 489 };
+    uint32_t buf[4 * 4] = {0};
+    for (int i = 0; i < 4; i++) {
+        uint32_t *slot = &buf[i * 4];
+        slot[0] = 0xD2800010u | (syscalls[i] << 5);
+        slot[1] = 0xD4001001u;
+        slot[2] = slot[3] = 0xD65F03C0u;
+    }
+
+    // Prefault trampoline at slot offset 64. After mremap_encrypted attaches
+    // apple_protect_pager to the crypt region, the kernel still won't run
+    // fairplayd until something inside the *target* task touches each page.
+    // Cross-task vm_read doesn't trigger that fault path - on iOS combos
+    // where dyld halts before binding (e.g. iOS 16.1.1 Dopamine), the
+    // helper would otherwise read raw on-disk ciphertext.
+    //
+    //   prefault(x0=base, x1=size, x2=stride):
+    //     cbz   x1, .ret
+    //   .lp: ldrb  w3, [x0]
+    //     add   x0, x0, x2
+    //     subs  x1, x1, x2
+    //     b.hi  .lp
+    //   .ret: ret
+    static const uint32_t prefault[6] = {
+        0xB40000A1u, // cbz x1, +20
+        0x39400003u, // ldrb w3, [x0]
+        0x8B020000u, // add x0, x0, x2
+        0xEB020021u, // subs x1, x1, x2
+        0x54FFFFA8u, // b.hi -12
+        0xD65F03C0u, // ret
+    };
+    if (mach_vm_write(task, tramp, (vm_offset_t)(uintptr_t)buf, sizeof(buf))
+            != KERN_SUCCESS ||
+        mach_vm_write(task, tramp + sizeof(buf),
+            (vm_offset_t)(uintptr_t)prefault, sizeof(prefault)) != KERN_SUCCESS ||
+        mach_vm_protect(task, tramp, 0x4000, FALSE,
+            VM_PROT_READ | VM_PROT_EXECUTE) != KERN_SUCCESS) {
+        EVT("event=inject phase=tramp_write_fail");
+        mach_vm_deallocate(task, tramp, 0x4000);
+        mach_vm_deallocate(task, scratch, scratch_size);
+        return -1;
+    }
+    {
+        vm_machine_attribute_val_t cv = MATTR_VAL_CACHE_FLUSH;
+        mach_vm_machine_attribute(task, tramp, 0x4000, MATTR_CACHE, &cv);
+    }
+    const mach_vm_address_t tramp_open     = tramp + 0;
+    const mach_vm_address_t tramp_fcntl    = tramp + 16;
+    const mach_vm_address_t tramp_mmap     = tramp + 32;
+    const mach_vm_address_t tramp_mremap   = tramp + 48;
+    const mach_vm_address_t tramp_prefault = tramp + sizeof(buf);
+
+    // open(path, O_RDONLY)
+    uint64_t fd = 0;
+    if (target_call(task, thread, exc_port, tramp_open,
+            target_path, O_RDONLY, 0, 0, 0, 0, 0, &fd, 15000) != 0 ||
+        (int32_t)fd < 0) {
+        EVT("event=inject phase=mmap_open_fail");
+        mach_vm_deallocate(task, tramp, 0x4000);
+        mach_vm_deallocate(task, scratch, scratch_size);
+        return -1;
+    }
+
+    // fcntl(fd, F_ADDFILESIGS_RETURN, &fs) - registers cs_blob.
+    uint64_t fcr = 0;
+    if (target_call(task, thread, exc_port, tramp_fcntl,
+            fd, F_ADDFILESIGS_RETURN, target_fs, 0, 0, 0, 0, &fcr, 10000) != 0) {
+        EVT("event=inject phase=mmap_fcntl_fail");
+        mach_vm_deallocate(task, tramp, 0x4000);
+        mach_vm_deallocate(task, scratch, scratch_size);
+        return -1;
+    }
+
+    // mmap(NULL, file_sz, PROT_READ|PROT_EXEC, MAP_PRIVATE, fd, 0)
+    size_t file_sz = (size_t)sel->selected.slice.slice_size;
+    if (file_sz == 0)
+        file_sz = sel->selected.slice.slice_offset
+                + sel->selected.cs.cs_offset + sel->selected.cs.cs_size;
+    uint64_t mapped = 0;
+    if (target_call(task, thread, exc_port, tramp_mmap,
+            0, file_sz, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0,
+            0, &mapped, 15000) != 0 || (int64_t)mapped == -1) {
+        EVT("event=inject phase=mmap_mmap_fail");
+        mach_vm_deallocate(task, tramp, 0x4000);
+        mach_vm_deallocate(task, scratch, scratch_size);
+        return -1;
+    }
+
+    // mremap_encrypted on cryptoff range - kernel attaches apple_protect_pager.
+    if (sel->selected.crypt.has_crypt &&
+        sel->selected.crypt.cryptid != 0 && sel->selected.crypt.cryptsize > 0) {
+        const size_t page = 0x4000;
+        mach_vm_address_t enc = mapped + sel->selected.slice.slice_offset
+            + sel->selected.crypt.cryptoff;
+        size_t len = (sel->selected.crypt.cryptsize + page - 1) & ~(page - 1);
+        uint64_t rc = 0;
+        if (target_call(task, thread, exc_port, tramp_mremap,
+                enc, len, sel->selected.crypt.cryptid,
+                sel->selected.slice.cputype, sel->selected.slice.cpusubtype, 0,
+                0, &rc, 20000) != 0 || (int32_t)rc != 0) {
+            EVT("event=inject phase=mremap_fail rc=%lld", (long long)(int32_t)rc);
+        } else {
+            EVT("event=inject phase=mremap_done rc=%lld", (long long)(int32_t)rc);
+
+            // Force fairplayd decrypt-on-fault for every page now, while we
+            // still have the target thread hijacked. Without this, the next
+            // step's cross-task vm_read pulls the raw file-backed bytes
+            // because the target never touched them itself (dyld halted
+            // early on iOS 16.1.1 Dopamine etc.). 60s budget covers a
+            // multi-MB region: ~one fairplayd RPC per 16 KB page.
+            uint64_t pf_rc = 0;
+            if (target_call(task, thread, exc_port, tramp_prefault,
+                    enc, len, page, 0, 0, 0, 0, &pf_rc, 60000) != 0) {
+                EVT("event=inject phase=prefault_fail");
+            } else {
+                EVT("event=inject phase=prefault_done pages=%llu",
+                    (unsigned long long)(len / page));
+            }
+        }
+    }
+
+    if (out_addr) *out_addr = mapped;
+    if (out_size) *out_size = file_sz;
+    return 0;
+}
+
+
+// Recursively walk the bundle on disk and decrypt every encrypted Mach-O
+// the target hasn't already mapped, by injecting an open + fcntl +
+// mmap + mremap_encrypted chain into the target via thread hijack.
+// Helper-context mremap_encrypted gets EPERM under iOS-16 AMFI policy;
+// the target's CS context satisfies AMFI, so the kernel attaches
+// apple_protect_pager and page faults route through fairplayd.
+// Returns count dumped; appends bundle-relative paths to dumped_rel.
+static int inject_missing_frameworks(task_t task, mach_port_t exc,
+                                     const char *bundle_src,
+                                     const char *bundle_dst,
+                                     struct dyld_image_info *imgs,
+                                     uint32_t img_count,
+                                     const runtime_image_t *runtime,
+                                     char ***dumped_rel_p, int *n_dumped_p,
+                                     int *dumped_cap_p) {
+    if (!task || exc == MACH_PORT_NULL || !imgs || !runtime) return 0;
+
+    // arm64e PAC blocks crafted PCs; only attempt on plain arm64.
+    if (runtime->cputype != CPU_TYPE_ARM64 ||
+        cpusubtype_base(runtime->cpusubtype) != CPU_SUBTYPE_ARM64_ALL) {
+        LOG("[helper] inject: skip - target arch isn't plain arm64 "
+            "(cputype=0x%x subtype=0x%x); thread injection needs PAC bypass\n",
+            runtime->cputype, runtime->cpusubtype);
+        EVT("event=inject phase=skipped reason=not_plain_arm64");
         return 0;
     }
 
-    EVT("event=image phase=start name=\"%s\" kind=main source=rescue", main_name);
-    dump_result_t dr = mmap_dump(main_src, main_dst, &sel);
-    if (dr == DUMP_OK) {
-        EVT("event=image phase=done name=\"%s\" kind=main size=%u source=rescue",
-            main_name, sel.selected.crypt.cryptsize);
-        if (out_rt) *out_rt = rt;
-        return 1;
-    }
+    // Build a set of bundle-relative paths the target already mapped, so
+    // we don't waste an injection cycle on those.
+    const char *bs = bundle_src;
+    size_t bs_len = strlen(bs);
+    char bs_pri[4096];
+    snprintf(bs_pri, sizeof(bs_pri), "/private%s", bs);
 
-    EVT("event=image phase=failed name=\"%s\" kind=main reason=\"%s\" source=rescue",
-        main_name, dump_reason(dr));
-    if (out_rt) *out_rt = rt;
-    return 0;
+    // Pick one thread up front and reuse for every framework: each
+    // target_call cycle suspends/sets/resumes the same thread, so picking
+    // it once avoids burning re-discovery cycles per framework.
+    thread_act_t hijacked = pick_hijack_thread(task);
+
+    int injected = 0;
+
+    typedef struct stack_ent { char *dir; struct stack_ent *next; } stack_ent_t;
+    stack_ent_t *stack = malloc(sizeof(*stack));
+    if (!stack) return 0;
+    stack->dir = strdup(bundle_src);
+    stack->next = NULL;
+    if (!stack->dir) { free(stack); return 0; }
+
+    while (stack) {
+        stack_ent_t *cur = stack;
+        stack = stack->next;
+        DIR *d = opendir(cur->dir);
+        if (!d) { free(cur->dir); free(cur); continue; }
+
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] == '.') continue;
+            char child[4096];
+            snprintf(child, sizeof(child), "%s/%s", cur->dir, e->d_name);
+            struct stat st;
+            if (lstat(child, &st) != 0) continue;
+            if (S_ISLNK(st.st_mode)) continue;
+            if (S_ISDIR(st.st_mode)) {
+                // Skip PlugIns/ and Extensions/ at top level - those are
+                // handled by separate decrypt_appex passes. Otherwise
+                // descend so we cover SwiftBuild.framework/Frameworks/*,
+                // Developer/Toolchains/..., and any deeper nest.
+                if (strcmp(cur->dir, bundle_src) == 0 &&
+                    (strcmp(e->d_name, "PlugIns") == 0 ||
+                     strcmp(e->d_name, "Extensions") == 0)) continue;
+                stack_ent_t *n = malloc(sizeof(*n));
+                if (!n) continue;
+                n->dir = strdup(child);
+                if (!n->dir) { free(n); continue; }
+                n->next = stack;
+                stack = n;
+                continue;
+            }
+            if (!S_ISREG(st.st_mode)) continue;
+            if (!is_macho(child)) continue;
+
+            selected_slice_t sel;
+            if (select_runtime_slice(child, runtime, &sel) != 1) continue;
+            if (!slice_needs_dump(&sel)) continue;
+
+            // Skip if the target already has this image mapped.
+            int already_loaded = 0;
+            for (uint32_t i = 0; i < img_count; i++) {
+                const char *ip = imgs[i].imageFilePath;
+                if (!ip) continue;
+                if (strcmp(ip, child) == 0 ||
+                    (strncmp(ip, "/private", 8) == 0 && strcmp(ip + 8, child) == 0)) {
+                    already_loaded = 1;
+                    break;
+                }
+            }
+            if (already_loaded) continue;
+
+            LOG("[helper] inject: %s not loaded by target\n", child);
+            EVT("event=inject phase=start name=\"%s\"", child);
+
+            // mmap+mremap_encrypted in target context. Target's CS context
+            // satisfies AMFI's text_crypter_create_hook gate (helper-context
+            // gets EPERM), so the kernel attaches apple_protect_pager and
+            // page faults route through fairplayd for plaintext.
+            if (hijacked == MACH_PORT_NULL) {
+                EVT("event=inject phase=skipped name=\"%s\" reason=no_thread", child);
+                continue;
+            }
+            mach_vm_address_t mapped = 0;
+            size_t mapped_size = 0;
+            if (inject_mmap_in_target(task, exc, hijacked,
+                    child, &sel, &mapped, &mapped_size) != 0) {
+                EVT("event=inject phase=failed name=\"%s\"", child);
+                continue;
+            }
+            mach_vm_address_t base = mapped + sel.selected.slice.slice_offset;
+            EVT("event=inject phase=success addr=0x%llx", (unsigned long long)base);
+
+            const char *rel = child + bs_len;
+            while (*rel == '/') rel++;
+            char abs_dst[4096];
+            snprintf(abs_dst, sizeof(abs_dst), "%s/%s", bundle_dst, rel);
+
+            EVT("event=image phase=start name=\"%s\" kind=framework source=inject_mmap", rel);
+            dump_result_t dr = dump_image(child, abs_dst, task, base, &sel);
+            if (dr == DUMP_OK) {
+                EVT("event=image phase=done name=\"%s\" kind=framework size=%u source=inject_mmap",
+                    rel, sel.selected.crypt.cryptsize);
+                injected++;
+                if (*n_dumped_p >= *dumped_cap_p) {
+                    int newcap = *dumped_cap_p ? *dumped_cap_p * 2 : 16;
+                    char **nb = realloc(*dumped_rel_p, newcap * sizeof(*nb));
+                    if (nb) { *dumped_rel_p = nb; *dumped_cap_p = newcap; }
+                }
+                if (*n_dumped_p < *dumped_cap_p) {
+                    (*dumped_rel_p)[(*n_dumped_p)++] = strdup(rel);
+                }
+            } else {
+                EVT("event=image phase=failed name=\"%s\" kind=framework reason=\"%s\" source=inject_mmap",
+                    rel, dump_reason(dr));
+            }
+        }
+        closedir(d);
+        free(cur->dir);
+        free(cur);
+    }
+    if (hijacked != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), hijacked);
+    }
+    return injected;
 }
 
 // Decrypt one bundle (main .app, .appex, or any .framework with executable).
@@ -1288,17 +1973,6 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     if (spawn_suspended(bundle_id, main_src, &pid, &task, &via_ptrace) != 0) {
         ERR("spawn failed for %s", bundle_src);
         EVT("event=spawn_failed src=\"%s\"", bundle_src);
-        if (!bundle_id || !bundle_id[0]) {
-            runtime_image_t rescue_rt;
-            int rescued_main = rescue_bundle_main(bundle_src, bundle_dst, main_name, &rescue_rt);
-            int rescued_extra = 0;
-            if (rescued_main >= 0) {
-                rescued_extra = rescue_unmapped_frameworks(bundle_src, bundle_dst,
-                    &rescue_rt, NULL, 0, main_name);
-            }
-            EVT("event=bundle phase=done src=\"%s\" extras=%d",
-                bundle_src, rescued_extra);
-        }
         return 0; // non-fatal; continue with rest of the IPA
     }
 
@@ -1335,15 +2009,49 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
             main_name);
     }
 
-    // 2) Resume dyld so it maps Frameworks/* into the target's address
-    //    space; FairPlay page-faults decrypt them on first access. We set a
-    //    Mach exception port so the inevitable dyld bind-fail (on cross-OS
-    //    missing-symbol abort) pauses the task before the process dies.
-    mach_port_t exc = via_ptrace ? MACH_PORT_NULL : make_exception_port(task);
+    // 2) Set Mach exception port + patch dyld's halt path BEFORE resume.
+    //    Without the patch, dyld's cross-OS bind-fail raises SIGABRT via
+    //    abort_with_payload -> EXC_CRASH -> kernel reaps the task -> all
+    //    later mach_vm_allocate fails and the inject pass dies. With the
+    //    patch (libc abort entries -> ret + dyld inline syscalls -> nop)
+    //    the halt() returns silently, dyld stays alive in a
+    //    partially-bound state, EXC_BREAKPOINT at the trailing brk #1
+    //    pauses the task with everything dyld already mapped readable,
+    //    and the inject pass picks up the rest.
+    mach_port_t exc = make_exception_port(task);
+    {
+        // Pre-resume image list is usually empty (dyld hasn't run yet);
+        // find_target_dlopen_image's task_info / dyld_all_image_infos
+        // fallback supplies the dyld base regardless.
+        uint32_t pre_count = 0;
+        char *pre_paths = NULL;
+        struct dyld_image_info *pre_imgs = list_images(task, &pre_count, &pre_paths);
+        Dl_info hi = {0};
+        dladdr((void *)dlopen, &hi);
+        mach_vm_address_t target_libdyld = find_target_dlopen_image(task,
+            pre_imgs, pre_count, hi.dli_fname);
+        mach_vm_address_t helper_libdyld_v =
+            (mach_vm_address_t)(uintptr_t)hi.dli_fbase;
+        if (target_libdyld && helper_libdyld_v) {
+            patch_target_abort(task, pre_imgs, pre_count,
+                target_libdyld, helper_libdyld_v);
+        } else {
+            EVT("event=patch phase=skip reason=no_libdyld target=0x%llx helper=0x%llx",
+                (unsigned long long)target_libdyld,
+                (unsigned long long)helper_libdyld_v);
+        }
+        free(pre_paths); free(pre_imgs);
+    }
+
     LOG("[helper] resuming %s (via_ptrace=%d)\n", bundle_src, via_ptrace);
     EVT("event=dyld phase=resuming src=\"%s\" via_ptrace=%d", bundle_src, via_ptrace);
-    run_and_suspend(task, pid, via_ptrace, exc,
-        (bundle_id && bundle_id[0]) ? 10000 : 2000);
+    // Wait long enough for the target's main() to reach the dlopen calls
+    // for runtime-loaded frameworks (Metal compat dylibs, plugin bundles,
+    // etc). Mach-exception delivery and ptrace SIGKILL both short-circuit
+    // the wait, so healthy targets are the only thing that pays the full
+    // timeout. 30s is empirically enough for most games to finish their
+    // Metal/graphics init pass; longer would just slow down quick apps.
+    run_and_suspend(task, pid, via_ptrace, exc, 30000);
 
     // 3) Enumerate images loaded in the (now suspended or dead) target task
     //    and dump every encrypted one whose path is inside this bundle.
@@ -1351,7 +2059,8 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     char *paths = NULL;
     struct dyld_image_info *imgs = list_images(task, &img_count, &paths);
     int extra = 0;
-    // Bundle-relative paths dumped here, fed to rescue pass to skip dupes.
+    // Bundle-relative paths dumped from already-mapped images, fed to
+    // inject pass to skip dupes.
     char **dumped_rel = NULL;
     int n_dumped = 0, dumped_cap = 0;
     // dyld image paths come back with a /private prefix that bundle_src
@@ -1418,11 +2127,20 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
                 rel, dump_reason(dr));
         }
     }
-    free(paths); free(imgs);
-    LOG("[helper] %s: dumped %d framework(s)\n", bundle_src, extra);
+    LOG("[helper] %s: dumped %d framework(s) via target task\n", bundle_src, extra);
 
-    // Tear the target down before the rescue pass so xpcproxy/launchd don't
-    // hold the bundle paths busy while we mmap them.
+    // 4) Decrypt remaining encrypted Mach-Os in the bundle that dyld didn't
+    //    map (or hadn't reached before halt) by injecting open + fcntl +
+    //    mmap + mremap_encrypted into target via thread hijack.
+    if (have_bundle_rt && exc != MACH_PORT_NULL) {
+        int injected = inject_missing_frameworks(task, exc, bundle_src,
+            bundle_dst, imgs, img_count, &bundle_rt,
+            &dumped_rel, &n_dumped, &dumped_cap);
+        extra += injected;
+    }
+    free(paths); free(imgs);
+
+    // Tear the target down once we've drained everything we want from it.
     if (exc != MACH_PORT_NULL) {
         mach_port_mod_refs(mach_task_self(), exc, MACH_PORT_RIGHT_RECEIVE, -1);
         exc = MACH_PORT_NULL;
@@ -1432,17 +2150,6 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     int reaped;
     waitpid(pid, &reaped, WNOHANG);
     pid = 0;
-
-    // 4) Rescue pass: target dyld may have aborted on a cross-OS bind-fail
-    //    before mapping all @rpath frameworks; even on a clean dyld run,
-    //    nested frameworks, embedded toolchains, and Developer/ payloads
-    //    aren't loaded at launch. Recursively walk the bundle on disk,
-    //    mmap each encrypted Mach-O, and decrypt via FairPlay page-fault
-    //    on memcpy.
-    int rescued = rescue_unmapped_frameworks(bundle_src, bundle_dst,
-        have_bundle_rt ? &bundle_rt : NULL,
-        (const char **)dumped_rel, n_dumped, main_name);
-    extra += rescued;
 
     for (int i = 0; i < n_dumped; i++) free(dumped_rel[i]);
     free(dumped_rel);
@@ -1529,7 +2236,18 @@ static int run_zip(const char *staging, const char *ipa_path) {
     posix_spawn_file_actions_addclose(&fa, pipe_fds[0]);
     posix_spawn_file_actions_addclose(&fa, pipe_fds[1]);
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-    char *argv[] = { "zip", "-1", "-r", (char *)ipa_path, "Payload", NULL };
+    char *argv[] = { "zip", "-1", "-r", (char *)ipa_path, "Payload",
+        "-x",
+        "Payload/*/Watch/*", "Payload/*/Watch",
+        "Payload/*/WatchKitSupport2/*", "Payload/*/WatchKitSupport2",
+        "Payload/*/SC_Info/*", "Payload/*/SC_Info",
+        "*/SC_Info/*", "*/SC_Info",
+        "Payload/*/*.dSYM/*", "Payload/*/*.dSYM",
+        "Payload/*/BCSymbolMaps/*", "Payload/*/BCSymbolMaps",
+        "Payload/*/Symbols/*", "Payload/*/Symbols",
+        "Payload/META-INF/*", "Payload/META-INF",
+        "Payload/iTunesMetadata.plist", "Payload/iTunesArtwork",
+        NULL };
     pid_t pid = 0;
     const char *zip_paths[] = { "/var/jb/usr/bin/zip", "/usr/bin/zip", NULL };
     int rc = -1;

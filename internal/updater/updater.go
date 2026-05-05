@@ -78,7 +78,7 @@ type Async struct {
 	skipped bool
 }
 
-// Start spawns a background check. Safe to call even when disabled — it
+// Start spawns a background check. Safe to call even when disabled - it
 // short-circuits and Wait becomes a no-op.
 func Start(ctx context.Context, current string, cfg *config.Config) *Async {
 	a := &Async{current: current, cfg: cfg}

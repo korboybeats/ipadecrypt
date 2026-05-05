@@ -62,7 +62,7 @@ type plistPlan struct {
 }
 
 // PatchForInstall rewrites the main Info.plist (MinimumOSVersion plus, when
-// patchDeviceType is true, UIDeviceFamily) and—unless keepWatch—drops Watch/
+// patchDeviceType is true, UIDeviceFamily) and, unless keepWatch, drops Watch/
 // entries. The Info.plist is pre-scanned so a device-family mismatch fails
 // early, without writing a partial output IPA.
 func PatchForInstall(src, dst, target string, deviceFamily int, patchDeviceType, keepWatch bool) (PatchResult, error) {
@@ -144,16 +144,18 @@ func isMainAppInfoPlist(name string) bool {
 		parts[2] == "Info.plist"
 }
 
+// copyEntry forwards an entry verbatim — no decompress + recompress.
+// CreateRaw + OpenRaw stream the original deflate bytes byte-for-byte,
+// which is the only thing that makes a multi-GB IPA repack survivable.
 func copyEntry(f *zip.File, w *zip.Writer) error {
-	rc, err := f.Open()
+	rc, err := f.OpenRaw()
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
 
 	hdr := f.FileHeader
 
-	dst, err := w.CreateHeader(&hdr)
+	dst, err := w.CreateRaw(&hdr)
 	if err != nil {
 		return err
 	}

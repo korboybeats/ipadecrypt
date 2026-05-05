@@ -6,7 +6,14 @@
     <key>task_for_pid-allow</key>
     <true/>
 
-    <!-- no sandbox, no container; we run from SSH as root -->
+    <!-- cross-task thread_set_state -->
+    <key>com.apple.private.cs.debugger</key>
+    <true/>
+
+    <!-- platform/sandbox/container slack. platform-application is required:
+         without it AMFI silently terminates the helper before it can spawn
+         the target. The two no-* keys remove container scoping so root can
+         read installed bundles + write to /tmp. -->
     <key>platform-application</key>
     <true/>
     <key>com.apple.private.security.no-sandbox</key>
@@ -14,7 +21,7 @@
     <key>com.apple.private.security.no-container</key>
     <true/>
 
-    <!-- let us ask SpringBoard to launch apps via SBSLaunch SPI -->
+    <!-- SBSLaunchApplicationWithIdentifier -->
     <key>com.apple.springboard.launchapplications</key>
     <true/>
 </dict>

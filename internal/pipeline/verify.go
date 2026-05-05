@@ -84,6 +84,19 @@ func zipEntryHasCryptid(f *zip.File) (encrypted, macho bool, err error) {
 
 var errNotMachO = errors.New("not mach-o")
 
+func isMachOMagic(b []byte) bool {
+	if len(b) < 4 {
+		return false
+	}
+
+	switch binary.LittleEndian.Uint32(b) {
+	case mhMagic, mhMagic64, mhCigam, mhCigam64, fatMagic, fatCigam, fatMagic64, fatCigam64:
+		return true
+	}
+
+	return false
+}
+
 func readerHasCryptid(r io.Reader) (bool, error) {
 	magicBytes, err := readExact(r, 4)
 	if err != nil {

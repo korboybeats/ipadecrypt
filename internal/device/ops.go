@@ -383,7 +383,7 @@ for app in sorted(glob.glob("/var/containers/Bundle/Application/*/*.app")):
 }
 
 // FindInstalledByBundleID returns the first installed .app whose Info.plist
-// contains bundleID. Single grep over all top-level Info.plists is ~60x faster
+// contains bundleID. Single grep over all top-level Info.plists is much faster
 // than a shell loop with per-file fork/exec. grep -aF works for both XML and
 // binary plists.
 func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
@@ -392,7 +392,7 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
 	}
 
 	cmd := fmt.Sprintf(
-		"grep -laF '%s' /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null | head -1",
+		"sh -c 'grep -laF \"%s\" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null | head -n1'",
 		bundleID)
 
 	out, errOut, code, err := c.RunSudo(cmd)
@@ -403,12 +403,13 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
 	if code != 0 && code != 1 {
 		return "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
 	}
-	plist := strings.TrimSpace(out)
-	if plist == "" {
+
+	hit := strings.TrimSpace(out)
+	if hit == "" {
 		return "", nil
 	}
-	// strip trailing /Info.plist to return the .app dir
-	return strings.TrimSuffix(plist, "/Info.plist"), nil
+
+	return strings.TrimSuffix(hit, "/Info.plist"), nil
 }
 
 // FindInstalled locates an installed app bundle directory by its .app name.
