@@ -24,7 +24,7 @@ const (
 	configFile = rootDir + "/config.json"
 )
 
-var errAuthRequired = errors.New("Apple ID sign-in required")
+var errAuthRequired = errors.New("sign in with Apple ID required")
 
 type installedApp struct {
 	BundleID string
@@ -96,7 +96,7 @@ func run(bundleID, trackID, email, password, authCode string) error {
 
 	if email != "" || password != "" || authCode != "" {
 		if email == "" || password == "" {
-			return errors.New("Apple ID email and password are required")
+			return errors.New("missing Apple ID email or password")
 		}
 		emit("phase", "step", "name", "authenticating")
 		if err := appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode); err != nil {

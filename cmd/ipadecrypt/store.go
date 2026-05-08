@@ -16,19 +16,6 @@ const (
 	authRetryingDownload                      // kicking the call off again
 )
 
-// reauth refreshes the App Store password token by logging in again with
-// stored credentials. Updates cfg.Apple.Account in place and persists it.
-func reauth(cfg *config.Config, as *appstore.Client) error {
-	return appstoreworkflow.Reauth(cfg, as)
-}
-
-// acquireLicense purchases the app (free apps still need a VPP-style license
-// entry). Handles mid-purchase token expiry by re-authenticating once and
-// retrying. ErrLicenseAlreadyExists is treated as success.
-func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) error {
-	return appstoreworkflow.AcquireLicense(cfg, as, app)
-}
-
 // withAuth runs fn with up to `retries` attempts, recovering from the two
 // well-known recoverable errors from the private App Store endpoint:
 // ErrPasswordTokenExpired via reauth and ErrLicenseRequired via

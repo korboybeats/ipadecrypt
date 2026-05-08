@@ -205,6 +205,16 @@ func compareMachOSlice(outData, srcData []byte) string {
 	outCryptBytes := outData[outCrypt.cryptoff:cryptEnd]
 	srcCryptBytes := srcSlice[srcCrypt.cryptoff : srcCrypt.cryptoff+srcCrypt.cryptsize]
 
+	// If the source slice already shipped with cryptid=0, FairPlay never
+	// touched these bytes — they were always plaintext (typical of
+	// developer-bundled dylibs and 3rd-party SDKs Apple distributes
+	// pre-thinned). Helper correctly took the no-op path; output should
+	// equal source byte-for-byte. Skip the "byte-equal == decrypt bailed"
+	// rule here, otherwise we false-flag every legitimate passthrough.
+	if srcCrypt.cryptid == 0 {
+		return ""
+	}
+
 	if isAllZero(outCryptBytes) {
 		return "crypt region is all zeros (FairPlay decrypt-on-fault never fired in target)"
 	}
@@ -321,6 +331,7 @@ type encryptionInfo struct {
 	cryptidOffset uint64 // file offset of the cryptid u32 within the slice
 	cryptoff      uint64
 	cryptsize     uint64
+	cryptid       uint32 // current cryptid value at that offset
 }
 
 func readEncryptionInfo(data []byte) (encryptionInfo, error) {
@@ -376,6 +387,7 @@ func readEncryptionInfo(data []byte) (encryptionInfo, error) {
 			info.cryptoff = uint64(bo.Uint32(data[p+8 : p+12]))
 			info.cryptsize = uint64(bo.Uint32(data[p+12 : p+16]))
 			info.cryptidOffset = p + 16
+			info.cryptid = bo.Uint32(data[p+16 : p+20])
 
 			return info, nil
 		}
