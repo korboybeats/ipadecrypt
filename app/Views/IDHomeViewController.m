@@ -5,6 +5,7 @@
 #import "IDAppEnumerator.h"
 #import "IDITunesSearch.h"
 #import "IDDecryptOptionsViewController.h"
+#import "IDAppStoreVersionPickerViewController.h"
 #import "IDDecryptProgressViewController.h"
 #import "IDHelperRunner.h"
 #import "IDAppStoreHelperRunner.h"
@@ -340,13 +341,35 @@ static NSString *IDPrettyImageName(NSString *name) {
             [self latestFromAppStoreBundleID:bundleID
                                      trackID:trackID
                                 displayName:title
+                           externalVersionID:nil
                                       email:nil
                                    password:nil
                                    authCode:nil];
         } else if (opt == IDDecryptOptionLatestStoreKit) {
             [self downloadAndDecryptTrackID:trackID bundleID:bundleID displayName:title];
+        } else if (opt == IDDecryptOptionSelectAppStore) {
+            [self presentAppStoreVersionPickerForTitle:title bundleID:bundleID trackID:trackID];
         }
     }];
+}
+
+- (void)presentAppStoreVersionPickerForTitle:(NSString *)title
+                                    bundleID:(NSString *)bundleID
+                                     trackID:(NSInteger)trackID {
+    IDAppStoreVersionPickerViewController *vc = [[IDAppStoreVersionPickerViewController alloc]
+        initWithTitle:title
+             bundleID:bundleID
+              trackID:trackID
+           completion:^(NSString *externalVersionID) {
+        [self latestFromAppStoreBundleID:bundleID
+                                 trackID:trackID
+                             displayName:title
+                       externalVersionID:externalVersionID
+                                   email:nil
+                                password:nil
+                                authCode:nil];
+    }];
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 - (NSString *)outputIPAForBundle:(NSString *)bundleID version:(NSString *)version {
@@ -499,16 +522,22 @@ static NSString *IDPrettyImageName(NSString *name) {
 - (void)latestFromAppStoreBundleID:(NSString *)bundleID
                             trackID:(NSInteger)trackID
                        displayName:(NSString *)displayName
+                  externalVersionID:(NSString *)externalVersionID
                               email:(NSString *)email
                            password:(NSString *)password
                            authCode:(NSString *)authCode {
     IDDecryptProgressViewController *vc = [[IDDecryptProgressViewController alloc]
         initWithTitle:displayName];
     [self.navigationController pushViewController:vc animated:YES];
-    [vc appendStatus:[NSString stringWithFormat:@"Installing latest App Store build for %@", bundleID]];
+    if (externalVersionID.length) {
+        [vc appendStatus:[NSString stringWithFormat:@"Installing App Store version %@ for %@", externalVersionID, bundleID]];
+    } else {
+        [vc appendStatus:[NSString stringWithFormat:@"Installing latest App Store build for %@", bundleID]];
+    }
     [self runAppStoreHelperForBundleID:bundleID
                                trackID:trackID
                            displayName:displayName
+                      externalVersionID:externalVersionID
                                  email:email
                               password:password
                               authCode:authCode
@@ -518,6 +547,7 @@ static NSString *IDPrettyImageName(NSString *name) {
 - (void)runAppStoreHelperForBundleID:(NSString *)bundleID
                              trackID:(NSInteger)trackID
                          displayName:(NSString *)displayName
+                    externalVersionID:(NSString *)externalVersionID
                                email:(NSString *)email
                             password:(NSString *)password
                             authCode:(NSString *)authCode
@@ -531,6 +561,7 @@ static NSString *IDPrettyImageName(NSString *name) {
 
     [IDAppStoreHelperRunner runWithBundleID:bundleID
                                     trackID:trackID
+                          externalVersionID:externalVersionID
                                       email:email
                                    password:password
                                    authCode:authCode
@@ -550,7 +581,11 @@ static NSString *IDPrettyImageName(NSString *name) {
                 [vc appendStatus:@"  Retrying download authorization"];
             }
         } else if ([phase isEqualToString:@"app"]) {
-            [vc appendStatus:[NSString stringWithFormat:@"  Latest version: %@", ev[@"version"] ?: @"unknown"]];
+            if (externalVersionID.length) {
+                [vc appendStatus:[NSString stringWithFormat:@"  Selected external ID: %@", externalVersionID]];
+            } else {
+                [vc appendStatus:[NSString stringWithFormat:@"  Latest version: %@", ev[@"version"] ?: @"unknown"]];
+            }
         } else if ([phase isEqualToString:@"cached"]) {
             [vc appendStatus:[NSString stringWithFormat:@"  Using cached IPA: %@", [ev[@"path"] lastPathComponent] ?: @"IPA"]];
         } else if ([phase isEqualToString:@"download"]) {
@@ -610,6 +645,7 @@ static NSString *IDPrettyImageName(NSString *name) {
             [self promptAppleAuthForBundleID:bundleID
                                      trackID:trackID
                                  displayName:displayName
+                           externalVersionID:externalVersionID
                                          code:(needsCode && email.length && password.length)
                                            vc:vc
                                         email:email
@@ -645,6 +681,7 @@ static NSString *IDPrettyImageName(NSString *name) {
 - (void)promptAppleAuthForBundleID:(NSString *)bundleID
                             trackID:(NSInteger)trackID
                         displayName:(NSString *)displayName
+                  externalVersionID:(NSString *)externalVersionID
                                 code:(BOOL)codeOnly
                                   vc:(IDDecryptProgressViewController *)vc
                                email:(NSString *)email
@@ -695,6 +732,7 @@ static NSString *IDPrettyImageName(NSString *name) {
         [self runAppStoreHelperForBundleID:bundleID
                                    trackID:trackID
                                displayName:displayName
+                          externalVersionID:externalVersionID
                                      email:nextEmail
                                   password:nextPassword
                                   authCode:nextCode

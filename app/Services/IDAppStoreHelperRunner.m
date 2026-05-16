@@ -172,7 +172,86 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
                authCode:(NSString *)authCode
                 onEvent:(void (^)(NSDictionary *))eventBlock
              completion:(void (^)(int, NSError *))completion {
+    [self runWithBundleID:bundleID
+                  trackID:trackID
+        externalVersionID:nil
+                    email:email
+                 password:password
+                 authCode:authCode
+                  onEvent:eventBlock
+               completion:completion];
+}
+
++ (void)runWithBundleID:(NSString *)bundleID
+                trackID:(NSInteger)trackID
+      externalVersionID:(NSString *)externalVersionID
+                  email:(NSString *)email
+               password:(NSString *)password
+               authCode:(NSString *)authCode
+                onEvent:(void (^)(NSDictionary *))eventBlock
+             completion:(void (^)(int, NSError *))completion {
     NSMutableArray<NSString *> *args = [NSMutableArray array];
+    if (bundleID.length) {
+        [args addObjectsFromArray:@[@"--bundle-id", bundleID]];
+    }
+    if (trackID > 0) {
+        [args addObjectsFromArray:@[@"--track-id", [NSString stringWithFormat:@"%ld", (long)trackID]]];
+    }
+    if (externalVersionID.length) {
+        [args addObjectsFromArray:@[@"--external-version-id", externalVersionID]];
+    }
+    if (email.length) {
+        [args addObjectsFromArray:@[@"--email", email]];
+    }
+    if (password.length) {
+        [args addObjectsFromArray:@[@"--password", password]];
+    }
+    if (authCode.length) {
+        [args addObjectsFromArray:@[@"--auth-code", authCode]];
+    }
+
+    [self spawnWithArguments:args onEvent:eventBlock completion:completion];
+}
+
++ (void)listVersionsWithBundleID:(NSString *)bundleID
+                          trackID:(NSInteger)trackID
+                            email:(NSString *)email
+                         password:(NSString *)password
+                         authCode:(NSString *)authCode
+                          onEvent:(void (^)(NSDictionary *))eventBlock
+                       completion:(void (^)(int, NSError *))completion {
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObject:@"--list-versions"];
+    if (bundleID.length) {
+        [args addObjectsFromArray:@[@"--bundle-id", bundleID]];
+    }
+    if (trackID > 0) {
+        [args addObjectsFromArray:@[@"--track-id", [NSString stringWithFormat:@"%ld", (long)trackID]]];
+    }
+    if (email.length) {
+        [args addObjectsFromArray:@[@"--email", email]];
+    }
+    if (password.length) {
+        [args addObjectsFromArray:@[@"--password", password]];
+    }
+    if (authCode.length) {
+        [args addObjectsFromArray:@[@"--auth-code", authCode]];
+    }
+
+    [self spawnWithArguments:args onEvent:eventBlock completion:completion];
+}
+
++ (void)fetchVersionMetadataWithBundleID:(NSString *)bundleID
+                                  trackID:(NSInteger)trackID
+                        externalVersionID:(NSString *)externalVersionID
+                                    email:(NSString *)email
+                                 password:(NSString *)password
+                                 authCode:(NSString *)authCode
+                                  onEvent:(void (^)(NSDictionary *))eventBlock
+                               completion:(void (^)(int, NSError *))completion {
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObjects:
+        @"--version-metadata",
+        @"--external-version-id", externalVersionID ?: @"",
+        nil];
     if (bundleID.length) {
         [args addObjectsFromArray:@[@"--bundle-id", bundleID]];
     }

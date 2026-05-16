@@ -36,6 +36,9 @@ type installedApp struct {
 func main() {
 	var bundleID, trackID, email, password, authCode string
 	var verifyIPA string
+	var listVersions bool
+	var versionMetadata bool
+	var externalVersionID string
 	var decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA string
 	flag.StringVar(&bundleID, "bundle-id", "", "bundle identifier")
 	flag.StringVar(&trackID, "track-id", "", "App Store track ID")
@@ -43,6 +46,9 @@ func main() {
 	flag.StringVar(&password, "password", "", "Apple ID password")
 	flag.StringVar(&authCode, "auth-code", "", "Apple 2FA code")
 	flag.StringVar(&verifyIPA, "verify-ipa", "", "verify cryptid in IPA and exit")
+	flag.BoolVar(&listVersions, "list-versions", false, "list App Store external version IDs")
+	flag.BoolVar(&versionMetadata, "version-metadata", false, "fetch metadata for one App Store external version ID")
+	flag.StringVar(&externalVersionID, "external-version-id", "", "pin to a specific historical App Store version")
 	flag.StringVar(&decryptHelper, "decrypt-helper", "", "run decrypt helper and relay events")
 	flag.StringVar(&decryptBundleID, "decrypt-bundle-id", "", "bundle identifier for decrypt helper")
 	flag.StringVar(&decryptBundlePath, "decrypt-bundle-path", "", "installed bundle path for decrypt helper")
@@ -67,7 +73,15 @@ func main() {
 		fail(2, "missing-target", "bundle-id or track-id is required")
 	}
 
-	if err := run(bundleID, trackID, email, password, authCode); err != nil {
+	var err error
+	if versionMetadata {
+		err = runVersionMetadata(bundleID, trackID, email, password, authCode, externalVersionID)
+	} else if listVersions {
+		err = runListVersions(bundleID, trackID, email, password, authCode)
+	} else {
+		err = run(bundleID, trackID, email, password, authCode, externalVersionID)
+	}
+	if err != nil {
 		code := 1
 		reason := "error"
 		if errors.Is(err, appstore.ErrAuthCodeRequired) {
@@ -81,57 +95,24 @@ func main() {
 	}
 }
 
-func run(bundleID, trackID, email, password, authCode string) error {
+func run(bundleID, trackID, email, password, authCode, externalVersionID string) error {
 	emit("phase", "step", "name", "loading-config")
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
 	defer chownConfig()
 
-	as, err := appstore.New(filepath.Join(rootDir, "cookies"))
-	if err != nil {
-		return fmt.Errorf("appstore client: %w", err)
-	}
-
-	if email != "" || password != "" || authCode != "" {
-		if email == "" || password == "" {
-			return errors.New("missing Apple ID email or password")
-		}
-		emit("phase", "step", "name", "authenticating")
-		if err := appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode); err != nil {
-			return err
-		}
-		emit("phase", "done", "name", "authenticated")
-	}
-
-	if cfg.Apple.Account == nil {
-		emit("phase", "auth-required")
-		return errAuthRequired
-	}
-
-	var app appstore.App
-	if trackID != "" && trackID != "0" {
-		emit("phase", "step", "name", "lookup-track")
-		app, err = as.LookupByAppID(cfg.Apple.Account, trackID)
-	} else {
-		emit("phase", "step", "name", "lookup-bundle")
-		app, err = as.LookupByBundleID(cfg.Apple.Account, bundleID)
-	}
+	cfg, as, app, err := prepareAppStore(bundleID, trackID, email, password, authCode)
 	if err != nil {
 		return err
 	}
 	if app.BundleID != "" {
 		bundleID = app.BundleID
 	}
-	emit("phase", "app", "bundle", app.BundleID, "version", app.Version, "track", strconv.FormatInt(app.ID, 10))
 
 	paths, err := config.NewPaths(rootDir)
 	if err != nil {
 		return err
 	}
 
-	ipa, version, cached, err := fetchLatest(cfg, paths, as, app)
+	ipa, version, cached, err := fetchEncrypted(cfg, paths, as, app, externalVersionID)
 	if err != nil {
 		return err
 	}
@@ -171,6 +152,159 @@ func run(bundleID, trackID, email, password, authCode string) error {
 	return nil
 }
 
+func prepareAppStore(bundleID, trackID, email, password, authCode string) (*config.Config, *appstore.Client, appstore.App, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, nil, appstore.App{}, err
+	}
+
+	as, err := appstore.New(filepath.Join(rootDir, "cookies"))
+	if err != nil {
+		return nil, nil, appstore.App{}, fmt.Errorf("appstore client: %w", err)
+	}
+
+	if email != "" || password != "" || authCode != "" {
+		if email == "" || password == "" {
+			return nil, nil, appstore.App{}, errors.New("missing Apple ID email or password")
+		}
+		emit("phase", "step", "name", "authenticating")
+		if err := appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode); err != nil {
+			return nil, nil, appstore.App{}, err
+		}
+		emit("phase", "done", "name", "authenticated")
+	}
+
+	if cfg.Apple.Account == nil {
+		emit("phase", "auth-required")
+		return nil, nil, appstore.App{}, errAuthRequired
+	}
+
+	var app appstore.App
+	if trackID != "" && trackID != "0" {
+		emit("phase", "step", "name", "lookup-track")
+		app, err = as.LookupByAppID(cfg.Apple.Account, trackID)
+	} else {
+		emit("phase", "step", "name", "lookup-bundle")
+		app, err = as.LookupByBundleID(cfg.Apple.Account, bundleID)
+	}
+	if err != nil {
+		return nil, nil, appstore.App{}, err
+	}
+
+	emit("phase", "app", "bundle", app.BundleID, "version", app.Version, "track", strconv.FormatInt(app.ID, 10))
+
+	return cfg, as, app, nil
+}
+
+func runListVersions(bundleID, trackID, email, password, authCode string) error {
+	emit("phase", "step", "name", "loading-config")
+	defer chownConfig()
+
+	cfg, as, app, err := prepareAppStore(bundleID, trackID, email, password, authCode)
+	if err != nil {
+		return err
+	}
+
+	emit("phase", "step", "name", "list-versions")
+	list, err := appstoreworkflow.WithAuth(cfg, as, app, 3, func(e appstoreworkflow.AuthEvent) {
+		switch e {
+		case appstoreworkflow.AuthReauth:
+			emit("phase", "auth", "name", "reauth")
+		case appstoreworkflow.AuthLicense:
+			emit("phase", "auth", "name", "license")
+		case appstoreworkflow.AuthRetryingDownload:
+			emit("phase", "auth", "name", "retry")
+		}
+	}, func() (appstore.ListVersionsOutput, error) {
+		return as.ListVersions(cfg.Apple.Account, app)
+	})
+	if err != nil {
+		return err
+	}
+
+	ids := newestFirst(list.ExternalVersionIDs)
+	emit("phase", "version-list",
+		"bundle", app.BundleID,
+		"latest", list.LatestExternalVersionID,
+		"count", strconv.Itoa(len(ids)))
+
+	for i, id := range ids {
+		emit("phase", "version-row",
+			"index", strconv.Itoa(i),
+			"external", id,
+			"latest", boolString(id == list.LatestExternalVersionID),
+			"status", "unfetched")
+	}
+
+	for i := 0; i < len(ids) && i < 3; i++ {
+		id := ids[i]
+		meta, err := appstoreworkflow.WithAuth(cfg, as, app, 3, nil, func() (appstore.VersionMetadata, error) {
+			return as.GetVersionMetadata(cfg.Apple.Account, app, id)
+		})
+		if err != nil {
+			emit("phase", "version-row",
+				"index", strconv.Itoa(i),
+				"external", id,
+				"latest", boolString(id == list.LatestExternalVersionID),
+				"status", "error",
+				"message", err.Error())
+			continue
+		}
+
+		emit("phase", "version-row",
+			"index", strconv.Itoa(i),
+			"external", id,
+			"latest", boolString(id == list.LatestExternalVersionID),
+			"status", "fetched",
+			"version", meta.DisplayVersion,
+			"build", meta.BundleVersion,
+			"devices", joinInts(meta.SupportedDevices))
+	}
+
+	emit("phase", "version-list-done")
+	return nil
+}
+
+func runVersionMetadata(bundleID, trackID, email, password, authCode, externalVersionID string) error {
+	if externalVersionID == "" {
+		return errors.New("version metadata requires external-version-id")
+	}
+
+	emit("phase", "step", "name", "loading-config")
+	defer chownConfig()
+
+	cfg, as, app, err := prepareAppStore(bundleID, trackID, email, password, authCode)
+	if err != nil {
+		return err
+	}
+
+	emit("phase", "step", "name", "version-metadata")
+	meta, err := appstoreworkflow.WithAuth(cfg, as, app, 3, func(e appstoreworkflow.AuthEvent) {
+		switch e {
+		case appstoreworkflow.AuthReauth:
+			emit("phase", "auth", "name", "reauth")
+		case appstoreworkflow.AuthLicense:
+			emit("phase", "auth", "name", "license")
+		case appstoreworkflow.AuthRetryingDownload:
+			emit("phase", "auth", "name", "retry")
+		}
+	}, func() (appstore.VersionMetadata, error) {
+		return as.GetVersionMetadata(cfg.Apple.Account, app, externalVersionID)
+	})
+	if err != nil {
+		return err
+	}
+
+	emit("phase", "version-row",
+		"external", externalVersionID,
+		"status", "fetched",
+		"version", meta.DisplayVersion,
+		"build", meta.BundleVersion,
+		"devices", joinInts(meta.SupportedDevices))
+	emit("phase", "version-metadata-done")
+	return nil
+}
+
 func loadConfig() (*config.Config, error) {
 	cfg, err := config.Load(configFile)
 	if err == nil {
@@ -182,8 +316,8 @@ func loadConfig() (*config.Config, error) {
 	return nil, err
 }
 
-func fetchLatest(cfg *config.Config, paths *config.Paths, as *appstore.Client, app appstore.App) (path string, version string, cached bool, err error) {
-	if app.Version != "" {
+func fetchEncrypted(cfg *config.Config, paths *config.Paths, as *appstore.Client, app appstore.App, externalVersionID string) (path string, version string, cached bool, err error) {
+	if externalVersionID == "" && app.Version != "" {
 		encPath, err := paths.CachedEncryptedIPA(app.BundleID, app.Version)
 		if err != nil {
 			return "", "", false, err
@@ -204,7 +338,7 @@ func fetchLatest(cfg *config.Config, paths *config.Paths, as *appstore.Client, a
 			emit("phase", "auth", "name", "retry")
 		}
 	}, func() (appstore.DownloadTicket, error) {
-		return as.PrepareDownload(cfg.Apple.Account, app, "")
+		return as.PrepareDownload(cfg.Apple.Account, app, externalVersionID)
 	})
 	if err != nil {
 		return "", "", false, err
@@ -228,6 +362,25 @@ func fetchLatest(cfg *config.Config, paths *config.Paths, as *appstore.Client, a
 	}
 
 	return encPath, version, false, nil
+}
+
+func newestFirst(ids []string) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[len(ids)-1-i] = id
+	}
+	return out
+}
+
+func joinInts(vals []int) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	parts := make([]string, len(vals))
+	for i, v := range vals {
+		parts[i] = strconv.Itoa(v)
+	}
+	return strings.Join(parts, ",")
 }
 
 func patchForInstall(src, targetOS string, family int) (string, func(), error) {

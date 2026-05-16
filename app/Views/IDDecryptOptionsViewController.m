@@ -40,6 +40,15 @@
         }]];
     }
 
+    if (appStoreAvailable) {
+        [sheet addAction:[UIAlertAction
+            actionWithTitle:@"Select App Store version"
+                      style:UIAlertActionStyleDefault
+                    handler:^(UIAlertAction *a) {
+            completion(IDDecryptOptionSelectAppStore, NO);
+        }]];
+    }
+
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                               style:UIAlertActionStyleCancel
                                             handler:^(UIAlertAction *a) {

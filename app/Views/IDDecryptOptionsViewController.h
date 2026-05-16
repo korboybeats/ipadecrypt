@@ -4,6 +4,7 @@ typedef NS_ENUM(NSInteger, IDDecryptOption) {
     IDDecryptOptionInstalled,           // decrypt the build already on disk
     IDDecryptOptionLatestAppStore,      // download latest with Apple credentials, patch/install, then decrypt
     IDDecryptOptionLatestStoreKit,      // trigger StoreKit download then decrypt
+    IDDecryptOptionSelectAppStore,      // choose an exact App Store externalVersionId
 };
 
 @interface IDDecryptOptionsViewController : UIViewController
