@@ -172,7 +172,7 @@ func showVersionsWarning() error {
 	fmt.Fprintln(w, "  Making many of these in a short time can get your Apple ID")
 	fmt.Fprintln(w, "  \x1b[33mflagged, rate-limited, or permanently banned\x1b[0m. ipadecrypt fetches")
 	fmt.Fprintln(w, "  only the 3 newest versions eagerly; older versions are fetched")
-	fmt.Fprintln(w, "  only when you explicitly press Enter on their row. Results are")
+	fmt.Fprintln(w, "  only when you explicitly request them from the table. Results are")
 	fmt.Fprintln(w, "  cached on disk and re-used across runs.")
 	fmt.Fprintln(w)
 	fmt.Fprint(w, "  Press \x1b[1mEnter\x1b[0m to accept and continue, or \x1b[1mCtrl-C\x1b[0m to exit.")
