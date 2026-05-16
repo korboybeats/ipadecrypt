@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -65,13 +66,29 @@ type versionsUI struct {
 
 	queued map[string]struct{}
 
+	selectMode bool
+	selected   map[string]struct{}
+	finished   bool
+	aborted    bool
+
 	tick int
 }
 
+var errVersionSelectionAborted = errors.New("version selection aborted")
+
 func runVersionsTUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) error {
+	_, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, false)
+	return err
+}
+
+func runVersionsPicker(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) ([]string, error) {
+	return runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, true)
+}
+
+func runVersionsUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string, selectMode bool) ([]string, error) {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
-		return fmt.Errorf("versions: stdin is not a terminal")
+		return nil, fmt.Errorf("versions: stdin is not a terminal")
 	}
 
 	// Apple returns oldest -> newest. Show newest on top.
@@ -104,13 +121,15 @@ func runVersionsTUI(cfg *config.Config, as *appstore.Client, app appstore.App, l
 		latestExtVerID: list.LatestExternalVersionID,
 		totalVersions:  len(rows),
 		queued:         map[string]struct{}{},
+		selectMode:     selectMode,
+		selected:       map[string]struct{}{},
 	}
 
 	ui.rebuildPredictions()
 
 	old, err := term.MakeRaw(fd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer term.Restore(fd, old)
 
@@ -199,7 +218,20 @@ loop:
 		case res := <-results:
 			ui.applyResult(res)
 		case <-drain:
-			return nil
+			if ui.aborted {
+				return nil, errVersionSelectionAborted
+			}
+
+			if !ui.selectMode {
+				return nil, nil
+			}
+
+			selected := ui.selectedExtVerIDs()
+			if ui.finished && len(selected) > 0 {
+				return selected, nil
+			}
+
+			return nil, errVersionSelectionAborted
 		}
 	}
 }
@@ -530,6 +562,7 @@ func (ui *versionsUI) handleInput(buf []byte, queue chan<- string) bool {
 	if buf[0] == 0x1b {
 		if len(buf) == 1 {
 			// Plain Esc = quit.
+			ui.aborted = true
 			return true
 		}
 
@@ -551,7 +584,17 @@ func (ui *versionsUI) handleInput(buf []byte, queue chan<- string) bool {
 
 	switch buf[0] {
 	case 'q', 0x03, 0x04: // q, Ctrl-C, Ctrl-D
+		ui.aborted = true
 		return true
+	case 'd':
+		if ui.selectMode && len(ui.selected) > 0 {
+			ui.finished = true
+			return true
+		}
+	case ' ':
+		if ui.selectMode {
+			ui.toggleSelected()
+		}
 	case '\r', '\n':
 		if ui.cursor >= 0 && ui.cursor < len(ui.rows) {
 			r := ui.rows[ui.cursor]
@@ -571,6 +614,31 @@ func (ui *versionsUI) handleInput(buf []byte, queue chan<- string) bool {
 	}
 
 	return false
+}
+
+func (ui *versionsUI) toggleSelected() {
+	if ui.cursor < 0 || ui.cursor >= len(ui.rows) {
+		return
+	}
+
+	id := ui.rows[ui.cursor].extVerID
+	if _, ok := ui.selected[id]; ok {
+		delete(ui.selected, id)
+		return
+	}
+
+	ui.selected[id] = struct{}{}
+}
+
+func (ui *versionsUI) selectedExtVerIDs() []string {
+	out := make([]string, 0, len(ui.selected))
+	for _, r := range ui.rows {
+		if _, ok := ui.selected[r.extVerID]; ok {
+			out = append(out, r.extVerID)
+		}
+	}
+
+	return out
 }
 
 func (ui *versionsUI) moveCursor(delta int) {
@@ -663,6 +731,9 @@ func (ui *versionsUI) render() {
 
 	summary := fmt.Sprintf("%s  ·  latest %s  ·  %d versions (%d cached, %d pending)",
 		ui.app.BundleID, ui.latestExtVerID, ui.totalVersions, cached, pending)
+	if ui.selectMode {
+		summary = fmt.Sprintf("%s  ·  %d selected", summary, len(ui.selected))
+	}
 
 	b.WriteString("  \x1b[2m")
 	b.WriteString(truncateVisible(summary, w-4))
@@ -697,6 +768,9 @@ func (ui *versionsUI) render() {
 	b.WriteString("\x1b[K\r\n  \x1b[2m")
 
 	footer := "↑/↓ navigate  ·  PgUp/PgDn jump  ·  Enter fetch metadata  ·  q quit"
+	if ui.selectMode {
+		footer = "↑/↓ navigate  ·  Space select  ·  Enter fetch metadata  ·  d download selected  ·  q quit"
+	}
 	b.WriteString(truncateVisible(footer, w-4))
 	b.WriteString("\x1b[0m\x1b[K")
 
@@ -754,8 +828,18 @@ func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool,
 		version = "\x1b[90m" + version + "\x1b[0m"
 	}
 
-	line := fmt.Sprintf("  %s %s %s  %s  %s  %s  %s",
+	mark := ""
+	if ui.selectMode {
+		if _, ok := ui.selected[r.extVerID]; ok {
+			mark = "\x1b[36m[x]\x1b[0m "
+		} else {
+			mark = "[ ] "
+		}
+	}
+
+	line := fmt.Sprintf("  %s %s%s %s  %s  %s  %s  %s",
 		cursor,
+		mark,
 		icon,
 		idCol,
 		version,

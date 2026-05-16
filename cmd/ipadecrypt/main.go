@@ -16,6 +16,10 @@ var (
 
 	bootstrapReset bool
 
+	downloadExtVerID      string
+	downloadOutput        string
+	downloadSelectVersion bool
+
 	decryptExtVerID     string
 	decryptOutput       string
 	decryptNoCleanup    bool
@@ -34,9 +38,10 @@ var (
 // shortCmdAliases maps -<letter> shortcuts to subcommand names so users can
 // write `ipadecrypt -d kick` instead of `ipadecrypt decrypt kick`.
 var shortCmdAliases = map[string]string{
-	"-d": "decrypt",
-	"-b": "bootstrap",
-	"-v": "versions",
+	"-d":  "decrypt",
+	"-b":  "bootstrap",
+	"-v":  "versions",
+	"-dl": "download",
 }
 
 func main() {
@@ -63,6 +68,17 @@ func main() {
 		Run:     bootstrapHandler,
 	}
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
+
+	download := &cobra.Command{
+		Use:     "download <bundle-id|app-store-id|app-store-url>",
+		Aliases: []string{"dl"},
+		Short:   "Download an encrypted IPA from the App Store without decrypting it",
+		Args:    cobra.ExactArgs(1),
+		Run:     downloadHandler,
+	}
+	download.Flags().StringVar(&downloadExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
+	download.Flags().StringVarP(&downloadOutput, "output", "o", "", "output path for the downloaded IPA (default: ~/ipadecrypt/<bundleID>_<version>.ipa)")
+	download.Flags().BoolVar(&downloadSelectVersion, "select-version", false, "open an interactive version picker and download one or more selected App Store versions")
 
 	decrypt := &cobra.Command{
 		Use:     "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",
@@ -99,7 +115,7 @@ func main() {
 		Run:   doctorHandler,
 	}
 
-	root.AddCommand(bootstrap, decrypt, versions, doctor)
+	root.AddCommand(bootstrap, download, decrypt, versions, doctor)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

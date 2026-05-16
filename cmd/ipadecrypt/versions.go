@@ -18,26 +18,6 @@ import (
 	"golang.org/x/term"
 )
 
-// versionsTarget is the subset of decryptTarget that makes sense for the
-// versions command - a local .ipa path has no App Store versions to list.
-type versionsTarget struct {
-	bundleId string
-	appId    string
-}
-
-func parseVersionsArg(raw string) (versionsTarget, error) {
-	dt, err := parseDecryptArg(raw)
-	if err != nil {
-		return versionsTarget{}, err
-	}
-
-	if dt.localPath != "" {
-		return versionsTarget{}, errors.New("versions: local IPA paths are not supported - pass a bundle-id, app-store-id, or app-store-url")
-	}
-
-	return versionsTarget{bundleId: dt.bundleId, appId: dt.appId}, nil
-}
-
 func versionsHandler(cmd *cobra.Command, args []string) {
 	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
@@ -48,7 +28,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 	upd := updater.Start(context.Background(), Version, cfg)
 	defer upd.Wait()
 
-	target, err := parseVersionsArg(args[0])
+	target, err := parseStoreTargetArg(args[0], "versions")
 	if err != nil {
 		tui.Err("%v", err)
 		return
@@ -61,16 +41,12 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if !cfg.Versions.WarningAccepted {
-		if err := showVersionsWarning(); err != nil {
-			return
+	if err := ensureVersionsWarningAccepted(cfg); err != nil {
+		if err.Error() != "aborted" {
+			tui.Err("%v", err)
 		}
 
-		cfg.Versions.WarningAccepted = true
-		if err := cfg.Save(); err != nil {
-			tui.Err("save config: %v", err)
-			return
-		}
+		return
 	}
 
 	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
@@ -86,7 +62,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		live.Spin("resolving bundleId %s", target.bundleId)
 	}
 
-	app, err := lookupVersionsTargetApp(as, cfg.Apple.Account, target)
+	app, err := lookupStoreTargetApp(as, cfg.Apple.Account, target)
 	if err != nil {
 		live.Fail("lookup failed: %v", err)
 		return
@@ -119,36 +95,19 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 
 	live.OK("%d version(s), latest %s", len(list.ExternalVersionIDs), list.LatestExternalVersionID)
 
-	cachePath, err := paths.VersionsCacheFile(app.BundleID)
+	cache, cachePath, err := loadOrInitVersionsCache(paths, app.BundleID)
 	if err != nil {
 		tui.Err("cache path: %v", err)
 		return
 	}
 
-	cache, err := loadVersionsCache(cachePath)
-	if err != nil {
-		tui.Warn("load cache: %v (starting fresh)", err)
-
-		cache = &versionsCache{BundleID: app.BundleID, Versions: map[string]cachedVersion{}}
-	}
-
-	if cache.Versions == nil {
-		cache.Versions = map[string]cachedVersion{}
-	}
-
-	cache.BundleID = app.BundleID
-
 	if err := runVersionsTUI(cfg, as, app, list, cache, cachePath, logPath); err != nil {
+		if !errors.Is(err, errVersionSelectionAborted) {
+			tui.Err("%v", err)
+		}
+
 		return
 	}
-}
-
-func lookupVersionsTargetApp(as *appstore.Client, acc *appstore.Account, target versionsTarget) (appstore.App, error) {
-	if target.appId != "" {
-		return as.LookupByAppID(acc, target.appId)
-	}
-
-	return as.LookupByBundleID(acc, target.bundleId)
 }
 
 func listVersionsWithAuth(cfg *config.Config, as *appstore.Client, app appstore.App) (appstore.ListVersionsOutput, error) {
@@ -161,6 +120,44 @@ func getVersionMetadataWithAuth(cfg *config.Config, as *appstore.Client, app app
 	return withAuth(cfg, as, app, 3, nil, func() (appstore.VersionMetadata, error) {
 		return as.GetVersionMetadata(cfg.Apple.Account, app, extVerID)
 	})
+}
+
+func ensureVersionsWarningAccepted(cfg *config.Config) error {
+	if cfg.Versions.WarningAccepted {
+		return nil
+	}
+
+	if err := showVersionsWarning(); err != nil {
+		return err
+	}
+
+	cfg.Versions.WarningAccepted = true
+	if err := cfg.Save(); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+
+	return nil
+}
+
+func loadOrInitVersionsCache(paths *config.Paths, bundleID string) (*versionsCache, string, error) {
+	cachePath, err := paths.VersionsCacheFile(bundleID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	cache, err := loadVersionsCache(cachePath)
+	if err != nil {
+		tui.Warn("load cache: %v (starting fresh)", err)
+		cache = &versionsCache{Versions: map[string]cachedVersion{}}
+	}
+
+	if cache.Versions == nil {
+		cache.Versions = map[string]cachedVersion{}
+	}
+
+	cache.BundleID = bundleID
+
+	return cache, cachePath, nil
 }
 
 // ---- warning ------------------------------------------------------------
