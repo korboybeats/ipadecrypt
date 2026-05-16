@@ -258,6 +258,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		target.bundleId = resolved
 	}
 
+	selectedExtVerID := decryptExtVerID
+
 	if target.bundleId != "" && !decryptFromAppStore {
 		live = tui.NewLive()
 		live.Spin("checking if %s is installed", target.bundleId)
@@ -278,6 +280,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 			useInstalled := decryptUseInstalled
 			useStoreKit := false
+			useSelectedVersion := false
 			if !useInstalled {
 				if !tui.IsTTY() {
 					tui.Err("%s v%s is already installed on the device.", target.bundleId, version)
@@ -292,6 +295,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 						fmt.Sprintf("Installed build v%s", version),
 						"Latest from App Store",
 						"Latest iOS-compatible version",
+						"Select App Store version",
 					},
 				)
 				if err != nil {
@@ -304,6 +308,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 					useInstalled = true
 				case 2:
 					useStoreKit = true
+				case 3:
+					useSelectedVersion = true
 				}
 			}
 
@@ -354,6 +360,15 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				return
 			}
+
+			if useSelectedVersion {
+				extVerID, ok := selectAppStoreVersionForDecrypt(cfg, paths, target)
+				if !ok {
+					return
+				}
+
+				selectedExtVerID = extVerID
+			}
 			// idx == 1 falls through to the existing App Store reinstall path
 		} else {
 			live.OK("%s not installed", target.bundleId)
@@ -364,6 +379,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 					[]string{
 						"Latest from App Store",
 						"Latest iOS-compatible version",
+						"Select App Store version",
 					},
 				)
 				if err != nil {
@@ -371,7 +387,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 					return
 				}
 
-				if idx == 1 {
+				switch idx {
+				case 1:
 					if ok := runStoreKitInstall(dev, target.bundleId, ""); !ok {
 						return
 					}
@@ -398,6 +415,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 					runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "")
 					return
+				case 2:
+					extVerID, ok := selectAppStoreVersionForDecrypt(cfg, paths, target)
+					if !ok {
+						return
+					}
+
+					selectedExtVerID = extVerID
 				}
 			}
 		}
@@ -464,7 +488,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live = tui.NewLive()
 		live.Spin("fetching download metadata")
 
-		disposition, err := fetchRemoteEncryptedSource(cfg, paths, as, app, decryptExtVerID, func(e authEvent) {
+		disposition, err := fetchRemoteEncryptedSource(cfg, paths, as, app, selectedExtVerID, func(e authEvent) {
 			switch e {
 			case authReauth:
 				live.Spin("re-authenticating")
@@ -817,6 +841,75 @@ func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptT
 	}
 
 	return as.LookupByBundleID(acc, target.bundleId)
+}
+
+func selectAppStoreVersionForDecrypt(cfg *config.Config, paths *config.Paths, target decryptTarget) (string, bool) {
+	if !tui.IsTTY() {
+		tui.Err("Select App Store version requires a terminal")
+		return "", false
+	}
+
+	if err := ensureVersionsWarningAccepted(cfg); err != nil {
+		if err.Error() != "aborted" {
+			tui.Err("%v", err)
+		}
+
+		return "", false
+	}
+
+	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+	if err != nil {
+		tui.Err("appstore client: %v", err)
+		return "", false
+	}
+
+	live := tui.NewLive()
+	if target.appId != "" {
+		live.Spin("resolving appId %s", target.appId)
+	} else {
+		live.Spin("resolving bundleId %s", target.bundleId)
+	}
+
+	app, err := lookupTargetApp(as, cfg.Apple.Account, target)
+	if err != nil {
+		live.Fail("lookup failed: %v", err)
+		return "", false
+	}
+
+	if app.Price > 0 {
+		live.Fail("paid app (price=%v) - unsupported", app.Price)
+		return "", false
+	}
+
+	live.OK("found %s on App Store", app.BundleID)
+
+	live = tui.NewLive()
+	live.Spin("listing versions for %s", app.BundleID)
+
+	list, err := listVersionsWithAuth(cfg, as, app)
+	if err != nil {
+		live.Fail("list versions failed: %v", err)
+		return "", false
+	}
+
+	live.OK("%d version(s), latest %s", len(list.ExternalVersionIDs), list.LatestExternalVersionID)
+
+	cache, cachePath, err := loadOrInitVersionsCache(paths, app.BundleID)
+	if err != nil {
+		tui.Err("cache path: %v", err)
+		return "", false
+	}
+
+	extVerID, err := runSingleVersionPicker(cfg, as, app, list, cache, cachePath, "")
+	if err != nil {
+		if !errors.Is(err, errVersionSelectionAborted) {
+			tui.Err("%v", err)
+		}
+
+		return "", false
+	}
+
+	return extVerID, true
 }
 
 var errRemoteDownloadFailed = errors.New("remote download failed")

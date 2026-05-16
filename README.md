@@ -120,6 +120,9 @@ ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 
 Decrypted IPAs are saved to `~/ipadecrypt/decrypted/` on your computer and
 kept on the device under `/var/mobile/Documents/ipadecrypt/decrypted/`.
+When decrypting by bundle ID or App Store search result in a terminal, the
+build picker can also open the App Store version table so you can choose a
+specific historical version to install and decrypt.
 
 ### Download an encrypted IPA
 

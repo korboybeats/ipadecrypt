@@ -66,10 +66,10 @@ type versionsUI struct {
 
 	queued map[string]struct{}
 
-	selectMode bool
-	selected   map[string]struct{}
-	finished   bool
-	aborted    bool
+	selectionLimit int
+	selected       map[string]struct{}
+	finished       bool
+	aborted        bool
 
 	tick int
 }
@@ -77,15 +77,28 @@ type versionsUI struct {
 var errVersionSelectionAborted = errors.New("version selection aborted")
 
 func runVersionsTUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) error {
-	_, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, false)
+	_, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, 0)
 	return err
 }
 
 func runVersionsPicker(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) ([]string, error) {
-	return runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, true)
+	return runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, -1)
 }
 
-func runVersionsUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string, selectMode bool) ([]string, error) {
+func runSingleVersionPicker(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) (string, error) {
+	selected, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, 1)
+	if err != nil {
+		return "", err
+	}
+
+	if len(selected) == 0 {
+		return "", errVersionSelectionAborted
+	}
+
+	return selected[0], nil
+}
+
+func runVersionsUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string, selectionLimit int) ([]string, error) {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
 		return nil, fmt.Errorf("versions: stdin is not a terminal")
@@ -121,7 +134,7 @@ func runVersionsUI(cfg *config.Config, as *appstore.Client, app appstore.App, li
 		latestExtVerID: list.LatestExternalVersionID,
 		totalVersions:  len(rows),
 		queued:         map[string]struct{}{},
-		selectMode:     selectMode,
+		selectionLimit: selectionLimit,
 		selected:       map[string]struct{}{},
 	}
 
@@ -222,7 +235,7 @@ loop:
 				return nil, errVersionSelectionAborted
 			}
 
-			if !ui.selectMode {
+			if ui.selectionLimit == 0 {
 				return nil, nil
 			}
 
@@ -587,12 +600,16 @@ func (ui *versionsUI) handleInput(buf []byte, queue chan<- string) bool {
 		ui.aborted = true
 		return true
 	case 'd':
-		if ui.selectMode && len(ui.selected) > 0 {
+		if ui.selectionLimit != 0 {
+			if len(ui.selected) == 0 {
+				ui.toggleSelected()
+			}
+
 			ui.finished = true
 			return true
 		}
 	case ' ':
-		if ui.selectMode {
+		if ui.selectionLimit != 0 {
 			ui.toggleSelected()
 		}
 	case '\r', '\n':
@@ -625,6 +642,10 @@ func (ui *versionsUI) toggleSelected() {
 	if _, ok := ui.selected[id]; ok {
 		delete(ui.selected, id)
 		return
+	}
+
+	if ui.selectionLimit == 1 {
+		clear(ui.selected)
 	}
 
 	ui.selected[id] = struct{}{}
@@ -731,7 +752,7 @@ func (ui *versionsUI) render() {
 
 	summary := fmt.Sprintf("%s  ·  latest %s  ·  %d versions (%d cached, %d pending)",
 		ui.app.BundleID, ui.latestExtVerID, ui.totalVersions, cached, pending)
-	if ui.selectMode {
+	if ui.selectionLimit != 0 {
 		summary = fmt.Sprintf("%s  ·  %d selected", summary, len(ui.selected))
 	}
 
@@ -768,7 +789,9 @@ func (ui *versionsUI) render() {
 	b.WriteString("\x1b[K\r\n  \x1b[2m")
 
 	footer := "↑/↓ navigate  ·  PgUp/PgDn jump  ·  Enter fetch metadata  ·  q quit"
-	if ui.selectMode {
+	if ui.selectionLimit == 1 {
+		footer = "↑/↓ navigate  ·  Space select  ·  Enter fetch metadata  ·  d decrypt selected/current  ·  q quit"
+	} else if ui.selectionLimit != 0 {
 		footer = "↑/↓ navigate  ·  Space select  ·  Enter fetch metadata  ·  d download selected  ·  q quit"
 	}
 	b.WriteString(truncateVisible(footer, w-4))
@@ -829,7 +852,7 @@ func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool,
 	}
 
 	mark := ""
-	if ui.selectMode {
+	if ui.selectionLimit != 0 {
 		if _, ok := ui.selected[r.extVerID]; ok {
 			mark = "\x1b[36m[x]\x1b[0m "
 		} else {

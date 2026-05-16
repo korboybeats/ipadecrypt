@@ -50,3 +50,27 @@ func TestVersionsUIToggleSelected(t *testing.T) {
 		t.Fatalf("toggleSelected() did not deselect cursor row")
 	}
 }
+
+func TestVersionsUIToggleSelectedSingleSelectionClearsPrevious(t *testing.T) {
+	ui := &versionsUI{
+		cursor:         1,
+		selectionLimit: 1,
+		rows: []versionsRow{
+			{extVerID: "newest"},
+			{extVerID: "middle"},
+			{extVerID: "oldest"},
+		},
+		selected: map[string]struct{}{
+			"newest": {},
+		},
+	}
+
+	ui.toggleSelected()
+
+	if _, ok := ui.selected["newest"]; ok {
+		t.Fatalf("toggleSelected() kept previous single-selection row")
+	}
+	if _, ok := ui.selected["middle"]; !ok {
+		t.Fatalf("toggleSelected() did not select cursor row")
+	}
+}
