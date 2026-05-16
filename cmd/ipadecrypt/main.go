@@ -14,6 +14,8 @@ var Version = "dev"
 var (
 	rootDirOverride string
 
+	authReset bool
+
 	bootstrapReset bool
 
 	downloadExtVerID      string
@@ -42,6 +44,7 @@ var shortCmdAliases = map[string]string{
 	"-b":  "bootstrap",
 	"-v":  "versions",
 	"-dl": "download",
+	"-a":  "auth",
 }
 
 func main() {
@@ -60,6 +63,14 @@ func main() {
 
 	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",
 		"config root directory path (default: ~/ipadecrypt)")
+
+	auth := &cobra.Command{
+		Use:     "auth",
+		Aliases: []string{"a"},
+		Short:   "Refresh Apple ID authentication for App Store downloads",
+		Run:     authHandler,
+	}
+	auth.Flags().BoolVar(&authReset, "reset", false, "forget saved Apple ID credentials and re-prompt")
 
 	bootstrap := &cobra.Command{
 		Use:     "bootstrap",
@@ -115,7 +126,7 @@ func main() {
 		Run:   doctorHandler,
 	}
 
-	root.AddCommand(bootstrap, download, decrypt, versions, doctor)
+	root.AddCommand(auth, bootstrap, download, decrypt, versions, doctor)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

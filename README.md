@@ -112,6 +112,15 @@ A five-step interactive wizard:
 4. **Helper install** - uploads a small embedded helper binary.
 5. **Auto-confirm tweak** - optionally installs `ipadecryptautoalert`, a SpringBoard tweak that auto-taps the older-version `Download` prompt during **Latest iOS-compatible** installs.
 
+### Refresh Apple ID auth
+
+```sh
+ipadecrypt auth
+```
+
+Refreshes the saved App Store session without running the full bootstrap flow.
+Use this when App Store actions fail with an auth-code or expired-token error.
+
 ### Decrypt an app
 
 ```sh

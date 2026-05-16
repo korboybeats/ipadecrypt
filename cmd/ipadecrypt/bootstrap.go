@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -64,41 +63,11 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	var (
-		account  *appstore.Account
-		authCode string
-	)
-	for attempt := 0; attempt < 3 && account == nil; attempt++ {
-		live := tui.NewLive()
-		live.Spin("authenticating")
-
-		account, err = as.Login(cfg.Apple.Email, cfg.Apple.Password, authCode)
-		switch {
-		case errors.Is(err, appstore.ErrAuthCodeRequired):
-			live.Stop()
-
-			code, err := tui.Prompt("Apple sent a 6-digit code - enter it")
-			if err != nil {
-				return
-			}
-
-			authCode = strings.TrimSpace(code)
-
-		case err != nil:
-			live.Fail("login failed: %v", err)
-			return
-
-		default:
-			live.OK("authenticated")
-		}
-	}
-
-	if account == nil {
-		tui.Err("login: 3 two-factor attempts failed")
+	account, err := authenticateApple(cfg, as)
+	if err != nil {
+		tui.Err("%v", err)
 		return
 	}
-
-	cfg.Apple.Account = account
 
 	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
 	if err != nil {
