@@ -43,15 +43,11 @@ func CheckLatest(ctx context.Context, current string, cfg *config.Config) (*Self
 }
 
 func SelfUpdate(ctx context.Context, current string, cfg *config.Config) (*SelfUpdateResult, error) {
-	if IsDev(current) {
-		return nil, errors.New("self-update is unavailable for development builds")
-	}
-
 	rel, newer, err := Check(ctx, current, cfg, true)
 	if err != nil {
 		return nil, err
 	}
-	if !newer {
+	if !shouldInstallUpdate(current, newer) {
 		return &SelfUpdateResult{
 			CurrentVersion: current,
 			LatestVersion:  rel.Tag,
@@ -113,6 +109,10 @@ func SelfUpdate(ctx context.Context, current string, cfg *config.Config) (*SelfU
 		ReleaseURL:     rel.HTMLURL,
 		Updated:        true,
 	}, nil
+}
+
+func shouldInstallUpdate(current string, newer bool) bool {
+	return IsDev(current) || newer
 }
 
 func RollbackCurrentExecutable() (*SelfUpdateResult, error) {

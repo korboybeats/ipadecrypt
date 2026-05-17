@@ -77,6 +77,21 @@ func TestVerifySHA256RejectsMismatch(t *testing.T) {
 	}
 }
 
+func TestShouldInstallUpdateAllowsDevelopmentBuilds(t *testing.T) {
+	if !shouldInstallUpdate("dev", false) {
+		t.Fatal("development build should install the latest release")
+	}
+	if !shouldInstallUpdate("", false) {
+		t.Fatal("empty version build should install the latest release")
+	}
+	if shouldInstallUpdate("v0.6.0-korboy.4", false) {
+		t.Fatal("release build should not install when no newer version exists")
+	}
+	if !shouldInstallUpdate("v0.6.0-korboy.4", true) {
+		t.Fatal("release build should install when a newer version exists")
+	}
+}
+
 func TestReplaceExecutableCreatesBackup(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "ipadecrypt")
