@@ -19,10 +19,9 @@ import (
 	"howett.net/plist"
 )
 
-const (
-	rootDir    = "/var/mobile/Documents/ipadecrypt"
-	configFile = rootDir + "/config.json"
-)
+var defaultRootDir = "/var/mobile/Documents/ipadecrypt"
+
+var rootDir = firstNonEmpty(strings.TrimSpace(os.Getenv("IPADECRYPT_ROOT_DIR")), defaultRootDir)
 
 var errAuthRequired = errors.New("sign in with Apple ID required")
 
@@ -306,12 +305,12 @@ func runVersionMetadata(bundleID, trackID, email, password, authCode, externalVe
 }
 
 func loadConfig() (*config.Config, error) {
-	cfg, err := config.Load(configFile)
+	cfg, err := config.Load(configFile())
 	if err == nil {
 		return cfg, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return config.New(configFile), nil
+		return config.New(configFile()), nil
 	}
 	return nil, err
 }
@@ -411,12 +410,12 @@ func locateAppinst() (string, error) {
 		}
 	}
 
-	for _, p := range []string{
+	for _, p := range jailbreakCandidates(
 		"/usr/bin/appinst",
 		"/usr/local/bin/appinst",
 		"/var/jb/usr/bin/appinst",
 		"/var/jb/usr/local/bin/appinst",
-	} {
+	) {
 		if fileExists(p) {
 			return p, nil
 		}
@@ -590,18 +589,58 @@ func runDecryptHelper(helper, bundleID, bundlePath, outIPA string) error {
 
 	cmd := exec.Command(helper, bundleID, bundlePath, outIPA)
 	cmd.Dir = "/var/root"
-	cmd.Env = []string{
-		"PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/usr/bin:/bin:/usr/sbin:/sbin",
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		pathEnv = "/var/jb/usr/bin:/var/jb/usr/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	cmd.Env = append(os.Environ(),
+		"PATH="+pathEnv,
 		"HOME=/var/root",
 		"TMPDIR=/tmp",
-	}
+	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
+func configFile() string {
+	return filepath.Join(rootDir, "config.json")
+}
+
+func jailbreakCandidates(paths ...string) []string {
+	out := append([]string(nil), paths...)
+	if jbroot := findJBRootCommand(); jbroot != "" {
+		for _, p := range paths {
+			converted, err := exec.Command(jbroot, p).Output()
+			if err == nil {
+				if s := strings.TrimSpace(string(converted)); s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func findJBRootCommand() string {
+	if p, err := exec.LookPath("jbroot"); err == nil {
+		return p
+	}
+	for _, p := range []string{
+		"/usr/bin/jbroot",
+		"/usr/local/bin/jbroot",
+		"/var/jb/usr/bin/jbroot",
+		"/var/jb/usr/local/bin/jbroot",
+	} {
+		if fileExists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 func chownConfig() {
 	_ = syscall.Chown(rootDir, 501, 501)
-	_ = syscall.Chown(configFile, 501, 501)
-	_ = syscall.Chown(configFile+".tmp", 501, 501)
+	_ = syscall.Chown(configFile(), 501, 501)
+	_ = syscall.Chown(configFile()+".tmp", 501, 501)
 }

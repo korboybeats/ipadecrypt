@@ -7,15 +7,17 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
-const socketPath = "/var/jb/var/run/ipadecryptd.sock"
+const defaultSocketPath = "/var/jb/var/run/ipadecryptd.sock"
 
 func main() {
+	socketPath := socketPath()
 	_ = os.Remove(socketPath)
-	if err := os.MkdirAll("/var/jb/var/run", 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "mkdir: %v\n", err)
 		os.Exit(1)
 	}
@@ -35,6 +37,13 @@ func main() {
 		}
 		go handle(c)
 	}
+}
+
+func socketPath() string {
+	if p := strings.TrimSpace(os.Getenv("IPADECRYPTD_SOCKET")); p != "" {
+		return p
+	}
+	return defaultSocketPath
 }
 
 func handle(c net.Conn) {
@@ -64,11 +73,15 @@ func handle(c net.Conn) {
 
 	cmd := exec.Command(helper, bundleID, bundlePath, outIPA)
 	cmd.Dir = "/var/root"
-	cmd.Env = []string{
-		"PATH=/var/jb/usr/bin:/var/jb/usr/sbin:/usr/bin:/bin:/usr/sbin:/sbin",
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		pathEnv = "/var/jb/usr/bin:/var/jb/usr/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	cmd.Env = append(os.Environ(),
+		"PATH="+pathEnv,
 		"HOME=/var/root",
 		"TMPDIR=/tmp",
-	}
+	)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

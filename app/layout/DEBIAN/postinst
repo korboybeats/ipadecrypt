@@ -4,27 +4,77 @@ set -e
 PATH="/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
-BIN="/var/jb/usr/libexec/ipadecryptd"
-SUPERVISOR="/var/jb/usr/libexec/ipadecryptd-supervisor"
-PLIST="/var/jb/Library/LaunchDaemons/com.korboy.ipadecryptd.plist"
-OUTDIR="/var/mobile/Documents/ipadecrypt/decrypted"
+jb_path() {
+    if command -v jbroot >/dev/null 2>&1; then
+        jbroot "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+mobile_path() {
+    if [ -d /rootfs/var/mobile ]; then
+        printf '/rootfs%s\n' "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+PATH="$(jb_path /var/jb/usr/bin):$(jb_path /var/jb/bin):/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+BIN="$(jb_path /var/jb/usr/libexec/ipadecryptd)"
+SUPERVISOR="$(jb_path /var/jb/usr/libexec/ipadecryptd-supervisor)"
+SHELL_BIN="$(jb_path /var/jb/bin/sh)"
+PLIST="$(jb_path /var/jb/Library/LaunchDaemons/com.korboy.ipadecryptd.plist)"
+RUN_DIR="$(jb_path /var/jb/var/run)"
+TMP_DIR="$(jb_path /var/jb/tmp)"
+OUTROOT="$(mobile_path /var/mobile/Documents/ipadecrypt)"
+OUTDIR="$OUTROOT/decrypted"
 
 launchctl bootout system "$PLIST" 2>/dev/null || true
 ps -axo pid,command | awk '/[i]padecryptd-supervisor/ { print $1 }' | while read -r pid; do
     kill "$pid" 2>/dev/null || true
 done
 killall ipadecryptd 2>/dev/null || true
-rm -f /var/jb/var/run/ipadecryptd.sock 2>/dev/null || true
+rm -f "$RUN_DIR/ipadecryptd.sock" 2>/dev/null || true
 
 chmod 755 "$BIN" "$SUPERVISOR"
 chown 0:0 "$BIN" "$SUPERVISOR"
+mkdir -p "$(dirname "$PLIST")" "$TMP_DIR"
+cat >"$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.korboy.ipadecryptd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$SHELL_BIN</string>
+        <string>$SUPERVISOR</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>UserName</key>
+    <string>root</string>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$TMP_DIR/ipadecryptd-supervisor.log</string>
+    <key>StandardErrorPath</key>
+    <string>$TMP_DIR/ipadecryptd-supervisor.err</string>
+</dict>
+</plist>
+EOF
 chmod 644 "$PLIST"
 chown 0:0 "$PLIST"
 mkdir -p "$OUTDIR"
-chown mobile:mobile /var/mobile/Documents/ipadecrypt "$OUTDIR"
+chown mobile:mobile "$OUTROOT" "$OUTDIR"
 chmod 755 "$OUTDIR"
 
 launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null || true
-launchctl kickstart -k system/com.korboy.ipadecryptd 2>/dev/null || true
 
 exit 0

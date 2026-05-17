@@ -11,12 +11,15 @@
 #import "IDAppStoreHelperRunner.h"
 #import "IDStoreKitDownloader.h"
 #import "IDAutoalertArmer.h"
+#import "IDJailbreakPaths.h"
 #import "Logging.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
 
 static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
-static NSString *const IDDecryptedOutputDirectory = @"/var/mobile/Documents/ipadecrypt/decrypted";
+static NSString *IDDecryptedOutputDirectory(void) {
+    return IDUserDocumentsPath(@"/var/mobile/Documents/ipadecrypt/decrypted");
+}
 
 static NSString *IDAppStoreStepTitle(NSString *name) {
     if ([name isEqualToString:@"loading-config"]) return @"Preparing App Store session";
@@ -146,11 +149,11 @@ static NSString *IDPrettyImageName(NSString *name) {
 }
 
 - (void)openDecryptedFolder {
-    [[NSFileManager defaultManager] createDirectoryAtPath:IDDecryptedOutputDirectory
+    [[NSFileManager defaultManager] createDirectoryAtPath:IDDecryptedOutputDirectory()
                               withIntermediateDirectories:YES
                                                attributes:nil
                                                     error:nil];
-    [self openFilzaForPath:IDDecryptedOutputDirectory];
+    [self openFilzaForPath:IDDecryptedOutputDirectory()];
 }
 
 - (void)openFilzaForPath:(NSString *)path {
@@ -373,7 +376,7 @@ static NSString *IDPrettyImageName(NSString *name) {
 }
 
 - (NSString *)outputIPAForBundle:(NSString *)bundleID version:(NSString *)version {
-    NSString *dir = IDDecryptedOutputDirectory;
+    NSString *dir = IDDecryptedOutputDirectory();
     [[NSFileManager defaultManager] createDirectoryAtPath:dir
                               withIntermediateDirectories:YES
                                                attributes:nil error:nil];

@@ -1,11 +1,14 @@
 #import "IDHelperRunner.h"
 #import "Logging.h"
+#import "IDJailbreakPaths.h"
 #import <errno.h>
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <unistd.h>
 
-static NSString *const IDDecryptDaemonSocket = @"/var/jb/var/run/ipadecryptd.sock";
+static NSString *IDDecryptDaemonSocket(void) {
+    return IDJailbreakPath(@"/var/jb/var/run/ipadecryptd.sock");
+}
 
 static NSDictionary *parseEvent(NSString *line) {
     if (![line hasPrefix:@"@evt "]) return nil;
@@ -65,13 +68,14 @@ static NSDictionary *parseEvent(NSString *line) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", IDDecryptDaemonSocket.UTF8String);
+    NSString *socketPath = IDDecryptDaemonSocket();
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", socketPath.UTF8String);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         int e = errno;
         close(fd);
         completion(-1, [NSError errorWithDomain:@"IDHelperRunner" code:4
                                        userInfo:@{NSLocalizedDescriptionKey:
-                                                       [NSString stringWithFormat:@"connect %@ errno=%d", IDDecryptDaemonSocket, e]}]);
+                                                       [NSString stringWithFormat:@"connect %@ errno=%d", socketPath, e]}]);
         return;
     }
 

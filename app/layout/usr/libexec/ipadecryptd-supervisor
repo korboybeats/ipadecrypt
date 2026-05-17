@@ -3,18 +3,31 @@
 PATH="/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
-SOCK="/var/jb/var/run/ipadecryptd.sock"
-BIN="/var/jb/usr/libexec/ipadecryptd"
-LOG="/var/jb/tmp/ipadecryptd.log"
-ERR="/var/jb/tmp/ipadecryptd.err"
+jb_path() {
+    if command -v jbroot >/dev/null 2>&1; then
+        jbroot "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
 
-mkdir -p /var/jb/var/run /var/jb/tmp
+PATH="$(jb_path /var/jb/usr/bin):$(jb_path /var/jb/bin):/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
+RUN_DIR="$(jb_path /var/jb/var/run)"
+TMP_DIR="$(jb_path /var/jb/tmp)"
+SOCK="$RUN_DIR/ipadecryptd.sock"
+BIN="$(jb_path /var/jb/usr/libexec/ipadecryptd)"
+LOG="$TMP_DIR/ipadecryptd.log"
+ERR="$TMP_DIR/ipadecryptd.err"
+
+mkdir -p "$RUN_DIR" "$TMP_DIR"
 
 while :; do
-    if [ ! -S "$SOCK" ] || ! ps -axo command | grep -q '^/var/jb/usr/libexec/ipadecryptd$'; then
+    if [ ! -S "$SOCK" ] || ! ps -axo command | grep -q '[i]padecryptd$'; then
         killall ipadecryptd 2>/dev/null
         rm -f "$SOCK"
-        nohup "$BIN" >"$LOG" 2>"$ERR" &
+        IPADECRYPTD_SOCKET="$SOCK" nohup "$BIN" >"$LOG" 2>"$ERR" &
     fi
     sleep 10
 done
