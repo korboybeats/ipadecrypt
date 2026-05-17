@@ -38,6 +38,9 @@ var (
 	versionsLogResponses bool
 
 	keepShow bool
+
+	updateCheckOnly bool
+	updateRollback  bool
 )
 
 // shortCmdAliases maps -<letter> shortcuts to subcommand names so users can
@@ -49,6 +52,7 @@ var shortCmdAliases = map[string]string{
 	"-dl": "download",
 	"-a":  "auth",
 	"-k":  "keep",
+	"-u":  "update",
 }
 
 func main() {
@@ -140,7 +144,9 @@ func main() {
 	}
 	keep.Flags().BoolVar(&keepShow, "show", false, "show the current decrypted IPA keep policy")
 
-	root.AddCommand(auth, bootstrap, download, decrypt, versions, doctor, keep)
+	update := newUpdateCommand()
+
+	root.AddCommand(auth, bootstrap, download, decrypt, versions, doctor, keep, update)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

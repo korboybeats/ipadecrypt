@@ -11,6 +11,7 @@ import (
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/londek/ipadecrypt/internal/device"
 	"github.com/londek/ipadecrypt/internal/tui"
+	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
 )
 
@@ -224,6 +225,20 @@ func doctorLocalChecks(cfg *config.Config, paths *config.Paths, version string) 
 			Status: doctorPass,
 			Name:   "CLI version",
 			Detail: version,
+		})
+	}
+
+	if updater.IsDev(version) {
+		checks = append(checks, doctorCheck{
+			Status: doctorWarn,
+			Name:   "CLI self-update",
+			Detail: "unavailable for development build",
+		})
+	} else {
+		checks = append(checks, doctorCheck{
+			Status: doctorPass,
+			Name:   "CLI self-update",
+			Detail: "available",
 		})
 	}
 

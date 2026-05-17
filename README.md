@@ -29,7 +29,7 @@ This fork adds a handful of QoL features on top of upstream:
 - **Single PC workspace.** CLI config, cookies, cache, and logs live under `~/ipadecrypt/`; decrypted PC outputs default to `~/ipadecrypt/decrypted/`.
 - **Faster IPA post-processing.** Metadata/Watch cleanup is combined into one scanned pass and skips rewriting entirely when there is nothing to remove. Cryptid verification streams Mach-O load commands instead of reading whole binaries into memory.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
-- **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `-a`/`auth` (refresh Apple ID auth), `k` (keep policy).
+- **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `-dl` (download), `-a`/`auth` (refresh Apple ID auth), `-k` (keep policy), `-u` (update).
 
 ## Requirements
 
@@ -151,6 +151,18 @@ ipadecrypt keep both
 `desktop` copies the final IPA to `~/ipadecrypt/decrypted/` and removes the
 device copy after a successful transfer. `device` keeps only the device copy.
 `both` keeps both copies and is the default.
+
+### Update the CLI
+
+```sh
+ipadecrypt update
+```
+
+Downloads the latest matching CLI binary from GitHub Releases, verifies it
+against `checksums.txt`, backs up the current binary, and replaces it.
+
+Use `ipadecrypt update --check` to check without installing, or
+`ipadecrypt update --rollback` to restore the previous binary backup.
 
 ### Decrypt an app
 

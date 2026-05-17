@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/londek/ipadecrypt/internal/config"
+)
 
 func TestDoctorExitCodeFailsOnlyForFailedRequiredChecks(t *testing.T) {
 	checks := []doctorCheck{
@@ -49,4 +53,23 @@ func TestParseDoctorKVTrimsLinesAndIgnoresMalformedInput(t *testing.T) {
 	if got["empty"] != "" {
 		t.Fatalf("empty = %q, want empty string", got["empty"])
 	}
+}
+
+func TestDoctorLocalChecksIncludesSelfUpdate(t *testing.T) {
+	paths, err := config.NewPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewPaths: %v", err)
+	}
+	cfg := config.New(paths.ConfigPath())
+
+	checks := doctorLocalChecks(cfg, paths, "v0.6.2-korboy.1")
+	for _, check := range checks {
+		if check.Name == "CLI self-update" {
+			if check.Status != doctorPass {
+				t.Fatalf("CLI self-update status = %s, want %s", check.Status, doctorPass)
+			}
+			return
+		}
+	}
+	t.Fatal("missing CLI self-update check")
 }
