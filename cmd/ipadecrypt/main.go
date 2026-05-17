@@ -33,8 +33,11 @@ var (
 	decryptUseInstalled bool
 	decryptPatchDevType bool
 	decryptVerbose      bool
+	decryptKeep         string
 
 	versionsLogResponses bool
+
+	keepShow bool
 )
 
 // shortCmdAliases maps -<letter> shortcuts to subcommand names so users can
@@ -45,6 +48,7 @@ var shortCmdAliases = map[string]string{
 	"-v":  "versions",
 	"-dl": "download",
 	"-a":  "auth",
+	"-k":  "keep",
 }
 
 func main() {
@@ -109,6 +113,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptUseInstalled, "use-installed", false, "decrypt the installed build directly; skip the App Store path even if a newer version exists")
 	decrypt.Flags().BoolVar(&decryptPatchDevType, "patch-device-type", false, "if the IPA's UIDeviceFamily excludes this device, append the device's family (iPadOS apps then run on iOS)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")
+	decrypt.Flags().StringVar(&decryptKeep, "keep", "", "where to keep the decrypted IPA for this run: desktop, device, both")
 
 	versions := &cobra.Command{
 		Use:     "versions <bundle-id|app-store-id|app-store-url>",
@@ -126,7 +131,16 @@ func main() {
 		Run:   doctorHandler,
 	}
 
-	root.AddCommand(auth, bootstrap, download, decrypt, versions, doctor)
+	keep := &cobra.Command{
+		Use:     "keep [desktop|device|both]",
+		Aliases: []string{"k"},
+		Short:   "Choose where decrypted IPAs are kept",
+		Args:    cobra.MaximumNArgs(1),
+		Run:     keepHandler,
+	}
+	keep.Flags().BoolVar(&keepShow, "show", false, "show the current decrypted IPA keep policy")
+
+	root.AddCommand(auth, bootstrap, download, decrypt, versions, doctor, keep)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

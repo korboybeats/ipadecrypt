@@ -183,6 +183,21 @@ func doctorLocalChecks(cfg *config.Config, paths *config.Paths, version string) 
 		})
 	}
 
+	if keep, err := config.NormalizeOutputKeep(cfg.Output.Keep); err != nil {
+		checks = append(checks, doctorCheck{
+			Status: doctorWarn,
+			Name:   "output keep policy",
+			Detail: cfg.Output.Keep,
+			Hint:   "run ipadecrypt keep",
+		})
+	} else {
+		checks = append(checks, doctorCheck{
+			Status: doctorPass,
+			Name:   "output keep policy",
+			Detail: keep,
+		})
+	}
+
 	if cfg.Apple.Account != nil {
 		checks = append(checks, doctorCheck{
 			Status: doctorPass,

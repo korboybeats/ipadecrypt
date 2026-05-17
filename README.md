@@ -25,11 +25,11 @@ This fork adds a handful of QoL features on top of upstream:
 - **On-device StoreKit download path.** New menu option that triggers the device's own App Store flow via `SKUIItem` + `SKUIItemStateCenter`. Apple's CDN serves the latest version compatible with the device's iOS. The download uses `STDRDL` (redownload-from-library) pricing, which skips the Face ID purchase confirmation. ipadecrypt then decrypts the freshly-installed bundle.
 - **Jailbreak app.** Offers **Latest from App Store** and **Latest iOS-compatible** actions, copyable logs, IPA sharing, and a Filza shortcut for the decrypted output folder. The app can be packaged for rootless or RootHide from the same source tree.
 - **Auto-confirm tweak (`ipadecryptautoalert`).** Optional SpringBoard tweak installed during bootstrap via `dpkg`. When ipadecrypt starts a **Latest iOS-compatible** StoreKit download, it arms a short-lived sentinel file; the tweak only auto-taps the `Download` action on the App Store older-version alert while that sentinel is valid.
-- **Decrypted IPA stays on device.** The output IPA is written to `/var/mobile/Documents/ipadecrypt/decrypted/` and not cleaned up - easy to grab from the device later.
+- **Configurable decrypted IPA retention.** Choose whether CLI decrypt output is kept on the desktop, device, or both.
 - **Single PC workspace.** CLI config, cookies, cache, and logs live under `~/ipadecrypt/`; decrypted PC outputs default to `~/ipadecrypt/decrypted/`.
 - **Faster IPA post-processing.** Metadata/Watch cleanup is combined into one scanned pass and skips rewriting entirely when there is nothing to remove. Cryptid verification streams Mach-O load commands instead of reading whole binaries into memory.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
-- **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `auth` (refresh Apple ID auth).
+- **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `-a`/`auth` (refresh Apple ID auth), `k` (keep policy).
 
 ## Requirements
 
@@ -133,14 +133,35 @@ ipadecrypt auth
 Refreshes the saved App Store session without running the full bootstrap flow.
 Use this when App Store actions fail with an auth-code or expired-token error.
 
+### Choose where decrypted IPAs are kept
+
+```sh
+ipadecrypt keep
+```
+
+Opens an interactive picker for future CLI decrypt runs. For scripts, pass the
+policy directly:
+
+```sh
+ipadecrypt keep desktop
+ipadecrypt keep device
+ipadecrypt keep both
+```
+
+`desktop` copies the final IPA to `~/ipadecrypt/decrypted/` and removes the
+device copy after a successful transfer. `device` keeps only the device copy.
+`both` keeps both copies and is the default.
+
 ### Decrypt an app
 
 ```sh
 ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 ```
 
-Decrypted IPAs are saved to `~/ipadecrypt/decrypted/` on your computer and
-kept on the device under `/var/mobile/Documents/ipadecrypt/decrypted/`.
+By default, decrypted IPAs are saved to `~/ipadecrypt/decrypted/` on your
+computer and kept on the device under
+`/var/mobile/Documents/ipadecrypt/decrypted/`. Run `ipadecrypt keep` to change
+that retention policy.
 When decrypting by bundle ID or App Store search result in a terminal, the
 build picker can also open the App Store version table so you can choose a
 specific historical version to install and decrypt.
@@ -163,7 +184,8 @@ ipadecrypt doctor
 ```
 
 Checks local config, SSH/sudo, jailbreak tooling, helper execution, output
-folders, auto-confirm state, and the installed jailbreak app/daemon.
+folders, output retention policy, auto-confirm state, and the installed
+jailbreak app/daemon.
 
 ## License
 

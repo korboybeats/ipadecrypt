@@ -197,6 +197,16 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	keepPolicy, err := effectiveDecryptKeepPolicy(cfg)
+	if err != nil {
+		tui.Err("%v", err)
+		return
+	}
+	if decryptOutput != "" && keepPolicy == config.OutputKeepDevice {
+		tui.Err("--output requires --keep desktop or --keep both")
+		return
+	}
+
 	upd := updater.Start(context.Background(), Version, cfg)
 	defer upd.Wait()
 
@@ -325,7 +335,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "")
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy)
 
 				return
 			}
@@ -356,7 +366,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, newVersion, "", "")
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, newVersion, "", "", keepPolicy)
 
 				return
 			}
@@ -413,7 +423,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 					live.OK("helper ready")
 
-					runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "")
+					runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy)
 					return
 				case 2:
 					extVerID, ok := selectAppStoreVersionForDecrypt(cfg, paths, target)
@@ -620,7 +630,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath)
+	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, keepPolicy)
 }
 
 // runDecryptOnBundle runs helper → pull → verify → cleanup on an
@@ -628,7 +638,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 // srcIPAPath is the source IPA on the host when one exists (App Store
 // download / cache hit / local --ipa); empty for the use-installed path
 // where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath string) {
+func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, keepPolicy string) {
 	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
@@ -688,14 +698,24 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 
 	live.OK("%s", progress.Summary())
 
-	outLocal, err := localOutputPath(decryptOutput, bundleID, version)
+	keepDesktop := keepPolicy == config.OutputKeepDesktop || keepPolicy == config.OutputKeepBoth
+	keepDevice := keepPolicy == config.OutputKeepDevice || keepPolicy == config.OutputKeepBoth
+
+	outLocal, cleanupLocal, err := decryptWorkingOutputPath(keepDesktop, bundleID, version)
 	if err != nil {
 		tui.Err("output path: %v", err)
 		return
 	}
+	if cleanupLocal != nil {
+		defer cleanupLocal()
+	}
 
 	live = tui.NewLive()
-	live.Spin("pulling → %s", filepath.Base(outLocal))
+	if keepDesktop {
+		live.Spin("pulling → %s", filepath.Base(outLocal))
+	} else {
+		live.Spin("preparing local verification copy")
+	}
 
 	remoteSt, err := dev.Stat(outRemote)
 	if err != nil {
@@ -715,7 +735,11 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	}
 
 	pw := newProgressWriter(outFile, remoteSt.Size(), func(cur, total int64) {
-		live.Message("%s", transferProgressText(fmt.Sprintf("pulling → %s", filepath.Base(outLocal)), cur, total))
+		label := "preparing local verification copy"
+		if keepDesktop {
+			label = fmt.Sprintf("pulling → %s", filepath.Base(outLocal))
+		}
+		live.Message("%s", transferProgressText(label, cur, total))
 		live.Progress(cur, total)
 	})
 
@@ -732,6 +756,10 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	}
 
 	pw.Flush()
+
+	if !keepDesktop {
+		live.OK("local verification copy ready")
+	}
 
 	if !decryptKeepMetadata || !decryptKeepWatch {
 		live.Spin("cleaning IPA")
@@ -766,7 +794,9 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 	}
 
-	live.OK("→ %s", outLocal)
+	if keepDesktop {
+		live.OK("→ %s", outLocal)
+	}
 
 	if !decryptNoVerify {
 		live = tui.NewLive()
@@ -830,7 +860,39 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 	}
 
-	tui.OK("kept on device → %s", outRemote)
+	if keepDevice {
+		live = tui.NewLive()
+		live.Spin("syncing device copy")
+
+		f, err := os.Open(outLocal)
+		if err != nil {
+			live.Fail("open final IPA: %v", err)
+			return
+		}
+
+		if err := dev.Upload(f, outRemote, 0o644); err != nil {
+			f.Close()
+			live.Fail("sync device copy: %v", err)
+			return
+		}
+		if err := f.Close(); err != nil {
+			live.Fail("close final IPA: %v", err)
+			return
+		}
+
+		live.OK("device copy ready")
+	} else if err := dev.Remove(outRemote); err != nil {
+		tui.Warn("could not remove device IPA: %v", err)
+	} else {
+		tui.OK("removed device IPA")
+	}
+
+	if keepDesktop {
+		tui.OK("kept on desktop → %s", outLocal)
+	}
+	if keepDevice {
+		tui.OK("kept on device → %s", outRemote)
+	}
 
 	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote)
 }
@@ -1133,6 +1195,34 @@ func remoteOutputPath(bundleID, version string) string {
 	return path.Join("/var/mobile/Documents/ipadecrypt/decrypted", fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version))
 }
 
+func effectiveDecryptKeepPolicy(cfg *config.Config) (string, error) {
+	if decryptKeep != "" {
+		return config.NormalizeOutputKeep(decryptKeep)
+	}
+
+	return config.NormalizeOutputKeep(cfg.Output.Keep)
+}
+
+func decryptWorkingOutputPath(keepDesktop bool, bundleID, version string) (string, func(), error) {
+	if keepDesktop {
+		out, err := localOutputPath(decryptOutput, bundleID, version)
+		return out, nil, err
+	}
+
+	tmp, err := os.CreateTemp("", fmt.Sprintf("ipadecrypt-%s-%s-*.ipa", safeFilename(bundleID), safeFilename(version)))
+	if err != nil {
+		return "", nil, err
+	}
+
+	name := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return "", nil, err
+	}
+
+	return name, func() { os.Remove(name) }, nil
+}
+
 func localOutputPath(override, bundleID, version string) (string, error) {
 	defaultName := fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version)
 
@@ -1157,6 +1247,11 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 	}
 
 	return abs, nil
+}
+
+func safeFilename(s string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_")
+	return replacer.Replace(s)
 }
 
 // runStoreKitInstall triggers an on-device StoreKit download (which surfaces

@@ -17,10 +17,21 @@ type Config struct {
 	Version     int         `json:"version"`
 	Apple       Apple       `json:"apple"`
 	Device      Device      `json:"device"`
+	Output      Output      `json:"output,omitempty"`
 	Versions    Versions    `json:"versions,omitempty"`
 	UpdateCheck UpdateCheck `json:"updateCheck,omitzero"`
 
 	path string
+}
+
+const (
+	OutputKeepDesktop = "desktop"
+	OutputKeepDevice  = "device"
+	OutputKeepBoth    = "both"
+)
+
+type Output struct {
+	Keep string `json:"keep,omitempty"`
 }
 
 type UpdateCheck struct {
@@ -58,6 +69,32 @@ type DeviceAuth struct {
 
 func New(path string) *Config {
 	return &Config{Version: SchemaVersion, path: path}
+}
+
+func NormalizeOutputKeep(value string) (string, error) {
+	switch value {
+	case "", OutputKeepBoth:
+		return OutputKeepBoth, nil
+	case OutputKeepDesktop:
+		return OutputKeepDesktop, nil
+	case OutputKeepDevice:
+		return OutputKeepDevice, nil
+	case "local", "pc", "computer":
+		return OutputKeepDesktop, nil
+	case "phone":
+		return OutputKeepDevice, nil
+	default:
+		return "", fmt.Errorf("output keep must be one of: desktop, device, both")
+	}
+}
+
+func (c *Config) OutputKeep() string {
+	keep, err := NormalizeOutputKeep(c.Output.Keep)
+	if err != nil {
+		return OutputKeepBoth
+	}
+
+	return keep
 }
 
 func Load(path string) (*Config, error) {
