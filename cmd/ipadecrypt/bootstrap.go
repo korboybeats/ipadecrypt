@@ -310,7 +310,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	// ---- Step 4: helper upload + verify ------------------------------
 
 	tui.Step(4, 5, "Install the decrypt helper")
-	tui.Info("A small embedded C binary that reads FairPlay-decrypted pages from a\nsuspended task. Uploaded once to /var/mobile/Media/ipadecrypt/helpers/\nand cached by SHA thereafter.")
+	tui.Info("A small embedded C binary that reads FairPlay-decrypted pages from a\nsuspended task. Uploaded once to /var/mobile/Documents/ipadecrypt/helpers/\nand cached by SHA thereafter.")
 
 	live := tui.NewLive()
 	live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)

@@ -19,7 +19,8 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const RemoteRoot = "/var/mobile/Media/ipadecrypt"
+const RemoteRoot = "/var/mobile/Documents/ipadecrypt"
+const LegacyRemoteRoot = "/var/mobile/Media/ipadecrypt"
 
 var ErrSudoPasswordRejected = errors.New("sudo password rejected")
 

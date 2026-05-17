@@ -163,9 +163,10 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 }
 
 func (c *Client) EnsureHelper() (string, error) {
+	c.CleanupLegacyRemoteRoot()
+
 	sum := sha256.Sum256(helperArm64)
-	remote := path.Join(RemoteRoot, "helpers",
-		fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
+	remote := helperRemotePath(hex.EncodeToString(sum[:])[:12])
 
 	if c.Exists(remote) {
 		return remote, nil
@@ -176,6 +177,14 @@ func (c *Client) EnsureHelper() (string, error) {
 	}
 
 	return remote, nil
+}
+
+func helperRemotePath(sumPrefix string) string {
+	return path.Join(RemoteRoot, "helpers", fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", sumPrefix))
+}
+
+func (c *Client) CleanupLegacyRemoteRoot() {
+	_, _, _, _ = c.RunSudo(fmt.Sprintf("rm -rf %q", LegacyRemoteRoot))
 }
 
 // IsAutoalertInstalled checks if the SpringBoard auto-confirm tweak is

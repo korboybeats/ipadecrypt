@@ -11,7 +11,7 @@
 #import <unistd.h>
 
 static NSString *const kSentinelPath = @"/var/mobile/.ipadecryptautoalert-arm";
-static NSString *const kLogPath = @"/var/mobile/Library/Logs/ipadecryptautoalert.log";
+static NSString *const kLogPath = @"/var/mobile/Documents/ipadecrypt/logs/autoalert.log";
 static const NSTimeInterval kStaleRecordAge = 300.0;
 static const NSUInteger kMaxArmRecordBytes = 8192;
 static const NSUInteger kMaxLoggedCandidates = 8;
@@ -29,6 +29,11 @@ static void AALog(NSString *fmt, ...) {
 	NSData *data = [out dataUsingEncoding:NSUTF8StringEncoding];
 	NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:kLogPath];
 	if (!fh) {
+		NSString *dir = [kLogPath stringByDeletingLastPathComponent];
+		[[NSFileManager defaultManager] createDirectoryAtPath:dir
+		                          withIntermediateDirectories:YES
+		                                           attributes:nil
+		                                                error:nil];
 		[data writeToFile:kLogPath atomically:YES];
 		return;
 	}

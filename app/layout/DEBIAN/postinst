@@ -31,6 +31,8 @@ RUN_DIR="$(jb_path /var/jb/var/run)"
 TMP_DIR="$(jb_path /var/jb/tmp)"
 OUTROOT="$(mobile_path /var/mobile/Documents/ipadecrypt)"
 OUTDIR="$OUTROOT/decrypted"
+LOGDIR="$OUTROOT/logs"
+OLD_APP_LOG="$(mobile_path /var/mobile/Documents/ipadecrypt-app.log)"
 
 launchctl bootout system "$PLIST" 2>/dev/null || true
 ps -axo pid,command | awk '/[i]padecryptd-supervisor/ { print $1 }' | while read -r pid; do
@@ -71,9 +73,14 @@ cat >"$PLIST" <<EOF
 EOF
 chmod 644 "$PLIST"
 chown 0:0 "$PLIST"
-mkdir -p "$OUTDIR"
-chown mobile:mobile "$OUTROOT" "$OUTDIR"
-chmod 755 "$OUTDIR"
+mkdir -p "$OUTDIR" "$LOGDIR"
+if [ -f "$OLD_APP_LOG" ] && [ ! -f "$LOGDIR/app.log" ]; then
+    mv "$OLD_APP_LOG" "$LOGDIR/app.log" 2>/dev/null || true
+else
+    rm -f "$OLD_APP_LOG" 2>/dev/null || true
+fi
+chown mobile:mobile "$OUTROOT" "$OUTDIR" "$LOGDIR" 2>/dev/null || true
+chmod 755 "$OUTDIR" "$LOGDIR"
 
 launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load "$PLIST" 2>/dev/null || true
 

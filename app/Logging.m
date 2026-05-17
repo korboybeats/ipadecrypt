@@ -1,6 +1,6 @@
 #import "Logging.h"
 
-NSString *const IDLogPath = @"/var/mobile/Documents/ipadecrypt-app.log";
+NSString *const IDLogPath = @"/var/mobile/Documents/ipadecrypt/logs/app.log";
 
 void IDLogv(const char *file, int line, NSString *fmt, va_list args) {
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
@@ -12,6 +12,11 @@ void IDLogv(const char *file, int line, NSString *fmt, va_list args) {
 
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:IDLogPath];
     if (!fh) {
+        NSString *dir = [IDLogPath stringByDeletingLastPathComponent];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:nil];
         [[NSFileManager defaultManager] createFileAtPath:IDLogPath
                                                 contents:nil attributes:nil];
         fh = [NSFileHandle fileHandleForWritingAtPath:IDLogPath];

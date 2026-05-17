@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 
-// Always log to /var/mobile/Documents/ipadecrypt-app.log so we can
+// Always log to /var/mobile/Documents/ipadecrypt/logs/app.log so we can
 // diagnose the app without a TTY. NSLog goes to oslog and is harder to
 // retrieve from a sealed app.
 extern NSString *const IDLogPath;
