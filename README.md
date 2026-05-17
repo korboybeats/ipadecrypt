@@ -23,13 +23,13 @@ This fork adds a handful of QoL features on top of upstream:
 - **SSH port + multi-host failover.** Bootstrap prompts for a non-default SSH port. `host` accepts a comma-separated list of IPs; the first reachable one is used (handy if your phone hops between Wi-Fi networks).
 - **Fuzzy target resolution.** `ipadecrypt decrypt messenger` scans installed apps and matches against bundle ID + display name. Single match auto-selects; multiple matches prompt to pick.
 - **On-device StoreKit download path.** New menu option that triggers the device's own App Store flow via `SKUIItem` + `SKUIItemStateCenter`. Apple's CDN serves the latest version compatible with the device's iOS. The download uses `STDRDL` (redownload-from-library) pricing, which skips the Face ID purchase confirmation. ipadecrypt then decrypts the freshly-installed bundle.
-- **Jailbreak app.** Offers **Latest from App Store** and **Latest iOS-compatible** actions, copyable logs, IPA sharing, and a Filza shortcut for the decrypted output folder.
+- **Jailbreak app.** Offers **Latest from App Store** and **Latest iOS-compatible** actions, copyable logs, IPA sharing, and a Filza shortcut for the decrypted output folder. The app can be packaged for rootless or RootHide from the same source tree.
 - **Auto-confirm tweak (`ipadecryptautoalert`).** Optional SpringBoard tweak installed during bootstrap via `dpkg`. When ipadecrypt starts a **Latest iOS-compatible** StoreKit download, it arms a short-lived sentinel file; the tweak only auto-taps the `Download` action on the App Store older-version alert while that sentinel is valid.
 - **Decrypted IPA stays on device.** The output IPA is written to `/var/mobile/Documents/ipadecrypt/decrypted/` and not cleaned up - easy to grab from the device later.
 - **Single PC workspace.** CLI config, cookies, cache, and logs live under `~/ipadecrypt/`; decrypted PC outputs default to `~/ipadecrypt/decrypted/`.
 - **Faster IPA post-processing.** Metadata/Watch cleanup is combined into one scanned pass and skips rewriting entirely when there is nothing to remove. Cryptid verification streams Mach-O load commands instead of reading whole binaries into memory.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
-- **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions).
+- **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `auth` (refresh Apple ID auth).
 
 ## Requirements
 
@@ -81,13 +81,14 @@ Refer to [BUILDING.md](BUILDING.md) for helper and release-style build details.
 
 ### Jailbreak app
 
-The release includes rootless `.deb` packages for the on-device app and the
-optional auto-confirm tweak:
+The release includes `.deb` packages for the on-device app and the optional
+auto-confirm tweak:
 
 - `com.korboy.ipadecrypt_0.0.1_iphoneos-arm64.deb`
+- `com.korboy.ipadecrypt_0.0.1_iphoneos-arm64e.deb` for RootHide
 - `com.korboy.ipadecryptautoalert_0.0.1_iphoneos-arm64.deb`
 
-To build and install the app locally:
+To build and install the rootless app locally:
 
 ```sh
 ./app/build.sh
@@ -95,6 +96,17 @@ To build and install the app locally:
 
 The script builds the app, app-store helper, and daemon, installs the package
 on the phone, refreshes uicache, and opens `com.korboy.ipadecrypt`.
+
+To build the RootHide app package and upload it to the phone's Downloads
+folder:
+
+```sh
+./app/build_roothide.sh
+```
+
+RootHide output still uses the same app UI and daemon model, but package files
+are built with `THEOS_PACKAGE_SCHEME=roothide` and runtime paths are resolved
+through the active RootHide jailbreak root.
 
 ## Usage
 
