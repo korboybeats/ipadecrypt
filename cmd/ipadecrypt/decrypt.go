@@ -239,6 +239,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	cleanups.push(dev.Close)
 
 	sigCh := make(chan os.Signal, 1)
+
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
@@ -650,6 +651,7 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 	// Best-effort: drop the partially-written IPA on any error return.
 	// Cleared after we commit on success.
 	abandonLocal := true
+
 	cleanups.push(func() {
 		outFile.Close()
 

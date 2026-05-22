@@ -51,6 +51,7 @@ func Assemble(srcIPA string, dst io.Writer,
 		}
 
 		written[name] = struct{}{}
+
 		return nil
 	}
 

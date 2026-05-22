@@ -181,6 +181,7 @@ func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, 
 	// also accumulate it in soBuf — a 300 MB decrypted IPA would sit in
 	// RAM. Stderr stays buffered for the sudo-password rejection check.
 	var soBuf, seBuf bytes.Buffer
+
 	if stdoutW != nil {
 		sess.Stdout = stdoutW
 	} else {

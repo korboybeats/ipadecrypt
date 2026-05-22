@@ -167,11 +167,11 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 // first command in a `cmd1; cmd2` chain, otherwise rm runs as mobile and
 // hits the _installd-owned files with EACCES). Order matters:
 //
-//   1. uicache -u <bundlePath>  — unregister from LSApplicationWorkspace
-//      so SpringBoard drops the icon and the LS registry forgets the
-//      bundle.
-//   2. rm -rf <UUID-dir>        — remove the bundle dir under
-//      /var/containers/Bundle/Application/.
+//  1. uicache -u <bundlePath>  — unregister from LSApplicationWorkspace
+//     so SpringBoard drops the icon and the LS registry forgets the
+//     bundle.
+//  2. rm -rf <UUID-dir>        — remove the bundle dir under
+//     /var/containers/Bundle/Application/.
 //
 // The data container at /var/mobile/Containers/Data/Application/<other-UUID>/
 // is left behind  finding it would require scanning every container's
@@ -392,6 +392,7 @@ func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
 	defer splitter.Close()
 
 	_, _, code, err := c.RunSudoStream(cmd, ipaW, splitter)
+
 	return code, err
 }
 
@@ -443,6 +444,7 @@ func (c *Client) RunHelperExecs(helperPath, bundleID, bundlePath string,
 	if runErr != nil {
 		return code, runErr
 	}
+
 	if parseErr != nil {
 		return code, parseErr
 	}
@@ -461,6 +463,7 @@ func parseFrames(r io.Reader, onFrame FrameHandler) error {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
+
 			return fmt.Errorf("read frame plen: %w", err)
 		}
 
