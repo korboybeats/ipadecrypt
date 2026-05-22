@@ -13,3 +13,4 @@ dist/
 .theos/
 helper/ipadecryptautoalert/packages/
 helper/ipadecryptautoalert/obj/
+.DS_Store

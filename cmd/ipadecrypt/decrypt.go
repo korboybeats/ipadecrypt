@@ -1,18 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -191,6 +188,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	if decryptForceUninstall && decryptNoUninstall {
+		tui.Err("--force-uninstall and --no-uninstall are mutually exclusive; pass at most one.")
+		return
+	}
+
 	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
 		tui.Err("%v", err)
@@ -216,7 +218,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if cfg.Apple.Account == nil || cfg.Device.Host == "" {
+	if cfg.Apple.Email == "" || cfg.Device.Host == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
 
@@ -237,6 +239,24 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	}
 
 	defer dev.Close()
+
+	var (
+		uninstall         bool
+		uninstallBundleID string
+	)
+
+	defer func() {
+		if !uninstall || uninstallBundleID == "" {
+			return
+		}
+
+		if err := dev.Uninstall(uninstallBundleID); err != nil {
+			tui.Err("uninstall %s: %v", uninstallBundleID, err)
+			return
+		}
+
+		tui.OK("uninstalled %s", uninstallBundleID)
+	}()
 
 	live.Spin("probing device")
 
@@ -260,7 +280,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			tui.Err("appstore client: %v", err)
 			return
 		}
-		resolved, err := resolveBundleByFuzzy(dev, as, cfg.Apple.Account, target.bundleId)
+		resolved, err := resolveBundleByFuzzy(dev, as, cfg.Apple.Account(), target.bundleId)
 		if err != nil {
 			tui.Err("%v", err)
 			return
@@ -274,13 +294,15 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live = tui.NewLive()
 		live.Spin("checking if %s is installed", target.bundleId)
 
-		installedPath, err := dev.FindInstalledByBundleID(target.bundleId)
+		installedPath, canonicalID, err := dev.FindInstalledByBundleID(target.bundleId)
 		if err != nil {
 			live.Fail("scan failed: %v", err)
 			return
 		}
 
 		if installedPath != "" {
+			target.bundleId = canonicalID
+
 			version, err := dev.InstalledVersion(installedPath)
 			if err != nil || version == "" {
 				version = "unknown"
@@ -335,7 +357,10 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy)
+				uninstall = decideUninstall(false, decryptForceUninstall, decryptNoUninstall)
+				uninstallBundleID = target.bundleId
+
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy, "", nil)
 
 				return
 			}
@@ -345,7 +370,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 					return
 				}
 				// re-resolve installed path/version after the install
-				installedPath, _ = dev.FindInstalledByBundleID(target.bundleId)
+				installedPath, _, _ = dev.FindInstalledByBundleID(target.bundleId)
 				if installedPath == "" {
 					tui.Err("%s no longer installed after StoreKit download", target.bundleId)
 					return
@@ -366,7 +391,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, newVersion, "", "", keepPolicy)
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, newVersion, "", "", keepPolicy, "", nil)
 
 				return
 			}
@@ -402,7 +427,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 					if ok := runStoreKitInstall(dev, target.bundleId, ""); !ok {
 						return
 					}
-					installedPath, _ := dev.FindInstalledByBundleID(target.bundleId)
+					installedPath, _, _ := dev.FindInstalledByBundleID(target.bundleId)
 					if installedPath == "" {
 						tui.Err("%s not found after StoreKit download", target.bundleId)
 						return
@@ -423,7 +448,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 					live.OK("helper ready")
 
-					runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy)
+					runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy, "", nil)
 					return
 				case 2:
 					extVerID, ok := selectAppStoreVersionForDecrypt(cfg, paths, target)
@@ -466,13 +491,15 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		appStoreCountry, err := appstore.CountryCodeFromStoreFront(cfg.Apple.Account.StoreFront)
+		acc := cfg.Apple.Account()
+
+		appStoreCountry, err := appstore.CountryCodeFromStoreFront(acc.StoreFront)
 		if err != nil {
 			tui.Err("resolve appstore country code: %v", err)
 			return
 		}
 
-		tui.OK("signed in as %s (%s storefront)", cfg.Apple.Account.Email, appStoreCountry)
+		tui.OK("signed in as %s (%s storefront)", redact(acc.Email), redact(appStoreCountry))
 
 		live = tui.NewLive()
 
@@ -482,7 +509,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			live.Spin("resolving bundleId %s", target.bundleId)
 		}
 
-		app, err := lookupTargetApp(as, cfg.Apple.Account, target)
+		app, err := lookupTargetApp(as, acc, target)
 		if err != nil {
 			live.Fail("lookup failed (%s): %v", appStoreCountry, err)
 			return
@@ -538,7 +565,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	//
 
 	live = tui.NewLive()
-	live.Spin("patching Info.plist for MinimumOSVersion %s", probe.IOSVersion)
+	live.Spin("patching Info.plist %s", probe.IOSVersion)
 
 	patch, err := patchSourceForDevice(encPath, probe.IOSVersion, probe.DeviceFamily, decryptPatchDevType)
 	if err != nil {
@@ -550,7 +577,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		live.Fail("patch MinimumOSVersion failed: %v", err)
+		live.Fail("patch Info.plist failed: %v", err)
 
 		return
 	}
@@ -562,9 +589,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	}()
 
 	if patch.changed {
-		live.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
-	} else {
-		live.OK("no MinimumOSVersion change needed")
+		tui.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
 	}
 
 	if patch.deviceFamilyExpanded {
@@ -574,6 +599,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	if patch.watchStripped > 0 {
 		tui.OK("stripped %d Watch/ entries", patch.watchStripped)
 	}
+
+	live.OK("patched Info.plist")
 
 	live = tui.NewLive()
 	live.Spin("preparing install plan")
@@ -630,7 +657,67 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, keepPolicy)
+	uninstall = decideUninstall(install.installed || install.reinstalled, decryptForceUninstall, decryptNoUninstall)
+	uninstallBundleID = appBundleID
+
+	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, keepPolicy, patch.previousMinOS, patch.previousDeviceFamily)
+}
+
+// decideUninstall picks the post-decrypt cleanup behavior. weInstalledIt
+// is true when this run put the bundle on the device (fresh install or
+// reinstall over a different version). force/no come from the flags.
+func decideUninstall(weInstalledIt, force, no bool) bool {
+	switch {
+	case force:
+		return true
+	case no:
+		return false
+	}
+
+	return weInstalledIt
+}
+
+func verifyOKSummary(res pipeline.VerifyResult, compareSource bool) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "%d Mach-O(s) verified", res.Scanned)
+
+	if compareSource {
+		fmt.Fprintf(&b, ", %d source-matched", res.Compared)
+	}
+
+	var extras []string
+	if len(res.Missing) > 0 {
+		extras = append(extras, fmt.Sprintf("%d source-missing", len(res.Missing)))
+	}
+
+	if len(res.Skipped) > 0 {
+		extras = append(extras, fmt.Sprintf("%d skipped", len(res.Skipped)))
+	}
+
+	if len(extras) > 0 {
+		fmt.Fprintf(&b, " (%s)", strings.Join(extras, ", "))
+	}
+
+	return b.String()
+}
+
+func verifyFailureSummary(res pipeline.VerifyResult) string {
+	parts := make([]string, 0, 3)
+
+	if n := len(res.StillEncrypted); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d still encrypted", n))
+	}
+
+	if n := len(res.AllZeroCrypt); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d all-zero crypt", n))
+	}
+
+	if n := len(res.Mismatches); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d source diff", n))
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 // runDecryptOnBundle runs helper → pull → verify → cleanup on an
@@ -638,7 +725,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 // srcIPAPath is the source IPA on the host when one exists (App Store
 // download / cache hit / local --ipa); empty for the use-installed path
 // where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, keepPolicy string) {
+//
+// originalMinOS / originalDeviceFamily are the pre-PatchForInstall values
+// from the source IPA; when non-empty the output IPA's Info.plist is
+// rewritten back to them after the pull, so the decrypted artifact does
+// not ship with our install-time mutations baked in. Both are empty on
+// the --use-installed path (no patching happened).
+func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, keepPolicy, originalMinOS string, originalDeviceFamily []int) {
 	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
@@ -670,22 +763,10 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 	}
 
-	var (
-		helperStderr io.Writer
-		stderrNoter  *liveNoteWriter
-	)
-
-	if decryptVerbose {
-		stderrNoter = newLiveNoteWriter(live)
-		helperStderr = stderrNoter
-	}
-
-	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, onEvent, helperStderr)
-
-	if stderrNoter != nil {
-		stderrNoter.Flush()
-	}
-
+	// Helper has one output channel: events on stdout. We drive the TUI
+	// from that stream. --verbose passes -v so the helper additionally
+	// emits LOG_DEBUG events.
+	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, decryptVerbose, decryptSkipAppex, onEvent)
 	if err != nil {
 		live.Fail("helper run: %v", err)
 		return
@@ -799,65 +880,59 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	}
 
 	if !decryptNoVerify {
-		live = tui.NewLive()
-		live.Spin("checking cryptid on every Mach-O")
-		live.Note("verify: begin")
+		if decryptExtraVerify && srcIPAPath == "" {
+			tui.Info("extra-verify unavailable when source ipa is not present")
+		}
 
-		res, err := pipeline.VerifyCryptid(outLocal)
+		compareSource := decryptExtraVerify && srcIPAPath != ""
+
+		src := ""
+		if compareSource {
+			src = srcIPAPath
+		}
+
+		live = tui.NewLive()
+		if compareSource {
+			live.Spin("verifying Mach-Os (cryptid, zero-fill, source byte-compare)")
+		} else {
+			live.Spin("verifying Mach-Os (cryptid, zero-fill)")
+		}
+
+		res, err := pipeline.Verify(outLocal, src, decryptSkipAppex)
 		if err != nil {
 			live.Fail("verify failed: %v", err)
 			return
 		}
-		live.Note("verify: scanned=%d encrypted=%d skipped=%d", res.Scanned, len(res.Encrypted), len(res.Skipped))
+		live.Note("verify: scanned=%d encrypted=%d skipped=%d", res.Scanned, len(res.StillEncrypted), len(res.Skipped))
 
-		if len(res.Encrypted) > 0 {
-			live.Fail("%d binary(ies) still have cryptid != 0", len(res.Encrypted))
+		if !res.OK() {
+			live.Fail("verify failed: %s", verifyFailureSummary(res))
 
-			for _, n := range res.Encrypted {
-				tui.Info("  %s", n)
+			for _, n := range res.StillEncrypted {
+				tui.Info("  %s still encrypted (cryptid != 0)", n)
+			}
+
+			for _, n := range res.AllZeroCrypt {
+				tui.Info("  %s crypt region all zeros", n)
+			}
+
+			for _, m := range res.Mismatches {
+				tui.Info("  %s %s", m.Name, m.Reason)
 			}
 
 			return
 		}
 
-		suffix := ""
-		if len(res.Skipped) > 0 {
-			suffix = fmt.Sprintf(" (%d skipped)", len(res.Skipped))
-		}
-
-		live.OK("%d Mach-O(s) verified cryptid=0%s", res.Scanned, suffix)
+		live.OK("%s", verifyOKSummary(res, compareSource))
 	}
 
-	if decryptExtraVerify {
-		if srcIPAPath == "" {
-			tui.Info("--extra-verify skipped: no source IPA available for the installed-bundle path")
-		} else {
-			live = tui.NewLive()
-			live.Spin("byte-comparing every Mach-O against source IPA")
-
-			res, err := pipeline.ExtraVerify(outLocal, srcIPAPath)
-			if err != nil {
-				live.Fail("extra-verify failed: %v", err)
-				return
-			}
-
-			if len(res.Mismatches) > 0 {
-				live.Fail("%d Mach-O(s) differ from source outside the encrypted region", len(res.Mismatches))
-
-				for _, m := range res.Mismatches {
-					tui.Info("  %s — %s", m.Name, m.Reason)
-				}
-
-				return
-			}
-
-			suffix := ""
-			if len(res.Missing) > 0 {
-				suffix = fmt.Sprintf(" (%d source-missing)", len(res.Missing))
-			}
-
-			live.OK("%d Mach-O(s) byte-match source%s", res.Compared, suffix)
+	if originalMinOS != "" || len(originalDeviceFamily) > 0 {
+		if err := pipeline.RestoreOriginalPlistValues(outLocal, originalMinOS, originalDeviceFamily); err != nil {
+			tui.Err("restore Info.plist: %v", err)
+			return
 		}
+
+		tui.OK("restored Info.plist (MinimumOSVersion, UIDeviceFamily)")
 	}
 
 	if keepDevice {
@@ -932,7 +1007,7 @@ func selectAppStoreVersionForDecrypt(cfg *config.Config, paths *config.Paths, ta
 		live.Spin("resolving bundleId %s", target.bundleId)
 	}
 
-	app, err := lookupTargetApp(as, cfg.Apple.Account, target)
+	app, err := lookupTargetApp(as, cfg.Apple.Account(), target)
 	if err != nil {
 		live.Fail("lookup failed: %v", err)
 		return "", false
@@ -999,7 +1074,7 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 	}
 
 	ticket, err := withAuth(cfg, as, app, 3, onAuth, func() (appstore.DownloadTicket, error) {
-		return as.PrepareDownload(cfg.Apple.Account, app, extVerID)
+		return as.PrepareDownload(cfg.Apple.Account(), app, extVerID)
 	})
 	if err != nil {
 		return remoteSourceDisposition{}, err
@@ -1018,7 +1093,7 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 		}, nil
 	}
 
-	if _, err := as.CompleteDownload(cfg.Apple.Account, ticket, encPath, onProgress); err != nil {
+	if _, err := as.CompleteDownload(cfg.Apple.Account(), ticket, encPath, onProgress); err != nil {
 		return remoteSourceDisposition{}, fmt.Errorf("%w: %w", errRemoteDownloadFailed, err)
 	}
 
@@ -1085,7 +1160,7 @@ func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installP
 		return installPlan{}, errAppinstNotFound
 	}
 
-	bundlePath, err := dev.FindInstalledByBundleID(bundleID)
+	bundlePath, _, err := dev.FindInstalledByBundleID(bundleID)
 	if err != nil {
 		return installPlan{}, fmt.Errorf("scan installed: %w", err)
 	}
@@ -1174,7 +1249,7 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 
 	notify(installRescan)
 
-	bundlePath, err := dev.FindInstalledByBundleID(plan.bundleID)
+	bundlePath, _, err := dev.FindInstalledByBundleID(plan.bundleID)
 	if err != nil {
 		return installResult{}, fmt.Errorf("post-install scan: %w", err)
 	}
@@ -1268,7 +1343,7 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 		return false
 	}
 
-	beforePath, _ := dev.FindInstalledByBundleID(bundleID)
+	beforePath, _, _ := dev.FindInstalledByBundleID(bundleID)
 
 	live.Spin("requesting App Store download for %s", bundleID)
 
@@ -1315,7 +1390,7 @@ func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool
 	stableSince := time.Time{}
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
-		p, err := dev.FindInstalledByBundleID(bundleID)
+		p, _, err := dev.FindInstalledByBundleID(bundleID)
 		if err != nil || p == "" {
 			stableSince = time.Time{}
 			continue
@@ -1460,284 +1535,82 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// liveNoteWriter buffers an io.Writer stream and emits one tui.Live.Note per
-// completed line. Used to surface helper LOG/ERR (newline-delimited human
-// text on stderr) into the live UI when --verbose is set, instead of
-// dumping raw stderr bytes that would race against the spinner.
-type liveNoteWriter struct {
-	live *tui.Live
-	mu   sync.Mutex
-	buf  []byte
-}
-
-func newLiveNoteWriter(live *tui.Live) *liveNoteWriter {
-	return &liveNoteWriter{live: live}
-}
-
-func (w *liveNoteWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	w.buf = append(w.buf, p...)
-
-	for {
-		nl := bytes.IndexByte(w.buf, '\n')
-		if nl < 0 {
-			break
-		}
-
-		line := strings.TrimRight(string(w.buf[:nl]), "\r")
-		w.buf = w.buf[nl+1:]
-
-		if line != "" {
-			w.live.Note("%s", line)
-		}
-	}
-
-	return len(p), nil
-}
-
-// Flush emits any trailing buffered bytes that didn't end in a newline.
-// Call after the producer is known to be done writing.
-func (w *liveNoteWriter) Flush() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if len(w.buf) == 0 {
-		return
-	}
-
-	line := strings.TrimRight(string(w.buf), "\r")
-	w.buf = nil
-
-	if line != "" {
-		w.live.Note("%s", line)
-	}
-}
-
-func pluralize(count, noun string) string {
-	if count == "1" {
-		return count + " " + noun
-	}
-
-	return count + " " + noun + "s"
-}
-
-func parseInt64(s string) int64 {
-	var n int64
-	fmt.Sscanf(s, "%d", &n)
-
-	return n
-}
-
-func imageFailReason(token string) string {
-	switch token {
-	case "":
-		return ""
-	case "open_src_fail":
-		return "couldn't open source"
-	case "read_src_fail":
-		return "couldn't read source"
-	case "vm_read_err":
-		return "couldn't read decrypted memory"
-	case "cryptoff_zero_pages":
-		return "decrypted region was all zeros"
-	case "open_dst_fail":
-		return "couldn't open output"
-	case "write_dst_fail":
-		return "couldn't write output"
-	case "oom":
-		return "out of memory"
-	default:
-		return token
-	}
-}
-
-// Returns "" for the recoverable EXC_BREAKPOINT case so caller stays silent.
-func dyldTrappedMessage(ev device.Event) string {
-	via := ev.Attr("via")
-	exc := ev.Attr("exception")
-	sig := ev.Attr("signal")
-	outcome := ev.Attr("outcome")
-
-	if via == "mach" {
-		switch exc {
-		case "EXC_BREAKPOINT":
-			return ""
-		case "EXC_CRASH", "EXC_BAD_ACCESS", "EXC_BAD_INSTRUCTION", "":
-			return "app halted during launch; recovering what was loaded"
-		default:
-			return fmt.Sprintf("app halted during launch (%s); recovering what was loaded", exc)
-		}
-	}
-
-	if via == "ptrace" {
-		if outcome == "exited" {
-			return "app exited during launch; recovering what was loaded"
-		}
-
-		if outcome == "signaled" && sig == "9" {
-			return "app couldn't fully launch on this device; recovering what was loaded"
-		}
-
-		return "app crashed during launch; recovering what was loaded"
-	}
-
-	return "app halted during launch; recovering what was loaded"
-}
-
+// HandleEvent renders one helper event into a TUI update. The helper
+// embeds a human-readable `msg` attribute on every event, so this
+// function mostly just relays msg as the note, with per-event spinner
+// updates and counters layered on top.
 func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
+	upd := helperUpdate{note: ev.Attr("msg")}
+
 	switch ev.Name {
-	case "bundle":
-		switch ev.Attr("phase") {
-		case "done":
-			extras := ev.Attr("extras")
-			if extras == "0" {
-				return helperUpdate{}
-			}
+	// Spinner-only events: progress indicator, no note line.
+	case "bundle.begin":
+		upd.note = ""
+		upd.spin = fmt.Sprintf("decrypting %s", path.Base(ev.Attr("src")))
+	case "dyld.resuming":
+		upd.note = ""
+		upd.spin = "running target"
+	case "image.begin":
+		upd.note = ""
+		upd.spin = fmt.Sprintf("decrypting %s", ev.Attr("name"))
+	case "pack.begin":
+		upd.note = ""
+		upd.spin = fmt.Sprintf("packaging IPA → %s", path.Base(ev.Attr("ipa")))
 
-			return helperUpdate{note: fmt.Sprintf("bundle done (%s)", pluralize(extras, "framework"))}
-		case "skipped":
-			return helperUpdate{note: fmt.Sprintf("bundle skipped: %s (%s)", path.Base(ev.Attr("src")), ev.Attr("reason"))}
+	// Counters + spinner update on each successful dump.
+	case "image.done":
+		p.dumpedTotal.Add(1)
+
+		switch ev.Attr("kind") {
+		case "main":
+			p.dumpedMain.Add(1)
+		case "framework":
+			p.dumpedFrameworks.Add(1)
+		default:
+			p.dumpedOther.Add(1)
 		}
 
-	case "spawn_chmod":
-		return helperUpdate{note: fmt.Sprintf("made %s executable", path.Base(ev.Attr("path")))}
+		upd.spin = fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load())
 
-	case "spawn_path":
-		return helperUpdate{note: fmt.Sprintf("spawned %s via ptrace", path.Base(ev.Attr("exec")))}
-
-	case "spawn_path_fallback":
-		return helperUpdate{note: fmt.Sprintf("SBS failed on %s, falling back to ptrace", path.Base(ev.Attr("exec")))}
-
-	case "spawn_failed":
-		return helperUpdate{note: fmt.Sprintf("could not spawn %s (skipped)", path.Base(ev.Attr("src")))}
-
-	case "dyld":
-		switch ev.Attr("phase") {
-		case "resuming":
-			return helperUpdate{spin: fmt.Sprintf("running %s", path.Base(ev.Attr("src")))}
-		case "trapped":
-			msg := dyldTrappedMessage(ev)
-			if pc := ev.Attr("pc"); pc != "" && pc != "0x0" {
-				if msg != "" {
-					msg += fmt.Sprintf(" (pc=%s)", pc)
-				} else {
-					msg = fmt.Sprintf("dyld trapped at pc=%s", pc)
-				}
-			}
-			if msg == "" {
-				return helperUpdate{}
-			}
-
-			return helperUpdate{note: msg}
+	// Suppress empty-result bundle.done so the TUI stays quiet on appex
+	// passes that produce no extras.
+	case "bundle.done":
+		if ev.Attr("extras") == "0" {
+			upd.note = ""
 		}
 
-	case "patch":
-		if ev.Attr("phase") == "scan_done" {
-			return helperUpdate{note: fmt.Sprintf("dyld patches: kills=%s forces=%s skips=%s",
-				ev.Attr("kills"), ev.Attr("forces"), ev.Attr("skips"))}
-		}
-		return helperUpdate{}
-
-	case "inject":
-		switch ev.Attr("phase") {
-		case "skipped":
-			if ev.Attr("name") == "" && ev.Attr("reason") == "not_plain_arm64" {
-				return helperUpdate{note: "skipping framework recovery (target is arm64e; injection unsupported)"}
-			}
-
-			return helperUpdate{}
-		case "failed":
-			return helperUpdate{note: fmt.Sprintf("could not decrypt %s in target", path.Base(ev.Attr("name")))}
-		case "tramp_alloc_fail", "tramp_write_fail":
-			return helperUpdate{note: "couldn't set up decrypt in target"}
-		case "mremap_fail":
-			return helperUpdate{note: fmt.Sprintf("mremap_encrypted failed in target (rc=%s)", ev.Attr("rc"))}
-		case "prefault_fail":
-			return helperUpdate{note: "prefault loop didn't return (target thread stuck)"}
-		case "target_call_timeout":
-			return helperUpdate{note: fmt.Sprintf("target syscall timed out (pc=%s lr=%s)", ev.Attr("pc"), ev.Attr("lr"))}
-		case "target_call_crashed":
-			return helperUpdate{note: fmt.Sprintf("target syscall crashed (exc=%s code1=%s)", ev.Attr("exc"), ev.Attr("code1"))}
+	// Trap on the benign dyld halt brk is silent  the helper catches it
+	// on purpose so the address space stays readable; nothing to surface.
+	case "dyld.trapped":
+		if ev.Attr("exception") == "EXC_BREAKPOINT" {
+			upd.note = ""
 		}
 
-		return helperUpdate{}
-
-	case "image":
-		name := ev.Attr("name")
-
-		switch ev.Attr("phase") {
-		case "start":
-			return helperUpdate{spin: fmt.Sprintf("decrypting %s", name)}
-		case "done":
-			p.dumpedTotal.Add(1)
-
-			switch ev.Attr("kind") {
-			case "main":
-				p.dumpedMain.Add(1)
-			case "framework":
-				p.dumpedFrameworks.Add(1)
-			default:
-				p.dumpedOther.Add(1)
-			}
-
-			size := parseInt64(ev.Attr("size"))
-
-			return helperUpdate{
-				note: fmt.Sprintf("decrypted %s (%s)", name, humanBytes(size)),
-				spin: fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load()),
-			}
-		case "failed":
-			if reason := imageFailReason(ev.Attr("reason")); reason != "" {
-				return helperUpdate{note: fmt.Sprintf("failed to decrypt %s (%s)", name, reason)}
-			}
-
-			return helperUpdate{note: fmt.Sprintf("failed to decrypt %s", name)}
-		}
-
-	case "pack":
-		switch ev.Attr("phase") {
-		case "start":
-			return helperUpdate{spin: fmt.Sprintf("packaging IPA → %s", path.Base(ev.Attr("ipa")))}
-		case "progress":
-			percent := ev.Attr("percent")
-			if percent == "" {
-				return helperUpdate{}
-			}
-
-			cur := parseInt64(ev.Attr("current"))
-			total := parseInt64(ev.Attr("total"))
-			return helperUpdate{
-				note:         fmt.Sprintf("packaging IPA %s%%", percent),
-				progress:     total > 0,
-				progressCur:  cur,
-				progressMax:  total,
-				progressText: fmt.Sprintf("packaging IPA %s%%", percent),
-			}
-		case "done":
-			return helperUpdate{note: fmt.Sprintf("packaged → %s", path.Base(ev.Attr("ipa")))}
-		case "failed":
-			return helperUpdate{note: fmt.Sprintf("pack failed → %s", path.Base(ev.Attr("ipa")))}
-		}
-
-	case "done":
-		return helperUpdate{}
+	// Pure diagnostics that show up only in --verbose runs.
+	case "target.csflags",
+		"patch.scan_skipped", "patch.skipped", "patch.dyld_base_diff",
+		"dyld.settled", "dyld.fault_skip", "dyld.pac_stripped",
+		"staging.begin", "done":
+		upd.note = ""
 	}
 
-	// Catch-all: dump unknown events verbatim so nothing is silently lost.
-	parts := make([]string, 0, len(ev.Attrs)+1)
-	parts = append(parts, "event="+ev.Name)
+	// Catch-all for unknown event names: fall back to msg attr (already
+	// set above). If a future event lacks msg, render attrs verbatim so
+	// nothing is silently lost.
+	if upd.note == "" && upd.spin == "" && ev.Attr("msg") == "" {
+		parts := []string{"event=" + ev.Name}
+		for k, v := range ev.Attrs {
+			if k == "event" || k == "level" {
+				continue
+			}
 
-	for k, v := range ev.Attrs {
-		if k == "event" {
-			continue
+			parts = append(parts, fmt.Sprintf("%s=%q", k, v))
 		}
 
-		parts = append(parts, fmt.Sprintf("%s=%q", k, v))
+		upd.note = strings.Join(parts, " ")
 	}
 
-	return helperUpdate{note: strings.Join(parts, " ")}
+	return upd
 }
 
 func (p *helperProgress) Summary() string {

@@ -199,7 +199,7 @@ func doctorLocalChecks(cfg *config.Config, paths *config.Paths, version string) 
 		})
 	}
 
-	if cfg.Apple.Account != nil {
+	if cfg.Apple.PasswordToken != "" && cfg.Apple.DirectoryServicesIdentifier != "" {
 		checks = append(checks, doctorCheck{
 			Status: doctorPass,
 			Name:   "App Store session",

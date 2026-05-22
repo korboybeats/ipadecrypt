@@ -42,7 +42,7 @@ func downloadHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if cfg.Apple.Account == nil {
+	if cfg.Apple.PasswordToken == "" || cfg.Apple.DirectoryServicesIdentifier == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to sign in")
 		return
@@ -61,7 +61,7 @@ func downloadHandler(cmd *cobra.Command, args []string) {
 		live.Spin("resolving bundleId %s", target.bundleId)
 	}
 
-	app, err := lookupStoreTargetApp(as, cfg.Apple.Account, target)
+	app, err := lookupStoreTargetApp(as, cfg.Apple.Account(), target)
 	if err != nil {
 		live.Fail("lookup failed: %v", err)
 		return

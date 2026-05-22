@@ -51,9 +51,9 @@ func authHandler(cmd *cobra.Command, args []string) {
 	}
 
 	tui.Fields(
-		"Apple ID", account.Email,
+		"Apple ID", redact(account.Email),
 		"Name", account.Name,
-		"Storefront", fmt.Sprintf("%s (%s)", account.StoreFront, appStoreCountry),
+		"Storefront", fmt.Sprintf("%s (%s)", redact(account.StoreFront), redact(appStoreCountry)),
 	)
 
 	if err := cfg.Save(); err != nil {
@@ -121,6 +121,6 @@ func authenticateApple(cfg *config.Config, as *appstore.Client) (*appstore.Accou
 		return nil, errors.New("login: 3 two-factor attempts failed")
 	}
 
-	cfg.Apple.Account = account
+	cfg.Apple.SetAccount(account)
 	return account, nil
 }

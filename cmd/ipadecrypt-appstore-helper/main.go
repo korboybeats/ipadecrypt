@@ -173,18 +173,19 @@ func prepareAppStore(bundleID, trackID, email, password, authCode string) (*conf
 		emit("phase", "done", "name", "authenticated")
 	}
 
-	if cfg.Apple.Account == nil {
+	if cfg.Apple.PasswordToken == "" || cfg.Apple.DirectoryServicesIdentifier == "" {
 		emit("phase", "auth-required")
 		return nil, nil, appstore.App{}, errAuthRequired
 	}
 
+	account := cfg.Apple.Account()
 	var app appstore.App
 	if trackID != "" && trackID != "0" {
 		emit("phase", "step", "name", "lookup-track")
-		app, err = as.LookupByAppID(cfg.Apple.Account, trackID)
+		app, err = as.LookupByAppID(account, trackID)
 	} else {
 		emit("phase", "step", "name", "lookup-bundle")
-		app, err = as.LookupByBundleID(cfg.Apple.Account, bundleID)
+		app, err = as.LookupByBundleID(account, bundleID)
 	}
 	if err != nil {
 		return nil, nil, appstore.App{}, err
@@ -215,7 +216,7 @@ func runListVersions(bundleID, trackID, email, password, authCode string) error 
 			emit("phase", "auth", "name", "retry")
 		}
 	}, func() (appstore.ListVersionsOutput, error) {
-		return as.ListVersions(cfg.Apple.Account, app)
+		return as.ListVersions(cfg.Apple.Account(), app)
 	})
 	if err != nil {
 		return err
@@ -238,7 +239,7 @@ func runListVersions(bundleID, trackID, email, password, authCode string) error 
 	for i := 0; i < len(ids) && i < 3; i++ {
 		id := ids[i]
 		meta, err := appstoreworkflow.WithAuth(cfg, as, app, 3, nil, func() (appstore.VersionMetadata, error) {
-			return as.GetVersionMetadata(cfg.Apple.Account, app, id)
+			return as.GetVersionMetadata(cfg.Apple.Account(), app, id)
 		})
 		if err != nil {
 			emit("phase", "version-row",
@@ -288,7 +289,7 @@ func runVersionMetadata(bundleID, trackID, email, password, authCode, externalVe
 			emit("phase", "auth", "name", "retry")
 		}
 	}, func() (appstore.VersionMetadata, error) {
-		return as.GetVersionMetadata(cfg.Apple.Account, app, externalVersionID)
+		return as.GetVersionMetadata(cfg.Apple.Account(), app, externalVersionID)
 	})
 	if err != nil {
 		return err
@@ -337,7 +338,7 @@ func fetchEncrypted(cfg *config.Config, paths *config.Paths, as *appstore.Client
 			emit("phase", "auth", "name", "retry")
 		}
 	}, func() (appstore.DownloadTicket, error) {
-		return as.PrepareDownload(cfg.Apple.Account, app, externalVersionID)
+		return as.PrepareDownload(cfg.Apple.Account(), app, externalVersionID)
 	})
 	if err != nil {
 		return "", "", false, err
@@ -353,7 +354,7 @@ func fetchEncrypted(cfg *config.Config, paths *config.Paths, as *appstore.Client
 	}
 
 	emit("phase", "download", "version", version, "total", strconv.FormatInt(ticket.FileSize(), 10))
-	_, err = as.CompleteDownload(cfg.Apple.Account, ticket, encPath, func(cur, total int64) {
+	_, err = as.CompleteDownload(cfg.Apple.Account(), ticket, encPath, func(cur, total int64) {
 		emit("phase", "download-progress", "current", strconv.FormatInt(cur, 10), "total", strconv.FormatInt(total, 10))
 	})
 	if err != nil {
@@ -557,25 +558,25 @@ func boolString(v bool) string {
 func verifyCryptid(ipa string) error {
 	emit("event", "verify", "phase", "begin")
 
-	res, err := pipeline.VerifyCryptid(ipa)
+	res, err := pipeline.Verify(ipa, "", false)
 	if err != nil {
 		return err
 	}
 
 	emit("event", "verify", "phase", "scanned",
 		"scanned", strconv.Itoa(res.Scanned),
-		"encrypted", strconv.Itoa(len(res.Encrypted)),
+		"encrypted", strconv.Itoa(len(res.StillEncrypted)),
 		"skipped", strconv.Itoa(len(res.Skipped)))
 
-	for _, name := range res.Encrypted {
+	for _, name := range res.StillEncrypted {
 		emit("event", "verify", "phase", "encrypted", "name", name)
 	}
 	for _, name := range res.Skipped {
 		emit("event", "verify", "phase", "skipped", "name", name)
 	}
 
-	if len(res.Encrypted) > 0 {
-		return fmt.Errorf("%d binary(ies) still have cryptid != 0", len(res.Encrypted))
+	if len(res.StillEncrypted) > 0 {
+		return fmt.Errorf("%d binary(ies) still have cryptid != 0", len(res.StillEncrypted))
 	}
 
 	emit("event", "verify", "phase", "done")

@@ -34,8 +34,6 @@ This fork adds a handful of QoL features on top of upstream:
 ## Requirements
 
 ### On your computer
-- macOS, Linux, or Windows - anything that can SSH into the device
-- Go 1.25+ for building from source (prebuilt binaries are on the releases page)
 - Jailbroken iPhone reachable over the network
 
 ### On the jailbroken iPhone
@@ -45,7 +43,7 @@ All installable through Sileo:
 |---|---|
 | **OpenSSH** | SSH server - ipadecrypt drives the device over SSH |
 | **AppSync Unified** | Bypasses installd's signature check (add repo `https://lukezgd.github.io/repo`) |
-| **appinst** | Installs modified IPAs on the device |
+| **appinst** | Installs modified IPAs on the device (add repo `https://lukezgd.github.io/repo`) |
 | **zip** | Packages the decrypted IPA on-device |
 
 > Tested on iOS 16.7.11 with palera1n rootless and Dopamine on iPhone 8 Plus. iOS 14 through 17 on A10–A14 devices are expected to work.
@@ -121,7 +119,7 @@ A five-step interactive wizard:
 1. **App Store sign-in** - prompts for Apple ID; handles 2FA. Credentials stay local in `~/ipadecrypt/config.json`.
 2. **Device connect** - SSH host / user / password; probes iOS version + arch.
 3. **Prerequisites** - verifies AppSync, `appinst`, and `zip` are installed.
-4. **Helper install** - uploads a small embedded helper binary.
+4. **Helper install** - uploads helper binary and verifies whether it runs.
 5. **Auto-confirm tweak** - optionally installs `ipadecryptautoalert`, a SpringBoard tweak that auto-taps the older-version `Download` prompt during **Latest iOS-compatible** installs.
 
 ### Refresh Apple ID auth
@@ -198,6 +196,16 @@ ipadecrypt doctor
 Checks local config, SSH/sudo, jailbreak tooling, helper execution, output
 folders, output retention policy, auto-confirm state, and the installed
 jailbreak app/daemon.
+
+### List versions of an app
+
+```sh
+ipadecrypt versions <bundle-id|app-store-id|app-store-url>
+```
+
+## Known issues
+
+- Due to arm64e PPL guards on A12+, some apps such as Apple's are not expected to work.
 
 ## License
 

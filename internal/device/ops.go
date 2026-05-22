@@ -162,6 +162,20 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 	return nil
 }
 
+// Uninstall removes an installed app via `uicache -u <bundleID>`.
+func (c *Client) Uninstall(bundleID string) error {
+	out, errOut, code, err := c.RunSudo("uicache -u " + shellQuote(bundleID))
+	if err != nil {
+		return fmt.Errorf("uicache: %w", err)
+	}
+
+	if code != 0 {
+		return fmt.Errorf("uicache exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+
+	return nil
+}
+
 func (c *Client) EnsureHelper() (string, error) {
 	c.CleanupLegacyRemoteRoot()
 
@@ -391,27 +405,20 @@ for app in sorted(glob.glob("/var/containers/Bundle/Application/*/*.app")):
 	return apps, nil
 }
 
-// FindInstalledByBundleID returns the installed .app whose Info.plist
-// CFBundleIdentifier exactly matches bundleID. Substring grep is used as a
-// cheap prefilter; each candidate is then parsed to confirm the exact
-// identifier (binary plists may contain the bundle ID as a non-identifier
-// substring, e.g. URL handler/query schemes).
-func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
-	if strings.ContainsAny(bundleID, "'\"\\$`\n") {
-		return "", fmt.Errorf("unsupported characters in bundle-id %q", bundleID)
-	}
-
-	cmd := fmt.Sprintf(
-		"sh -c 'grep -laF \"%s\" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null'",
-		bundleID)
+// FindInstalledByBundleID returns the .app path and canonical CFBundleIdentifier
+// matching bundleID case-insensitively. grep is a prefilter; each hit is parsed
+// to confirm (binary plists embed bundle ids as URL-scheme substrings).
+func (c *Client) FindInstalledByBundleID(bundleID string) (string, string, error) {
+	cmd := "grep -laFi " + shellQuote(bundleID) +
+		" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null"
 
 	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if code != 0 && code != 1 {
-		return "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
+		return "", "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
 	}
 
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
@@ -427,12 +434,12 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
 			continue
 		}
 
-		if got == bundleID {
-			return bundlePath, nil
+		if strings.EqualFold(got, bundleID) {
+			return bundlePath, got, nil
 		}
 	}
 
-	return "", nil
+	return "", "", nil
 }
 
 func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
@@ -477,13 +484,27 @@ type EventHandler func(Event)
 // RunHelper spawns the on-device helper for a bundle. bundleID goes to the
 // SpringBoard SBS SPI (only accepted for the main app; empty string skips
 // the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
-func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string, onEvent EventHandler, humanFallback io.Writer) (string, string, int, error) {
-	cmd := fmt.Sprintf("%s -v %q %q %q", helperPath, bundleID, bundlePath, outIPA)
-	// @evt lines on stdout → splitter; LOG/ERR on stderr → humanFallback.
-	splitter := newEventSplitter(onEvent, humanFallback)
+// When skipAppex is true the helper passes --skip-appex, leaving extensions
+// encrypted in the output IPA.
+func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string,
+	verbose, skipAppex bool, onEvent EventHandler) (string, string, int, error) {
+	gflag := ""
+	if verbose {
+		gflag = "-v "
+	}
+
+	subflag := ""
+	if skipAppex {
+		subflag = "--skip-appex "
+	}
+
+	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q %q",
+		helperPath, gflag, subflag, bundleID, bundlePath, outIPA)
+
+	splitter := newEventSplitter(onEvent, io.Discard)
 	defer splitter.Close()
 
-	return c.RunSudoStream(cmd, splitter, humanFallback)
+	return c.RunSudoStream(cmd, splitter, io.Discard)
 }
 
 type eventSplitter struct {

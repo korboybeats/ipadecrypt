@@ -13,6 +13,7 @@ var Version = "dev"
 
 var (
 	rootDirOverride string
+	redactSensitive bool
 
 	authReset bool
 
@@ -22,18 +23,21 @@ var (
 	downloadOutput        string
 	downloadSelectVersion bool
 
-	decryptExtVerID     string
-	decryptOutput       string
-	decryptNoCleanup    bool
-	decryptKeepMetadata bool
-	decryptNoVerify     bool
-	decryptKeepWatch    bool
-	decryptExtraVerify  bool
-	decryptFromAppStore bool
-	decryptUseInstalled bool
-	decryptPatchDevType bool
-	decryptVerbose      bool
-	decryptKeep         string
+	decryptExtVerID       string
+	decryptOutput         string
+	decryptNoCleanup      bool
+	decryptKeepMetadata   bool
+	decryptNoVerify       bool
+	decryptKeepWatch      bool
+	decryptExtraVerify    bool
+	decryptFromAppStore   bool
+	decryptUseInstalled   bool
+	decryptPatchDevType   bool
+	decryptSkipAppex      bool
+	decryptForceUninstall bool
+	decryptNoUninstall    bool
+	decryptVerbose        bool
+	decryptKeep           string
 
 	versionsLogResponses bool
 
@@ -71,6 +75,8 @@ func main() {
 
 	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",
 		"config root directory path (default: ~/ipadecrypt)")
+	root.PersistentFlags().BoolVar(&redactSensitive, "redact", false,
+		"redact sensitive identifiers (Apple ID email, storefront) from output")
 
 	auth := &cobra.Command{
 		Use:     "auth",
@@ -110,12 +116,15 @@ func main() {
 	decrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA (default: ~/ipadecrypt/decrypted/<bundleID>_<version>.decrypted.ipa)")
 	decrypt.Flags().BoolVar(&decryptNoCleanup, "no-cleanup", false, "leave remote staging files in place")
 	decrypt.Flags().BoolVar(&decryptKeepMetadata, "keep-metadata", false, "keep iTunesMetadata.plist (Apple ID + purchase info) in the output IPA")
-	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory")
-	decrypt.Flags().BoolVar(&decryptExtraVerify, "extra-verify", false, "additionally byte-compare every output Mach-O against its source counterpart (skip the encrypted region + cryptid byte) to catch decrypt corruption")
+	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt Mach-O verification pass")
+	decrypt.Flags().BoolVar(&decryptExtraVerify, "extra-verify", false, "also byte-compare every output Mach-O against its source counterpart (outside the encrypted region) to catch decrypt corruption")
 	decrypt.Flags().BoolVarP(&decryptFromAppStore, "from-appstore", "f", false, "fetch from App Store and reinstall, ignoring what's installed on the device")
 	decrypt.Flags().BoolVar(&decryptUseInstalled, "use-installed", false, "decrypt the installed build directly; skip the App Store path even if a newer version exists")
 	decrypt.Flags().BoolVar(&decryptPatchDevType, "patch-device-type", false, "if the IPA's UIDeviceFamily excludes this device, append the device's family (iPadOS apps then run on iOS)")
+	decrypt.Flags().BoolVar(&decryptSkipAppex, "skip-appex", false, "skip Payload/<App>.app/PlugIns/*.appex; extensions stay encrypted in the output IPA")
+	decrypt.Flags().BoolVar(&decryptForceUninstall, "force-uninstall", false, "always uninstall the app after decryption, even if it was already installed when we started")
+	decrypt.Flags().BoolVar(&decryptNoUninstall, "no-uninstall", false, "never uninstall the app after decryption (default: uninstall only if we installed or replaced it)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")
 	decrypt.Flags().StringVar(&decryptKeep, "keep", "", "where to keep the decrypted IPA for this run: desktop, device, both")
 
@@ -151,6 +160,14 @@ func main() {
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func redact(s string) string {
+	if !redactSensitive || s == "" {
+		return s
+	}
+
+	return "######"
 }
 
 func loadConfigOrDefault(rootDir string) (*config.Config, *config.Paths, error) {

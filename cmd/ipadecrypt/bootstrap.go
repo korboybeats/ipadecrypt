@@ -39,24 +39,6 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	tui.Step(1, 5, "Sign in to the App Store")
 	tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
 
-	if cfg.Apple.Email == "" {
-		s, err := tui.Prompt("Apple ID email")
-		if err != nil {
-			return
-		}
-
-		cfg.Apple.Email = strings.TrimSpace(s)
-	}
-
-	if cfg.Apple.Password == "" {
-		s, err := tui.PromptPassword("Apple ID password")
-		if err != nil {
-			return
-		}
-
-		cfg.Apple.Password = s
-	}
-
 	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 	if err != nil {
 		tui.Err("appstore client: %v", err)
@@ -76,9 +58,9 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	}
 
 	tui.Fields(
-		"Apple ID", account.Email,
+		"Apple ID", redact(account.Email),
 		"Name", account.Name,
-		"Storefront", fmt.Sprintf("%s (%s)", account.StoreFront, appStoreCountry),
+		"Storefront", fmt.Sprintf("%s (%s)", redact(account.StoreFront), redact(appStoreCountry)),
 	)
 
 	if err := cfg.Save(); err != nil {

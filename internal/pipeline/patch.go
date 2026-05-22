@@ -591,6 +591,124 @@ func StripWatch(ipaPath string) (int, error) {
 	return rewriteIPA(ipaPath, isWatchPath)
 }
 
+// RestoreOriginalPlistValues rewrites the main Info.plist of an already-built
+// IPA, putting MinimumOSVersion and UIDeviceFamily back to the values captured
+// before PatchForInstall mutated them.
+func RestoreOriginalPlistValues(ipaPath, originalMinOS string, originalDeviceFamily []int) error {
+	if originalMinOS == "" && len(originalDeviceFamily) == 0 {
+		return nil
+	}
+
+	r, err := zip.OpenReader(ipaPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", ipaPath, err)
+	}
+	defer r.Close()
+
+	var infoFile *zip.File
+	var newInfo []byte
+	for _, f := range r.File {
+		if !isMainAppInfoPlist(f.Name) {
+			continue
+		}
+
+		infoFile = f
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+
+		var m map[string]any
+		format, err := plist.Unmarshal(data, &m)
+		if err != nil {
+			return nil
+		}
+
+		dirty := false
+		if originalMinOS != "" {
+			if cur, _ := m["MinimumOSVersion"].(string); cur != originalMinOS {
+				m["MinimumOSVersion"] = originalMinOS
+				dirty = true
+			}
+		}
+		if len(originalDeviceFamily) > 0 {
+			cur := readDeviceFamily(m["UIDeviceFamily"])
+			if !intSliceEqual(cur, originalDeviceFamily) {
+				m["UIDeviceFamily"] = toAnySlice(originalDeviceFamily)
+				dirty = true
+			}
+		}
+		if !dirty {
+			return nil
+		}
+
+		newInfo, err = plist.Marshal(m, format)
+		if err != nil {
+			return fmt.Errorf("marshal plist: %w", err)
+		}
+		break
+	}
+
+	if infoFile == nil || newInfo == nil {
+		return nil
+	}
+
+	tmpPath := ipaPath + ".tmp"
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", tmpPath, err)
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			out.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	w := zip.NewWriter(out)
+	for _, f := range r.File {
+		if f == infoFile {
+			if err := writeBytes(f, w, newInfo); err != nil {
+				return fmt.Errorf("rewrite %s: %w", f.Name, err)
+			}
+			continue
+		}
+		if err := copyEntry(f, w); err != nil {
+			return fmt.Errorf("copy %s: %w", f.Name, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close zip: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, ipaPath); err != nil {
+		return fmt.Errorf("rename restore plist: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func intSliceEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func isWatchPath(name string) bool {
 	parts := strings.Split(name, "/")
 	if len(parts) < 3 {

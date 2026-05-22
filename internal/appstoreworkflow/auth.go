@@ -24,7 +24,7 @@ func LoginAndSave(cfg *config.Config, as *appstore.Client, email, password, auth
 
 	cfg.Apple.Email = email
 	cfg.Apple.Password = password
-	cfg.Apple.Account = acc
+	cfg.Apple.SetAccount(acc)
 
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("save config: %w", err)
@@ -46,12 +46,12 @@ func Reauth(cfg *config.Config, as *appstore.Client) error {
 }
 
 func AcquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) error {
-	err := as.Purchase(cfg.Apple.Account, app)
+	err := as.Purchase(cfg.Apple.Account(), app)
 	if errors.Is(err, appstore.ErrPasswordTokenExpired) {
 		if err := Reauth(cfg, as); err != nil {
 			return err
 		}
-		err = as.Purchase(cfg.Apple.Account, app)
+		err = as.Purchase(cfg.Apple.Account(), app)
 	}
 
 	if err != nil && !errors.Is(err, appstore.ErrLicenseAlreadyExists) {

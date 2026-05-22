@@ -20,11 +20,8 @@ IOS_SDK_VERSION=$(basename "$IOS_SDK" | sed 's/iPhoneOS//; s/\.sdk//')
   "$GO" build -trimpath -ldflags="-s -w" -o app/Resources/appstore-helper.arm64 ./cmd/ipadecrypt-appstore-helper )
 ldid -Sappstore-helper.entitlements.plist Resources/appstore-helper.arm64
 chmod +x Resources/appstore-helper.arm64
-if [ -f ../helper/dist/ipadecrypt-helper-arm64 ]; then
-  cp ../helper/dist/ipadecrypt-helper-arm64 Resources/helper.arm64
-  ldid -S../helper/entitlements.plist Resources/helper.arm64
-  chmod +x Resources/helper.arm64
-fi
+ldid -S../helper/entitlements.plist Resources/helper.arm64
+chmod +x Resources/helper.arm64
 
 mkdir -p layout/usr/libexec
 ( cd .. && \
