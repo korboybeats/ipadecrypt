@@ -716,15 +716,15 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 			live.Fail("verify failed: %s", verifyFailureSummary(res))
 
 			for _, n := range res.StillEncrypted {
-				tui.Info("  %s  still encrypted (cryptid != 0)", n)
+				tui.Info("  %s still encrypted (cryptid != 0)", n)
 			}
 
 			for _, n := range res.AllZeroCrypt {
-				tui.Info("  %s  crypt region all zeros", n)
+				tui.Info("  %s crypt region all zeros", n)
 			}
 
 			for _, m := range res.Mismatches {
-				tui.Info("  %s  %s", m.Name, m.Reason)
+				tui.Info("  %s %s", m.Name, m.Reason)
 			}
 
 			return
