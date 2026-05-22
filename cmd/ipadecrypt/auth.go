@@ -109,8 +109,8 @@ func authenticateApple(cfg *config.Config, as *appstore.Client) (*appstore.Accou
 			authCode = strings.TrimSpace(code)
 
 		case err != nil:
-			live.Fail("login failed: %v", err)
-			return nil, err
+			live.Stop()
+			return nil, fmt.Errorf("login failed: %w", err)
 
 		default:
 			live.OK("authenticated")

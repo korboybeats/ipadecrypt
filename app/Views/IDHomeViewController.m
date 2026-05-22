@@ -560,6 +560,7 @@ static NSString *IDPrettyImageName(NSString *name) {
     __block NSString *installedPath = nil;
     __block NSString *failureReason = nil;
     __block NSString *failureMessage = nil;
+    __block NSString *lastHelperStderr = nil;
     __block NSInteger lastDownloadPercent = -1;
 
     [IDAppStoreHelperRunner runWithBundleID:bundleID
@@ -631,6 +632,7 @@ static NSString *IDPrettyImageName(NSString *name) {
         } else if ([phase isEqualToString:@"stderr"]) {
             NSString *line = ev[@"line"] ?: @"";
             if (!IDIsExpectedAuthStderr(line)) {
+                lastHelperStderr = line;
                 [vc appendStatus:[NSString stringWithFormat:@"  %@", line]];
             }
         }
@@ -657,6 +659,11 @@ static NSString *IDPrettyImageName(NSString *name) {
         }
 
         if (err) {
+            if (lastHelperStderr.length && [err.localizedDescription containsString:lastHelperStderr]) {
+                err = [NSError errorWithDomain:err.domain code:err.code
+                                      userInfo:@{NSLocalizedDescriptionKey:
+                                          [NSString stringWithFormat:@"appstore helper exit %d", code]}];
+            }
             [vc markCompleteWithOutputIPA:@"" error:err];
             return;
         }

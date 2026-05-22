@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"howett.net/plist"
 )
@@ -22,6 +23,7 @@ var (
 	documentXMLPattern = regexp.MustCompile(`(?is)<Document\b[^>]*>(.*)</Document>`)
 	plistXMLPattern    = regexp.MustCompile(`(?is)<plist\b[^>]*>.*?</plist>`)
 	dictXMLPattern     = regexp.MustCompile(`(?is)<dict\b[^>]*>.*</dict>`)
+	openStepKVPattern  = regexp.MustCompile(`(?s)^[A-Za-z0-9_.$-]+\s*=`)
 )
 
 // send makes an HTTP request, persists cookies, and decodes the response into
@@ -65,6 +67,9 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 	if err != nil {
 		return nil, err
 	}
+	if res.StatusCode == http.StatusTooManyRequests {
+		return nil, fmt.Errorf("Apple auth is rate-limited (HTTP 429): %s", responsePreview(data))
+	}
 
 	switch format {
 	case formatJSON:
@@ -73,7 +78,8 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 		}
 	case formatXML:
 		if _, err := plist.Unmarshal(normalizePlist(data), out); err != nil {
-			return nil, fmt.Errorf("decode plist: %w", err)
+			return nil, fmt.Errorf("decode plist: %w; response status=%d content-type=%q body=%q",
+				err, res.StatusCode, res.Header.Get("Content-Type"), responsePreview(data))
 		}
 	}
 
@@ -91,8 +97,9 @@ func plistBody(content map[string]any) ([]byte, error) {
 
 // normalizePlist unwraps Apple's various plist embeddings. Responses sometimes
 // come wrapped in <Document>…</Document>, or are a bare <dict>…</dict> without
-// the <plist> envelope, or are a bag of <key>/<value> pairs without any outer
-// element at all.
+// the <plist> envelope, are a bag of <key>/<value> pairs without any outer
+// element at all, or are old-style text plist key/value pairs without the
+// dictionary braces.
 func normalizePlist(body []byte) []byte {
 	n := bytes.TrimSpace(body)
 	if len(n) == 0 {
@@ -117,5 +124,55 @@ func normalizePlist(body []byte) []byte {
 		return []byte("<dict>" + string(n) + "</dict>")
 	}
 
+	if openStepKVPattern.Match(n) && bytes.Contains(n, []byte(";")) {
+		return []byte("{\n" + string(n) + "\n}")
+	}
+
 	return n
+}
+
+func responsePreview(body []byte) string {
+	const limit = 240
+
+	s := strings.TrimSpace(string(body))
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\r', '\n', '\t':
+			return ' '
+		default:
+			return r
+		}
+	}, s)
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	s = redactResponsePreview(s)
+	if len(s) > limit {
+		s = s[:limit] + "..."
+	}
+	return s
+}
+
+func redactResponsePreview(s string) string {
+	for _, key := range []string{
+		"passwordToken",
+		"dsPersonId",
+		"m-allowed",
+		"mMeToken",
+		"accountInfo",
+	} {
+		s = redactAfterKey(s, key)
+	}
+	return s
+}
+
+func redactAfterKey(s, key string) string {
+	if i := strings.Index(s, key); i >= 0 {
+		cut := strings.Index(s[i:], ";")
+		if cut < 0 {
+			return s[:i+len(key)] + "=<redacted>"
+		}
+		return s[:i+len(key)] + "=<redacted>" + s[i+cut:]
+	}
+	return s
 }
