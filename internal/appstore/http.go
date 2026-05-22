@@ -68,7 +68,7 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 		return nil, err
 	}
 	if res.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("Apple auth is rate-limited (HTTP 429): %s", responsePreview(data))
+		return nil, fmt.Errorf("apple auth is rate-limited (HTTP 429): %s", responsePreview(data))
 	}
 
 	switch format {

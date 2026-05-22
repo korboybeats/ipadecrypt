@@ -46,7 +46,7 @@ func TestSendReturnsClearRateLimitError(t *testing.T) {
 	if err == nil {
 		t.Fatal("send returned nil error")
 	}
-	if got := err.Error(); !strings.Contains(got, "Apple auth is rate-limited (HTTP 429)") {
+	if got := err.Error(); !strings.Contains(got, "apple auth is rate-limited (HTTP 429)") {
 		t.Fatalf("error = %q, want rate-limit message", got)
 	}
 }
