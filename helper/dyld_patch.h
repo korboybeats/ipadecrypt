@@ -24,18 +24,6 @@ int dyld_patch_apply(task_t task,
                      mach_vm_address_t target_libdyld_fb,
                      mach_vm_address_t helper_libdyld_fb);
 
-// Revert patches whose category matches `cat_mask`. Bits:
-//   0x1 = force_weak (resolveSymbol CBZ→NOP)
-//   0x2 = kill_svc   (movz x16,#N; svc → NOP NOP)
-//   0x4 = skip_halt  (bl halt; brk #1 → b +8) — main land-mine source
-//   0x8 = abort sym  (abort/abort_with_payload entry → ret)
-//
-// Typical call after dyld.settled: revert skip_halt + abort_sym to
-// stop those land mines from poisoning subsequent dlopen calls in the
-// inject phase. Keep force_weak + kill_svc so dyld bind doesn't die
-// on the genuinely-missing iOS17-on-iOS16 symbols.
-int dyld_patch_revert(task_t task, int cat_mask);
-
 // Locate every static-VA os_unfair_lock_t that dyld's lock primitives
 // (os_unfair_lock_lock, _trylock, _unlock, recursive variants) are
 // invoked on. Scans dyld __TEXT for functions matching the lock body

@@ -222,19 +222,10 @@ static void reset_api_locks(task_t task, const mach_vm_address_t *locks,
                             int count) {
     if (!locks || count <= 0) return;
     uint32_t zero = 0;
-    int reset = 0;
     for (int i = 0; i < count; i++) {
         if (!locks[i]) continue;
-        if (mach_vm_write(task, locks[i],
-                (vm_offset_t)(uintptr_t)&zero, sizeof(zero)) == KERN_SUCCESS) {
-            reset++;
-        }
-    }
-    if (reset > 0) {
-        attrs_t a; attrs_init(&a);
-        attrs_int(&a, "n", reset);
-        emit(LOG_DEBUG, "inject.lock_reset", &a,
-             "reset %d dyld API lock(s)", reset);
+        mach_vm_write(task, locks[i],
+            (vm_offset_t)(uintptr_t)&zero, sizeof(zero));
     }
 }
 

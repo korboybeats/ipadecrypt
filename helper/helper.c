@@ -47,9 +47,6 @@ static int run_decrypt(const decrypt_args_t *a) {
         return 1;
     }
 
-    // Single spawn. The threadpool inside inject_missing_frameworks
-    // creates fresh pthreads in target post-dyld-settled, so we don't
-    // depend on re-using wedged worker threads — one spawn is enough.
     if (a->bundle_id && a->bundle_id[0]) {
         decrypt_bundle(a->bundle_src, bundle_dst, a->bundle_id);
     }

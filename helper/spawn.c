@@ -121,13 +121,14 @@ static int sbs_launch(const char *bundle_id, const char *exec_path,
     return 0;
 }
 
-// ----- PT_TRACE_ME spawn (appex only) ---------------------------------------
+// ----- PT_TRACE_ME spawn ----------------------------------------------------
 
-// Used exclusively for .appex bundles, which SBS won't launch by id.
-// The caller (decrypt_bundle) vm_reads the main exec at the PT_ATTACHEXC
-// stop and terminates without ever resuming, so we don't need the
-// libjailbreak CS_DEBUGGED dance — the target never runs a single
-// instruction past exec.
+// Used for .appex bundles (SBS won't launch them by id) and as a
+// fallback when SBS rejects a main app (e.g. cross-SDK reject on
+// iOS 16 for iOS 18-SDK binaries). The caller (decrypt_bundle) vm_reads
+// the main exec at the PT_ATTACHEXC stop and terminates without ever
+// resuming, so we don't need to mark the target debugged — it never
+// runs a single instruction past exec.
 static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
     pid_t pid = fork();
     if (pid < 0) { er("fork: %s", strerror(errno)); return -1; }
@@ -291,13 +292,6 @@ void spawn_run_and_suspend(task_t task, mach_port_t exc_port, int ms) {
         emit(LOG_DEBUG, "dyld.resuming", &a, "resuming target (wait ≤%dms)", ms);
     }
     while (task_resume(task) == KERN_SUCCESS) { /* drain */ }
-
-    if (exc_port == MACH_PORT_NULL) {
-        usleep(ms * 1000);
-        task_suspend(task);
-        emit(LOG_DEBUG, "dyld.settled", NULL, NULL);
-        return;
-    }
 
     struct { mach_msg_header_t hdr; char body[2048]; } msg;
     int waited = 0;

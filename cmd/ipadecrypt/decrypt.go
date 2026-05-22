@@ -398,7 +398,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	//
 
 	live = tui.NewLive()
-	live.Spin("patching Info.plist for MinimumOSVersion %s", probe.IOSVersion)
+	live.Spin("patching Info.plist %s", probe.IOSVersion)
 
 	patch, err := patchSourceForDevice(encPath, probe.IOSVersion, probe.DeviceFamily, decryptPatchDevType)
 	if err != nil {
@@ -410,7 +410,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		live.Fail("patch MinimumOSVersion failed: %v", err)
+		live.Fail("patch Info.plist failed: %v", err)
 
 		return
 	}
@@ -422,9 +422,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	}()
 
 	if patch.changed {
-		live.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
-	} else {
-		live.OK("no MinimumOSVersion change needed")
+		tui.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
 	}
 
 	if patch.deviceFamilyExpanded {
@@ -434,6 +432,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	if patch.watchStripped > 0 {
 		tui.OK("stripped %d Watch/ entries", patch.watchStripped)
 	}
+
+	live.OK("patched Info.plist")
 
 	live = tui.NewLive()
 	live.Spin("preparing install plan")

@@ -9,76 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Track every patch we apply so we can revert after dyld.settled.
-// skip_halt patches in particular act as land mines for the inject
-// phase: subsequent dlopen calls hit a halt site, fall through into
-// next-function prologue, and corrupt state (locks held, registers
-// stale). Reverting after settle lets dlopen behave naturally.
-typedef enum {
-    PATCH_FORCE_WEAK = 1,
-    PATCH_KILL_SVC   = 2,
-    PATCH_SKIP_HALT  = 4,
-    PATCH_ABORT_SYM  = 8,
-} patch_cat_t;
-
-typedef struct {
-    mach_vm_address_t addr;
-    uint8_t           orig[8];
-    size_t            len;
-    patch_cat_t       cat;
-} dyld_patch_record_t;
-
-#define DYLD_PATCH_MAX 64
-static dyld_patch_record_t g_patches[DYLD_PATCH_MAX];
-static int                 g_patch_count = 0;
-
-// Like target_patch_bytes but captures original bytes for later revert.
-static int patch_and_track(task_t task, mach_vm_address_t addr,
-                           const void *bytes, size_t len, const char *tag,
-                           patch_cat_t cat) {
-    if (g_patch_count < DYLD_PATCH_MAX &&
-        len <= sizeof(g_patches[0].orig)) {
-        mach_vm_size_t got = 0;
-        kern_return_t kr = mach_vm_read_overwrite(task, addr, len,
-            (mach_vm_address_t)(uintptr_t)g_patches[g_patch_count].orig,
-            &got);
-        if (kr == KERN_SUCCESS && got == len) {
-            g_patches[g_patch_count].addr = addr;
-            g_patches[g_patch_count].len  = len;
-            g_patches[g_patch_count].cat  = cat;
-            int rc = target_patch_bytes(task, addr, bytes, len, tag);
-            if (rc == 0) g_patch_count++;
-            return rc;
-        }
-    }
-    return target_patch_bytes(task, addr, bytes, len, tag);
-}
-
-int dyld_patch_revert(task_t task, int cat_mask) {
-    int reverted = 0;
-    int kept_count = 0;
-    for (int i = 0; i < g_patch_count; i++) {
-        if (g_patches[i].cat & cat_mask) {
-            if (target_patch_bytes(task, g_patches[i].addr,
-                    g_patches[i].orig, g_patches[i].len, "revert") == 0)
-                reverted++;
-        } else {
-            // Keep this patch — compact toward front.
-            if (kept_count != i) g_patches[kept_count] = g_patches[i];
-            kept_count++;
-        }
-    }
-    g_patch_count = kept_count;
-    {
-        attrs_t a; attrs_init(&a);
-        attrs_int(&a, "n", reverted);
-        attrs_int(&a, "mask", cat_mask);
-        emit(LOG_INFO, "patch.reverted", &a,
-             "reverted %d dyld patches", reverted);
-    }
-    return reverted;
-}
-
 // Scan dyld __TEXT for:
 //   - resolveSymbol's CBZ-Wn → NOP (forces)
 //   - `movz x16,#N; svc #0x80` process-killers → NOP NOP (kills)
@@ -257,8 +187,8 @@ static int scan_dyld_text(task_t task, mach_vm_address_t dyld_base,
         if ((cbz & 0xff000000u) != 0x34000000u) continue;
         char tag[64];
         snprintf(tag, sizeof(tag), "force_weak_%d", forces);
-        if (patch_and_track(task, dyld_base + text_off + i - 8, &nop_op,
-                sizeof(nop_op), tag, PATCH_FORCE_WEAK) == 0) forces++;
+        if (target_patch_bytes(task, dyld_base + text_off + i - 8, &nop_op,
+                sizeof(nop_op), tag) == 0) forces++;
     }
 
     // Pass 2: NOP `movz x16,#N; svc #0x80` for *process-killing* syscalls
@@ -295,8 +225,8 @@ static int scan_dyld_text(task_t task, mach_vm_address_t dyld_base,
             static const uint32_t nop_pair[2] = { 0xd503201fu, 0xd503201fu };
             char tag[64];
             snprintf(tag, sizeof(tag), "kill_svc_%u_%d", imm, kills);
-            if (patch_and_track(task, dyld_base + text_off + i - 4, nop_pair,
-                    sizeof(nop_pair), tag, PATCH_KILL_SVC) == 0) kills++;
+            if (target_patch_bytes(task, dyld_base + text_off + i - 4, nop_pair,
+                    sizeof(nop_pair), tag) == 0) kills++;
         }
     }
 
@@ -381,10 +311,10 @@ static int scan_dyld_text(task_t task, mach_vm_address_t dyld_base,
                     if (cands[k].tgt != halt_addr) continue;
                     char tag[64];
                     snprintf(tag, sizeof(tag), "skip_halt_%d", skips);
-                    if (patch_and_track(task,
+                    if (target_patch_bytes(task,
                             dyld_base + text_off + cands[k].i,
                             &b_plus_8, sizeof(b_plus_8),
-                            tag, PATCH_SKIP_HALT) == 0) skips++;
+                            tag) == 0) skips++;
                 }
             }
             free(cands);
@@ -427,8 +357,8 @@ int dyld_patch_apply(task_t task,
             mach_vm_address_t a = target_slide_func(task, imgs, img_count,
                 helper_fn, target_libdyld_fb, helper_libdyld_fb);
             if (a && n_abort < 7) abort_addrs[n_abort++] = a;
-            if (patch_and_track(task, a, &ret_op, sizeof(ret_op),
-                    names[i], PATCH_ABORT_SYM) == 0)
+            if (target_patch_bytes(task, a, &ret_op, sizeof(ret_op),
+                    names[i]) == 0)
                 hits++;
         }
     }

@@ -65,12 +65,11 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     }
 
     // 1) Dump the main exec from the freshly-suspended target.
-    //    SBS-launched main apps have dyld already past the main exec
-    //    mapping, so vm_read of the encrypted region succeeds. Appex
-    //    .appex stubs are at PT_ATTACHEXC stop with only the first
-    //    page faulted in, but their main exec is small enough that
-    //    dump_image's page-fault traversal reaches everything before
-    //    AMFI catches up.
+    //    SBS-launched targets have dyld already past the main exec
+    //    mapping, so vm_read of the encrypted region succeeds. ptrace-
+    //    spawned targets (appex, or SBS-rejected main fallback) are at
+    //    PT_ATTACHEXC stop; dump_image's page-fault traversal usually
+    //    reaches everything before AMFI catches up.
     runtime_image_t bundle_rt;
     int have_bundle_rt = 0;
     int main_dumped = 0;
@@ -119,7 +118,7 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
         attrs_str(&a, "src", bundle_src);
         attrs_int(&a, "extras", 0);
         emit(LOG_INFO, "bundle.done", &a,
-             "bundle done: 0 framework(s) decrypted (appex)");
+             "bundle done: main only (ptrace, no framework enumeration)");
         return 0;
     }
 
@@ -148,8 +147,8 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     // so healthy targets are the only thing that pays the full timeout.
     spawn_run_and_suspend(task, exc, 3000);
 
-    // Retry the main-exec dump if dyld page-fault timing missed pages
-    // on the first pass. By now dyld has the whole image mapped.
+    // Retry the main-exec dump if the first attempt hit unfaulted
+    // pages. By now dyld has the whole image mapped.
     if (!main_dumped && have_bundle_rt && main_base != 0) {
         selected_slice_t sel;
         if (select_runtime_slice(main_src, &bundle_rt, &sel) == 1 &&
