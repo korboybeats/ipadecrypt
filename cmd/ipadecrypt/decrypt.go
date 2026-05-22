@@ -261,13 +261,15 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live = tui.NewLive()
 		live.Spin("checking if %s is installed", target.bundleId)
 
-		installedPath, err := dev.FindInstalledByBundleID(target.bundleId)
+		installedPath, canonicalID, err := dev.FindInstalledByBundleID(target.bundleId)
 		if err != nil {
 			live.Fail("scan failed: %v", err)
 			return
 		}
 
 		if installedPath != "" {
+			target.bundleId = canonicalID
+
 			version, err := dev.InstalledVersion(installedPath)
 			if err != nil || version == "" {
 				version = "unknown"
@@ -862,7 +864,7 @@ func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installP
 		return installPlan{}, errAppinstNotFound
 	}
 
-	bundlePath, err := dev.FindInstalledByBundleID(bundleID)
+	bundlePath, _, err := dev.FindInstalledByBundleID(bundleID)
 	if err != nil {
 		return installPlan{}, fmt.Errorf("scan installed: %w", err)
 	}
@@ -951,7 +953,7 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 
 	notify(installRescan)
 
-	bundlePath, err := dev.FindInstalledByBundleID(plan.bundleID)
+	bundlePath, _, err := dev.FindInstalledByBundleID(plan.bundleID)
 	if err != nil {
 		return installResult{}, fmt.Errorf("post-install scan: %w", err)
 	}

@@ -254,22 +254,20 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 	return "", errors.New("installed version not found")
 }
 
-// FindInstalledByBundleID returns the installed .app whose Info.plist
-// CFBundleIdentifier exactly matches bundleID. Substring grep is used as a
-// cheap prefilter; each candidate is then parsed to confirm the exact
-// identifier (binary plists may contain the bundle ID as a non-identifier
-// substring, e.g. URL handler/query schemes).
-func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
-	cmd := "grep -laF " + shellQuote(bundleID) +
+// FindInstalledByBundleID returns the .app path and canonical CFBundleIdentifier
+// matching bundleID case-insensitively. grep is a prefilter; each hit is parsed
+// to confirm (binary plists embed bundle ids as URL-scheme substrings).
+func (c *Client) FindInstalledByBundleID(bundleID string) (string, string, error) {
+	cmd := "grep -laFi " + shellQuote(bundleID) +
 		" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null"
 
 	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if code != 0 && code != 1 {
-		return "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
+		return "", "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
 	}
 
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
@@ -285,12 +283,12 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
 			continue
 		}
 
-		if got == bundleID {
-			return bundlePath, nil
+		if strings.EqualFold(got, bundleID) {
+			return bundlePath, got, nil
 		}
 	}
 
-	return "", nil
+	return "", "", nil
 }
 
 func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
