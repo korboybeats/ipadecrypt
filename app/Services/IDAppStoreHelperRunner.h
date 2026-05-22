@@ -36,6 +36,12 @@
                                   onEvent:(void (^)(NSDictionary *event))eventBlock
                                completion:(void (^)(int exitCode, NSError *err))completion;
 
++ (void)refreshAuthWithEmail:(NSString *)email
+                    password:(NSString *)password
+                    authCode:(NSString *)authCode
+                     onEvent:(void (^)(NSDictionary *event))eventBlock
+                  completion:(void (^)(int exitCode, NSError *err))completion;
+
 + (void)verifyIPA:(NSString *)ipaPath
           onEvent:(void (^)(NSDictionary *event))eventBlock
        completion:(void (^)(int exitCode, NSError *err))completion;

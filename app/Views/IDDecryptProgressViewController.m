@@ -75,6 +75,28 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
     }
 }
 
+- (void)markCompleteWithMessage:(NSString *)message error:(NSError *)err {
+    [self.spinner stopAnimating];
+    UIImage *copyImage = [UIImage systemImageNamed:@"doc.on.doc"];
+    self.logsItem = [[UIBarButtonItem alloc] initWithImage:copyImage
+                                                     style:UIBarButtonItemStylePlain
+                                                    target:self
+                                                    action:@selector(copyLogs)];
+    self.logsItem.accessibilityLabel = @"Copy logs";
+
+    UIBarButtonItem *doneItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                      target:self
+                                                      action:@selector(done)];
+    self.navigationItem.rightBarButtonItems = @[doneItem, self.logsItem];
+
+    if (err) {
+        [self appendStatus:[NSString stringWithFormat:@"\nFAILED: %@", err.localizedDescription]];
+    } else if (message.length) {
+        [self appendStatus:[NSString stringWithFormat:@"\n%@", message]];
+    }
+}
+
 - (void)done {
     [self.navigationController popViewControllerAnimated:YES];
 }

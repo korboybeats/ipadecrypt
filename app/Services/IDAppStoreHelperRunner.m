@@ -271,6 +271,25 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     [self spawnWithArguments:args onEvent:eventBlock completion:completion];
 }
 
++ (void)refreshAuthWithEmail:(NSString *)email
+                    password:(NSString *)password
+                    authCode:(NSString *)authCode
+                     onEvent:(void (^)(NSDictionary *))eventBlock
+                  completion:(void (^)(int, NSError *))completion {
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObject:@"--auth-only"];
+    if (email.length) {
+        [args addObjectsFromArray:@[@"--email", email]];
+    }
+    if (password.length) {
+        [args addObjectsFromArray:@[@"--password", password]];
+    }
+    if (authCode.length) {
+        [args addObjectsFromArray:@[@"--auth-code", authCode]];
+    }
+
+    [self spawnWithArguments:args onEvent:eventBlock completion:completion];
+}
+
 + (void)verifyIPA:(NSString *)ipaPath
           onEvent:(void (^)(NSDictionary *))eventBlock
        completion:(void (^)(int, NSError *))completion {

@@ -37,6 +37,7 @@ func main() {
 	var verifyIPA string
 	var listVersions bool
 	var versionMetadata bool
+	var authOnly bool
 	var externalVersionID string
 	var decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA string
 	flag.StringVar(&bundleID, "bundle-id", "", "bundle identifier")
@@ -47,6 +48,7 @@ func main() {
 	flag.StringVar(&verifyIPA, "verify-ipa", "", "verify cryptid in IPA and exit")
 	flag.BoolVar(&listVersions, "list-versions", false, "list App Store external version IDs")
 	flag.BoolVar(&versionMetadata, "version-metadata", false, "fetch metadata for one App Store external version ID")
+	flag.BoolVar(&authOnly, "auth-only", false, "refresh App Store authentication and exit")
 	flag.StringVar(&externalVersionID, "external-version-id", "", "pin to a specific historical App Store version")
 	flag.StringVar(&decryptHelper, "decrypt-helper", "", "run decrypt helper and relay events")
 	flag.StringVar(&decryptBundleID, "decrypt-bundle-id", "", "bundle identifier for decrypt helper")
@@ -64,6 +66,22 @@ func main() {
 	if verifyIPA != "" {
 		if err := verifyCryptid(verifyIPA); err != nil {
 			fail(30, "verify-failed", err.Error())
+		}
+		return
+	}
+
+	if authOnly {
+		if err := runAuthOnly(email, password, authCode); err != nil {
+			code := 1
+			reason := "error"
+			if errors.Is(err, appstore.ErrAuthCodeRequired) {
+				code = 21
+				reason = "auth-code-required"
+			} else if errors.Is(err, errAuthRequired) {
+				code = 20
+				reason = "auth-required"
+			}
+			fail(code, reason, err.Error())
 		}
 		return
 	}
@@ -92,6 +110,41 @@ func main() {
 		}
 		fail(code, reason, err.Error())
 	}
+}
+
+func runAuthOnly(email, password, authCode string) error {
+	emit("phase", "step", "name", "loading-config")
+	defer chownConfig()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	as, err := appstore.New(filepath.Join(rootDir, "cookies"))
+	if err != nil {
+		return fmt.Errorf("appstore client: %w", err)
+	}
+
+	if email == "" && password == "" && authCode == "" {
+		if cfg.Apple.PasswordToken != "" && cfg.Apple.DirectoryServicesIdentifier != "" {
+			emit("phase", "done", "name", "authenticated")
+			return nil
+		}
+		emit("phase", "auth-required")
+		return errAuthRequired
+	}
+
+	if email == "" || password == "" {
+		return errors.New("missing Apple ID email or password")
+	}
+
+	emit("phase", "step", "name", "authenticating")
+	if err := appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode); err != nil {
+		return err
+	}
+	emit("phase", "done", "name", "authenticated")
+	return nil
 }
 
 func run(bundleID, trackID, email, password, authCode, externalVersionID string) error {

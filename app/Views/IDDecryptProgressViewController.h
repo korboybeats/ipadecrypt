@@ -8,4 +8,7 @@
 
 // Mark complete; show a dismiss button. outIPA is shown for sharing.
 - (void)markCompleteWithOutputIPA:(NSString *)outIPA error:(NSError *)err;
+
+// Mark complete without an output IPA/share action.
+- (void)markCompleteWithMessage:(NSString *)message error:(NSError *)err;
 @end

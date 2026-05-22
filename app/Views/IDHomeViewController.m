@@ -95,6 +95,8 @@ static NSString *IDPrettyImageName(NSString *name) {
 @property (nonatomic) NSInteger decryptMain;
 @property (nonatomic) NSInteger decryptFrameworks;
 @property (nonatomic) NSInteger decryptOther;
+@property (nonatomic, strong) UIBarButtonItem *authItem;
+@property (nonatomic) BOOL authRefreshing;
 @end
 
 @implementation IDHomeViewController
@@ -110,6 +112,13 @@ static NSString *IDPrettyImageName(NSString *name) {
     self.searchController.searchBar.placeholder = @"Search installed or App Store";
     self.navigationItem.searchController = self.searchController;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    UIImage *authImage = [UIImage systemImageNamed:@"arrow.clockwise.circle.fill"];
+    self.authItem = [[UIBarButtonItem alloc] initWithImage:authImage
+                                                     style:UIBarButtonItemStylePlain
+                                                    target:self
+                                                    action:@selector(refreshAppleAuth)];
+    self.navigationItem.leftBarButtonItem = self.authItem;
+    [self setAppleAuthVerified:NO refreshing:NO];
     UIImage *gear = [UIImage systemImageNamed:@"gearshape"];
     UIBarButtonItem *settings = [[UIBarButtonItem alloc] initWithImage:gear
                                                                  style:UIBarButtonItemStylePlain
@@ -129,6 +138,25 @@ static NSString *IDPrettyImageName(NSString *name) {
     self.refreshControl = rc;
 
     [self reload];
+}
+
+- (void)setAppleAuthVerified:(BOOL)verified refreshing:(BOOL)refreshing {
+    self.authRefreshing = refreshing;
+    self.authItem.enabled = !refreshing;
+    self.authItem.tintColor = refreshing
+        ? [UIColor systemGrayColor]
+        : (verified ? [UIColor systemGreenColor] : [UIColor systemRedColor]);
+    self.authItem.accessibilityLabel = verified ? @"Apple ID auth verified" : @"Apple ID auth needed";
+}
+
+- (void)refreshAppleAuth {
+    if (self.authRefreshing) return;
+
+    IDDecryptProgressViewController *vc = [[IDDecryptProgressViewController alloc]
+        initWithTitle:@"Apple ID Auth"];
+    [self.navigationController pushViewController:vc animated:YES];
+    [vc appendStatus:@"Refreshing Apple ID auth"];
+    [self runAppleAuthRefreshWithEmail:nil password:nil authCode:nil vc:vc];
 }
 
 - (void)showSettings {
@@ -575,6 +603,8 @@ static NSString *IDPrettyImageName(NSString *name) {
             [vc appendStatus:[NSString stringWithFormat:@"  %@", IDAppStoreStepTitle(ev[@"name"])]];
         } else if ([phase isEqualToString:@"auth-required"]) {
             [vc appendStatus:@"  Apple ID sign-in required"];
+        } else if ([phase isEqualToString:@"done"] && [ev[@"name"] isEqualToString:@"authenticated"]) {
+            [self setAppleAuthVerified:YES refreshing:NO];
         } else if ([phase isEqualToString:@"auth"]) {
             NSString *name = ev[@"name"] ?: @"";
             if ([name isEqualToString:@"reauth"]) {
@@ -659,6 +689,7 @@ static NSString *IDPrettyImageName(NSString *name) {
         }
 
         if (err) {
+            [self setAppleAuthVerified:NO refreshing:NO];
             if (lastHelperStderr.length && [err.localizedDescription containsString:lastHelperStderr]) {
                 err = [NSError errorWithDomain:err.domain code:err.code
                                       userInfo:@{NSLocalizedDescriptionKey:
@@ -668,6 +699,7 @@ static NSString *IDPrettyImageName(NSString *name) {
             return;
         }
 
+        [self setAppleAuthVerified:YES refreshing:NO];
         if (installedPath.length == 0) {
             NSError *missing = [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:4
                                                userInfo:@{NSLocalizedDescriptionKey:
@@ -744,6 +776,128 @@ static NSString *IDPrettyImageName(NSString *name) {
                                displayName:displayName
                           externalVersionID:externalVersionID
                                      email:nextEmail
+                                  password:nextPassword
+                                  authCode:nextCode
+                                        vc:vc];
+    }]];
+
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)runAppleAuthRefreshWithEmail:(NSString *)email
+                             password:(NSString *)password
+                             authCode:(NSString *)authCode
+                                   vc:(IDDecryptProgressViewController *)vc {
+    __block NSString *failureReason = nil;
+    __block NSString *failureMessage = nil;
+    __block NSString *lastHelperStderr = nil;
+    [self setAppleAuthVerified:NO refreshing:YES];
+
+    [IDAppStoreHelperRunner refreshAuthWithEmail:email
+                                        password:password
+                                        authCode:authCode
+                                         onEvent:^(NSDictionary *ev) {
+        NSString *phase = ev[@"phase"] ?: @"";
+        if ([phase isEqualToString:@"step"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  %@", IDAppStoreStepTitle(ev[@"name"])]];
+        } else if ([phase isEqualToString:@"auth-required"]) {
+            [vc appendStatus:@"  Apple ID sign-in required"];
+        } else if ([phase isEqualToString:@"done"] && [ev[@"name"] isEqualToString:@"authenticated"]) {
+            [vc appendStatus:@"  Apple ID auth verified"];
+        } else if ([phase isEqualToString:@"failed"]) {
+            failureReason = ev[@"reason"];
+            failureMessage = ev[@"message"];
+        } else if ([phase isEqualToString:@"stderr"]) {
+            NSString *line = ev[@"line"] ?: @"";
+            if (!IDIsExpectedAuthStderr(line)) {
+                lastHelperStderr = line;
+                [vc appendStatus:[NSString stringWithFormat:@"  %@", line]];
+            }
+        }
+    }
+                                      completion:^(int code, NSError *err) {
+        BOOL needsCredentials = code == 20 ||
+            [failureReason isEqualToString:@"auth-required"] ||
+            [failureMessage containsString:@"Apple ID sign-in required"];
+        BOOL needsCode = code == 21 || [failureReason isEqualToString:@"auth-code-required"];
+
+        if (needsCredentials || needsCode) {
+            if (needsCode) {
+                [vc appendStatus:@"  Apple ID verification code required"];
+            }
+            [self setAppleAuthVerified:NO refreshing:NO];
+            [self promptAppleAuthForRefreshCode:(needsCode && email.length && password.length)
+                                             vc:vc
+                                          email:email
+                                       password:password];
+            return;
+        }
+
+        if (err) {
+            if (lastHelperStderr.length && [err.localizedDescription containsString:lastHelperStderr]) {
+                err = [NSError errorWithDomain:err.domain code:err.code
+                                      userInfo:@{NSLocalizedDescriptionKey:
+                                          [NSString stringWithFormat:@"appstore helper exit %d", code]}];
+            }
+            [self setAppleAuthVerified:NO refreshing:NO];
+            [vc markCompleteWithMessage:nil error:err];
+            return;
+        }
+
+        [self setAppleAuthVerified:YES refreshing:NO];
+        [vc markCompleteWithMessage:@"Apple ID auth verified" error:nil];
+    }];
+}
+
+- (void)promptAppleAuthForRefreshCode:(BOOL)codeOnly
+                                   vc:(IDDecryptProgressViewController *)vc
+                                email:(NSString *)email
+                             password:(NSString *)password {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:(codeOnly ? @"Apple 2FA Code" : @"Apple ID Sign In")
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    if (codeOnly) {
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"Code";
+            tf.keyboardType = UIKeyboardTypeNumberPad;
+        }];
+    } else {
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"Email";
+            tf.text = email ?: @"";
+            tf.keyboardType = UIKeyboardTypeEmailAddress;
+            tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        }];
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"Password";
+            tf.secureTextEntry = YES;
+            tf.text = password ?: @"";
+        }];
+    }
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:^(UIAlertAction *a) {
+        [self setAppleAuthVerified:NO refreshing:NO];
+        NSError *err = [NSError errorWithDomain:@"IDAppStoreAuth" code:1
+                                       userInfo:@{NSLocalizedDescriptionKey: @"Apple ID sign-in cancelled"}];
+        [vc markCompleteWithMessage:nil error:err];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Continue"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        NSString *nextEmail = email;
+        NSString *nextPassword = password;
+        NSString *nextCode = nil;
+        if (codeOnly) {
+            nextCode = alert.textFields.firstObject.text ?: @"";
+        } else {
+            nextEmail = alert.textFields.count > 0 ? alert.textFields[0].text : @"";
+            nextPassword = alert.textFields.count > 1 ? alert.textFields[1].text : @"";
+        }
+        [self runAppleAuthRefreshWithEmail:nextEmail
                                   password:nextPassword
                                   authCode:nextCode
                                         vc:vc];
