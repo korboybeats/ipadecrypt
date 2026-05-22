@@ -493,6 +493,49 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS, patch.previousDeviceFamily)
 }
 
+func verifyOKSummary(res pipeline.VerifyResult, compareSource bool) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "%d Mach-O(s) verified", res.Scanned)
+
+	if compareSource {
+		fmt.Fprintf(&b, ", %d source-matched", res.Compared)
+	}
+
+	var extras []string
+	if len(res.Missing) > 0 {
+		extras = append(extras, fmt.Sprintf("%d source-missing", len(res.Missing)))
+	}
+
+	if len(res.Skipped) > 0 {
+		extras = append(extras, fmt.Sprintf("%d skipped", len(res.Skipped)))
+	}
+
+	if len(extras) > 0 {
+		fmt.Fprintf(&b, " (%s)", strings.Join(extras, ", "))
+	}
+
+	return b.String()
+}
+
+func verifyFailureSummary(res pipeline.VerifyResult) string {
+	parts := make([]string, 0, 3)
+
+	if n := len(res.StillEncrypted); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d still encrypted", n))
+	}
+
+	if n := len(res.AllZeroCrypt); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d all-zero crypt", n))
+	}
+
+	if n := len(res.Mismatches); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d source diff", n))
+	}
+
+	return strings.Join(parts, ", ")
+}
+
 // runDecryptOnBundle runs helper → pull → verify → cleanup on an
 // installed bundle. stagingRemote may be "" for the use-installed path.
 // srcIPAPath is the source IPA on the host when one exists (App Store
@@ -600,63 +643,49 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	live.OK("→ %s", outLocal)
 
 	if !decryptNoVerify {
-		live = tui.NewLive()
-		live.Spin("checking cryptid on every Mach-O")
+		if decryptExtraVerify && srcIPAPath == "" {
+			tui.Info("source byte-compare skipped: no source IPA available for the installed-bundle path")
+		}
 
-		res, err := pipeline.VerifyCryptid(outLocal)
+		compareSource := decryptExtraVerify && srcIPAPath != ""
+
+		src := ""
+		if compareSource {
+			src = srcIPAPath
+		}
+
+		live = tui.NewLive()
+		if compareSource {
+			live.Spin("verifying Mach-Os (cryptid, zero-fill, source byte-compare)")
+		} else {
+			live.Spin("verifying Mach-Os (cryptid, zero-fill)")
+		}
+
+		res, err := pipeline.Verify(outLocal, src)
 		if err != nil {
 			live.Fail("verify failed: %v", err)
 			return
 		}
 
-		if len(res.Encrypted) > 0 {
-			live.Fail("%d binary(ies) still have cryptid != 0", len(res.Encrypted))
+		if !res.OK() {
+			live.Fail("verify failed: %s", verifyFailureSummary(res))
 
-			for _, n := range res.Encrypted {
-				tui.Info("  %s", n)
+			for _, n := range res.StillEncrypted {
+				tui.Info("  %s — still encrypted (cryptid != 0)", n)
+			}
+
+			for _, n := range res.AllZeroCrypt {
+				tui.Info("  %s — crypt region all zeros", n)
+			}
+
+			for _, m := range res.Mismatches {
+				tui.Info("  %s — %s", m.Name, m.Reason)
 			}
 
 			return
 		}
 
-		suffix := ""
-		if len(res.Skipped) > 0 {
-			suffix = fmt.Sprintf(" (%d skipped)", len(res.Skipped))
-		}
-
-		live.OK("%d Mach-O(s) verified cryptid=0%s", res.Scanned, suffix)
-	}
-
-	if decryptExtraVerify {
-		if srcIPAPath == "" {
-			tui.Info("--extra-verify skipped: no source IPA available for the installed-bundle path")
-		} else {
-			live = tui.NewLive()
-			live.Spin("byte-comparing every Mach-O against source IPA")
-
-			res, err := pipeline.ExtraVerify(outLocal, srcIPAPath)
-			if err != nil {
-				live.Fail("extra-verify failed: %v", err)
-				return
-			}
-
-			if len(res.Mismatches) > 0 {
-				live.Fail("%d Mach-O(s) differ from source outside the encrypted region", len(res.Mismatches))
-
-				for _, m := range res.Mismatches {
-					tui.Info("  %s — %s", m.Name, m.Reason)
-				}
-
-				return
-			}
-
-			suffix := ""
-			if len(res.Missing) > 0 {
-				suffix = fmt.Sprintf(" (%d source-missing)", len(res.Missing))
-			}
-
-			live.OK("%d Mach-O(s) byte-match source%s", res.Compared, suffix)
-		}
+		live.OK("%s", verifyOKSummary(res, compareSource))
 	}
 
 	if originalMinOS != "" || len(originalDeviceFamily) > 0 {
