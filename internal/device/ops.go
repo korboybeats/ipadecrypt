@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -161,15 +162,40 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 	return nil
 }
 
-// Uninstall removes an installed app via `uicache -u <bundleID>`.
-func (c *Client) Uninstall(bundleID string) error {
-	out, errOut, code, err := c.RunSudo("uicache -u " + shellQuote(bundleID))
+// Uninstall removes an installed app. Two steps wrapped in a single
+// `sudo sh -c '…'` so both commands run as root (sudo only elevates the
+// first command in a `cmd1; cmd2` chain, otherwise rm runs as mobile and
+// hits the _installd-owned files with EACCES). Order matters:
+//
+//   1. uicache -u <bundlePath>  — unregister from LSApplicationWorkspace
+//      so SpringBoard drops the icon and the LS registry forgets the
+//      bundle.
+//   2. rm -rf <UUID-dir>        — remove the bundle dir under
+//      /var/containers/Bundle/Application/.
+//
+// The data container at /var/mobile/Containers/Data/Application/<other-UUID>/
+// is left behind  finding it would require scanning every container's
+// metadata plist for the bundle id, and the next install spins a fresh
+// one regardless.
+func (c *Client) Uninstall(bundlePath string) error {
+	const bundleRoot = "/var/containers/Bundle/Application/"
+	if !strings.HasPrefix(bundlePath, bundleRoot) {
+		return fmt.Errorf("refuse to uninstall: suspicious bundle path %q", bundlePath)
+	}
+
+	uuidDir := path.Dir(bundlePath)
+
+	cmd := fmt.Sprintf("sh -c %s",
+		shellQuote(fmt.Sprintf("uicache -u %s && rm -rf %s",
+			shellQuote(bundlePath), shellQuote(uuidDir))))
+
+	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
-		return fmt.Errorf("uicache: %w", err)
+		return fmt.Errorf("uninstall: %w", err)
 	}
 
 	if code != 0 {
-		return fmt.Errorf("uicache exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
+		return fmt.Errorf("uninstall exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
 	}
 
 	return nil
@@ -331,17 +357,24 @@ func (c *Client) VerifyHelper(helperPath string) error {
 
 type EventHandler func(Event)
 
-// RunHelper spawns the on-device helper for a bundle. bundleID goes to the
-// SpringBoard SBS SPI (only accepted for the main app; empty string skips
-// the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
-// When skipAppex is true the helper passes --skip-appex, leaving extensions
-// encrypted in the output IPA.
+// FrameHandler is invoked once per Mach-O record the helper streams in
+// --execs-only mode. path is the IPA-relative bundle path
+// ("Payload/AppName.app/Frameworks/X.framework/X"). r yields exactly size
+// bytes; the handler must read them fully before returning, or the next
+// frame will deserialize garbage.
+type FrameHandler func(path string, size int64, r io.Reader) error
+
+// RunHelper spawns the on-device helper for a bundle and streams the
+// decrypted IPA bytes into ipaW. bundleID goes to the SpringBoard SBS SPI
+// (only accepted for the main app; empty string skips the main-app pass
+// and just decrypts PlugIns/*.appex + Extensions/*.appex). When skipAppex
+// is true the helper passes --skip-appex, leaving extensions encrypted.
 //
-// The helper has one output channel: structured events on stdout. We
-// drive the TUI purely from that stream. When verbose=true we pass `-v`
-// so the helper additionally emits LOG_DEBUG events with extra detail.
-func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string,
-	verbose, skipAppex bool, onEvent EventHandler) (string, string, int, error) {
+// In this mode the helper writes IPA bytes to stdout and event lines to
+// stderr; we tee stderr through the event splitter while ipaW receives
+// the binary stream — no on-device output file, no sftp pull.
+func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
+	verbose, skipAppex bool, onEvent EventHandler, ipaW io.Writer) (int, error) {
 	gflag := ""
 	if verbose {
 		gflag = "-v "
@@ -352,13 +385,115 @@ func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string,
 		subflag = "--skip-appex "
 	}
 
-	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q %q",
-		helperPath, gflag, subflag, bundleID, bundlePath, outIPA)
+	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q -",
+		helperPath, gflag, subflag, bundleID, bundlePath)
 
 	splitter := newEventSplitter(onEvent, io.Discard)
 	defer splitter.Close()
 
-	return c.RunSudoStream(cmd, splitter, io.Discard)
+	_, _, code, err := c.RunSudoStream(cmd, ipaW, splitter)
+	return code, err
+}
+
+// RunHelperExecs runs the helper in --execs-only mode: the helper streams
+// framed Mach-O records on stdout, events on stderr. onFrame is called
+// once per record. Use this when the host has the source IPA and will
+// assemble the output by substituting the helper-provided execs.
+func (c *Client) RunHelperExecs(helperPath, bundleID, bundlePath string,
+	verbose, skipAppex bool, onEvent EventHandler, onFrame FrameHandler) (int, error) {
+	gflag := ""
+	if verbose {
+		gflag = "-v "
+	}
+
+	subflag := "--execs-only "
+	if skipAppex {
+		subflag += "--skip-appex "
+	}
+
+	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q",
+		helperPath, gflag, subflag, bundleID, bundlePath)
+
+	splitter := newEventSplitter(onEvent, io.Discard)
+	defer splitter.Close()
+
+	// Tee helper stdout into a pipe we read frames from. The SSH session
+	// blocks in a goroutine; we read frames from the main goroutine and
+	// signal completion via done.
+	pr, pw := io.Pipe()
+
+	var (
+		code   int
+		runErr error
+		done   = make(chan struct{})
+	)
+
+	go func() {
+		_, _, code, runErr = c.RunSudoStream(cmd, pw, splitter)
+		pw.Close()
+		close(done)
+	}()
+
+	parseErr := parseFrames(pr, onFrame)
+
+	// Drain any remaining stdout so the SSH session can complete.
+	io.Copy(io.Discard, pr)
+	<-done
+
+	if runErr != nil {
+		return code, runErr
+	}
+	if parseErr != nil {
+		return code, parseErr
+	}
+
+	return code, nil
+}
+
+// parseFrames reads [u32be plen][plen-byte path][u64be size][size bytes]
+// records until EOF, invoking onFrame for each.
+func parseFrames(r io.Reader, onFrame FrameHandler) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+
+	for {
+		var hdr [4]byte
+		if _, err := io.ReadFull(br, hdr[:]); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("read frame plen: %w", err)
+		}
+
+		plen := binary.BigEndian.Uint32(hdr[:])
+		if plen == 0 || plen > 4096 {
+			return fmt.Errorf("invalid frame path length: %d", plen)
+		}
+
+		pathBuf := make([]byte, plen)
+		if _, err := io.ReadFull(br, pathBuf); err != nil {
+			return fmt.Errorf("read frame path: %w", err)
+		}
+
+		var szHdr [8]byte
+		if _, err := io.ReadFull(br, szHdr[:]); err != nil {
+			return fmt.Errorf("read frame size: %w", err)
+		}
+
+		size := int64(binary.BigEndian.Uint64(szHdr[:]))
+		if size < 0 {
+			return fmt.Errorf("negative frame size: %d", size)
+		}
+
+		lr := io.LimitReader(br, size)
+		if err := onFrame(string(pathBuf), size, lr); err != nil {
+			return err
+		}
+
+		// Drain leftovers in case the handler didn't read everything.
+		if _, err := io.Copy(io.Discard, lr); err != nil {
+			return fmt.Errorf("drain frame body: %w", err)
+		}
+	}
 }
 
 type eventSplitter struct {

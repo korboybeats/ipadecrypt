@@ -4,10 +4,19 @@
 #include <stdio.h>
 #include <string.h>
 
-static int g_verbose = 0;
+static int   g_verbose = 0;
+static FILE *g_stream  = NULL; // lazily initialised to stdout
+
+static FILE *stream(void) {
+    return g_stream ? g_stream : stdout;
+}
 
 void log_init(int verbose) {
     g_verbose = verbose ? 1 : 0;
+}
+
+void log_set_stream(FILE *f) {
+    g_stream = f ? f : stdout;
 }
 
 int log_level_visible(log_level_t level) {
@@ -128,7 +137,9 @@ void emit(log_level_t level, const char *event_name, const attrs_t *a,
           const char *human_fmt, ...) {
     if (!log_level_visible(level)) return;
 
-    fprintf(stdout, "@evt event=%s level=%s", event_name, level_name(level));
+    FILE *out = stream();
+
+    fprintf(out, "@evt event=%s level=%s", event_name, level_name(level));
 
     if (human_fmt) {
         char buf[1024];
@@ -140,17 +151,17 @@ void emit(log_level_t level, const char *event_name, const attrs_t *a,
         // msg= always quoted  human strings usually contain spaces.
         char qbuf[1280];
         int qn = append_quoted(qbuf, (int)sizeof(qbuf), buf);
-        fprintf(stdout, " msg=%.*s", qn, qbuf);
+        fprintf(out, " msg=%.*s", qn, qbuf);
     }
 
     if (a && a->len > 0) {
-        fputc(' ', stdout);
-        fwrite(a->buf, 1, (size_t)a->len, stdout);
-        if (a->overflow) fputs(" _truncated=1", stdout);
+        fputc(' ', out);
+        fwrite(a->buf, 1, (size_t)a->len, out);
+        if (a->overflow) fputs(" _truncated=1", out);
     }
 
-    fputc('\n', stdout);
-    fflush(stdout);
+    fputc('\n', out);
+    fflush(out);
 }
 
 // Free-form helpers wrap emit() as event="log". Same level filter; same

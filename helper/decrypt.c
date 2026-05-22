@@ -282,6 +282,8 @@ void decrypt_appexes(const char *bundle_src, const char *bundle_dst) {
 }
 
 int run_zip(const char *staging, const char *ipa_path) {
+    int stream_stdout = ipa_path && ipa_path[0] == '-' && ipa_path[1] == '\0';
+
     char cwd_save[4096];
     if (!getcwd(cwd_save, sizeof(cwd_save))) cwd_save[0] = '\0';
     if (chdir(staging) != 0) {
@@ -291,7 +293,11 @@ int run_zip(const char *staging, const char *ipa_path) {
 
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    if (!stream_stdout) {
+        // Default: zip writes to its file arg; silence its stdout.
+        posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    }
+    // Always silence zip's stderr; warnings would race with our events.
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
     char *argv[] = { "zip", "-qr", "-1", (char *)ipa_path, "Payload",
         "-x",
