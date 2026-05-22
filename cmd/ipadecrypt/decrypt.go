@@ -1,18 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
@@ -533,21 +530,10 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 	}
 
-	var (
-		helperStderr io.Writer
-		stderrNoter  *liveNoteWriter
-	)
-
-	if decryptVerbose {
-		stderrNoter = newLiveNoteWriter(live)
-		helperStderr = stderrNoter
-	}
-
-	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, onEvent, helperStderr)
-
-	if stderrNoter != nil {
-		stderrNoter.Flush()
-	}
+	// Helper has one output channel: events on stdout. We drive the TUI
+	// from that stream. --verbose passes -v so the helper additionally
+	// emits LOG_DEBUG events.
+	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, decryptVerbose, onEvent)
 
 	if err != nil {
 		live.Fail("helper run: %v", err)
@@ -945,269 +931,78 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// liveNoteWriter buffers an io.Writer stream and emits one tui.Live.Note per
-// completed line. Used to surface helper LOG/ERR (newline-delimited human
-// text on stderr) into the live UI when --verbose is set, instead of
-// dumping raw stderr bytes that would race against the spinner.
-type liveNoteWriter struct {
-	live *tui.Live
-	mu   sync.Mutex
-	buf  []byte
-}
-
-func newLiveNoteWriter(live *tui.Live) *liveNoteWriter {
-	return &liveNoteWriter{live: live}
-}
-
-func (w *liveNoteWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	w.buf = append(w.buf, p...)
-
-	for {
-		nl := bytes.IndexByte(w.buf, '\n')
-		if nl < 0 {
-			break
-		}
-
-		line := strings.TrimRight(string(w.buf[:nl]), "\r")
-		w.buf = w.buf[nl+1:]
-
-		if line != "" {
-			w.live.Note("%s", line)
-		}
-	}
-
-	return len(p), nil
-}
-
-// Flush emits any trailing buffered bytes that didn't end in a newline.
-// Call after the producer is known to be done writing.
-func (w *liveNoteWriter) Flush() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if len(w.buf) == 0 {
-		return
-	}
-
-	line := strings.TrimRight(string(w.buf), "\r")
-	w.buf = nil
-
-	if line != "" {
-		w.live.Note("%s", line)
-	}
-}
-
-func pluralize(count, noun string) string {
-	if count == "1" {
-		return count + " " + noun
-	}
-
-	return count + " " + noun + "s"
-}
-
-func parseInt64(s string) int64 {
-	var n int64
-	fmt.Sscanf(s, "%d", &n)
-
-	return n
-}
-
-func imageFailReason(token string) string {
-	switch token {
-	case "":
-		return ""
-	case "open_src_fail":
-		return "couldn't open source"
-	case "read_src_fail":
-		return "couldn't read source"
-	case "vm_read_err":
-		return "couldn't read decrypted memory"
-	case "cryptoff_zero_pages":
-		return "decrypted region was all zeros"
-	case "open_dst_fail":
-		return "couldn't open output"
-	case "write_dst_fail":
-		return "couldn't write output"
-	case "oom":
-		return "out of memory"
-	default:
-		return token
-	}
-}
-
-// Returns "" for the recoverable EXC_BREAKPOINT case so caller stays silent.
-func dyldTrappedMessage(ev device.Event) string {
-	via := ev.Attr("via")
-	exc := ev.Attr("exception")
-	sig := ev.Attr("signal")
-	outcome := ev.Attr("outcome")
-
-	if via == "mach" {
-		switch exc {
-		case "EXC_BREAKPOINT":
-			return ""
-		case "EXC_CRASH", "EXC_BAD_ACCESS", "EXC_BAD_INSTRUCTION", "":
-			return "app halted during launch; recovering what was loaded"
-		default:
-			return fmt.Sprintf("app halted during launch (%s); recovering what was loaded", exc)
-		}
-	}
-
-	if via == "ptrace" {
-		if outcome == "exited" {
-			return "app exited during launch; recovering what was loaded"
-		}
-
-		if outcome == "signaled" && sig == "9" {
-			return "app couldn't fully launch on this device; recovering what was loaded"
-		}
-
-		return "app crashed during launch; recovering what was loaded"
-	}
-
-	return "app halted during launch; recovering what was loaded"
-}
-
+// HandleEvent renders one helper event into a TUI update. The helper
+// embeds a human-readable `msg` attribute on every event, so this
+// function mostly just relays msg as the note, with per-event spinner
+// updates and counters layered on top.
 func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
+	upd := helperUpdate{note: ev.Attr("msg")}
+
 	switch ev.Name {
-	case "bundle":
-		switch ev.Attr("phase") {
-		case "done":
-			extras := ev.Attr("extras")
-			if extras == "0" {
-				return helperUpdate{}
-			}
+	// Spinner-only events: progress indicator, no note line.
+	case "bundle.begin":
+		upd.note = ""
+		upd.spin = fmt.Sprintf("decrypting %s", path.Base(ev.Attr("src")))
+	case "dyld.resuming":
+		upd.note = ""
+		upd.spin = "running target"
+	case "image.begin":
+		upd.note = ""
+		upd.spin = fmt.Sprintf("decrypting %s", ev.Attr("name"))
+	case "pack.begin":
+		upd.note = ""
+		upd.spin = fmt.Sprintf("packaging IPA → %s", path.Base(ev.Attr("ipa")))
 
-			return helperUpdate{note: fmt.Sprintf("bundle done (%s)", pluralize(extras, "framework"))}
-		case "skipped":
-			return helperUpdate{note: fmt.Sprintf("bundle skipped: %s (%s)", path.Base(ev.Attr("src")), ev.Attr("reason"))}
+	// Counters + spinner update on each successful dump.
+	case "image.done":
+		p.dumpedTotal.Add(1)
+		switch ev.Attr("kind") {
+		case "main":
+			p.dumpedMain.Add(1)
+		case "framework":
+			p.dumpedFrameworks.Add(1)
+		default:
+			p.dumpedOther.Add(1)
+		}
+		upd.spin = fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load())
+
+	// Suppress empty-result bundle.done so the TUI stays quiet on appex
+	// passes that produce no extras.
+	case "bundle.done":
+		if ev.Attr("extras") == "0" {
+			upd.note = ""
 		}
 
-	case "spawn_chmod":
-		return helperUpdate{note: fmt.Sprintf("made %s executable", path.Base(ev.Attr("path")))}
-
-	case "spawn_path":
-		return helperUpdate{note: fmt.Sprintf("spawned %s via ptrace", path.Base(ev.Attr("exec")))}
-
-	case "spawn_path_fallback":
-		return helperUpdate{note: fmt.Sprintf("SBS failed on %s, falling back to ptrace", path.Base(ev.Attr("exec")))}
-
-	case "spawn_failed":
-		return helperUpdate{note: fmt.Sprintf("could not spawn %s (skipped)", path.Base(ev.Attr("src")))}
-
-	case "dyld":
-		switch ev.Attr("phase") {
-		case "resuming":
-			return helperUpdate{spin: fmt.Sprintf("running %s", path.Base(ev.Attr("src")))}
-		case "trapped":
-			msg := dyldTrappedMessage(ev)
-			if pc := ev.Attr("pc"); pc != "" && pc != "0x0" {
-				if msg != "" {
-					msg += fmt.Sprintf(" (pc=%s)", pc)
-				} else {
-					msg = fmt.Sprintf("dyld trapped at pc=%s", pc)
-				}
-			}
-			if msg == "" {
-				return helperUpdate{}
-			}
-
-			return helperUpdate{note: msg}
+	// Trap on the benign dyld halt brk is silent — the helper catches it
+	// on purpose so the address space stays readable; nothing to surface.
+	case "dyld.trapped":
+		if ev.Attr("exception") == "EXC_BREAKPOINT" {
+			upd.note = ""
 		}
 
-	case "patch":
-		if ev.Attr("phase") == "scan_done" {
-			return helperUpdate{note: fmt.Sprintf("dyld patches: kills=%s forces=%s skips=%s",
-				ev.Attr("kills"), ev.Attr("forces"), ev.Attr("skips"))}
-		}
-		return helperUpdate{}
-
-	case "inject":
-		switch ev.Attr("phase") {
-		case "skipped":
-			if ev.Attr("name") == "" && ev.Attr("reason") == "not_plain_arm64" {
-				return helperUpdate{note: "skipping framework recovery (target is arm64e; injection unsupported)"}
-			}
-
-			return helperUpdate{}
-		case "failed":
-			return helperUpdate{note: fmt.Sprintf("could not decrypt %s in target", path.Base(ev.Attr("name")))}
-		case "tramp_alloc_fail", "tramp_write_fail":
-			return helperUpdate{note: "couldn't set up decrypt in target"}
-		case "mremap_fail":
-			return helperUpdate{note: fmt.Sprintf("mremap_encrypted failed in target (rc=%s)", ev.Attr("rc"))}
-		case "prefault_fail":
-			return helperUpdate{note: "prefault loop didn't return (target thread stuck)"}
-		case "target_call_timeout":
-			return helperUpdate{note: fmt.Sprintf("target syscall timed out (pc=%s lr=%s)", ev.Attr("pc"), ev.Attr("lr"))}
-		case "target_call_crashed":
-			return helperUpdate{note: fmt.Sprintf("target syscall crashed (exc=%s code1=%s)", ev.Attr("exc"), ev.Attr("code1"))}
-		}
-
-		return helperUpdate{}
-
-	case "image":
-		name := ev.Attr("name")
-
-		switch ev.Attr("phase") {
-		case "start":
-			return helperUpdate{spin: fmt.Sprintf("decrypting %s", name)}
-		case "done":
-			p.dumpedTotal.Add(1)
-
-			switch ev.Attr("kind") {
-			case "main":
-				p.dumpedMain.Add(1)
-			case "framework":
-				p.dumpedFrameworks.Add(1)
-			default:
-				p.dumpedOther.Add(1)
-			}
-
-			size := parseInt64(ev.Attr("size"))
-
-			return helperUpdate{
-				note: fmt.Sprintf("decrypted %s (%s)", name, humanBytes(size)),
-				spin: fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load()),
-			}
-		case "failed":
-			if reason := imageFailReason(ev.Attr("reason")); reason != "" {
-				return helperUpdate{note: fmt.Sprintf("failed to decrypt %s (%s)", name, reason)}
-			}
-
-			return helperUpdate{note: fmt.Sprintf("failed to decrypt %s", name)}
-		}
-
-	case "pack":
-		switch ev.Attr("phase") {
-		case "start":
-			return helperUpdate{spin: fmt.Sprintf("packaging IPA → %s", path.Base(ev.Attr("ipa")))}
-		case "done":
-			return helperUpdate{note: fmt.Sprintf("packaged → %s", path.Base(ev.Attr("ipa")))}
-		case "failed":
-			return helperUpdate{note: fmt.Sprintf("pack failed → %s", path.Base(ev.Attr("ipa")))}
-		}
-
-	case "done":
-		return helperUpdate{}
+	// Pure diagnostics that show up only in --verbose runs.
+	case "target.csflags",
+		"patch.scan_skipped", "patch.skipped", "patch.dyld_base_diff",
+		"dyld.settled", "dyld.fault_skip", "dyld.pac_stripped",
+		"staging.begin", "done":
+		upd.note = ""
 	}
 
-	// Catch-all: dump unknown events verbatim so nothing is silently lost.
-	parts := make([]string, 0, len(ev.Attrs)+1)
-	parts = append(parts, "event="+ev.Name)
-
-	for k, v := range ev.Attrs {
-		if k == "event" {
-			continue
+	// Catch-all for unknown event names: fall back to msg attr (already
+	// set above). If a future event lacks msg, render attrs verbatim so
+	// nothing is silently lost.
+	if upd.note == "" && upd.spin == "" && ev.Attr("msg") == "" {
+		parts := []string{"event=" + ev.Name}
+		for k, v := range ev.Attrs {
+			if k == "event" || k == "level" {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s=%q", k, v))
 		}
-
-		parts = append(parts, fmt.Sprintf("%s=%q", k, v))
+		upd.note = strings.Join(parts, " ")
 	}
 
-	return helperUpdate{note: strings.Join(parts, " ")}
+	return upd
 }
 
 func (p *helperProgress) Summary() string {

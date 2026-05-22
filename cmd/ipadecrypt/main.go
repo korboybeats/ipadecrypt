@@ -58,7 +58,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptNoCleanup, "no-cleanup", false, "leave remote staging files in place")
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptExtraVerify, "extra-verify", false, "additionally byte-compare every output Mach-O against its source counterpart (skip the encrypted region + cryptid byte) to catch decrypt corruption")
-	decrypt.Flags().BoolVarP(&decryptFromAppStore, "from-appstore", "f", false, "fetch from App Store and reinstall, ignoring what's installed on the device")
+	decrypt.Flags().BoolVarP(&decryptFromAppStore, "from-appstore", "", false, "fetch from App Store and reinstall, ignoring what's installed on the device")
 	decrypt.Flags().BoolVar(&decryptUseInstalled, "use-installed", false, "decrypt the installed build directly; skip the App Store path even if a newer version exists")
 	decrypt.Flags().BoolVar(&decryptPatchDevType, "patch-device-type", false, "if the IPA's UIDeviceFamily excludes this device, append the device's family (iPadOS apps then run on iOS)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")

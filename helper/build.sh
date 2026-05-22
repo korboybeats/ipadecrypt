@@ -51,7 +51,19 @@ docker run --rm \
             -Wno-incompatible-sysroot \
             -O2 -fno-stack-protector -Wno-deprecated-declarations \
             -no-canonical-prefixes \
-            -o helper/dist/ipadecrypt-helper-arm64 helper/helper.c
+            -o helper/dist/ipadecrypt-helper-arm64 \
+            helper/helper.c \
+            helper/args.c \
+            helper/decrypt.c \
+            helper/dump.c \
+            helper/dyld_patch.c \
+            helper/exc.c \
+            helper/fs.c \
+            helper/inject.c \
+            helper/log.c \
+            helper/macho.c \
+            helper/spawn.c \
+            helper/target.c
         ldid -S"helper/entitlements.plist" helper/dist/ipadecrypt-helper-arm64
     '
 

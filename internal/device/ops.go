@@ -43,15 +43,21 @@ func (c *Client) Probe() (ProbeResult, error) {
 	// the sysctl / rootless locations, so try a few absolute paths before
 	// giving up. The 2>/dev/null suppresses expected "not found" from the
 	// unmatched ones.
+	// `uname -m` on iOS always returns "arm64" — Apple doesn't expose
+	// the arm64e subtype through the standard syscall. Read cpusubtype
+	// directly from the mach header of `/sbin/launchd` (always present,
+	// always thin to the device's actual arch). Offset 8 in the
+	// mach_header_64 is the cpusubtype low byte: 0x02 = arm64e (PAC),
+	// 0x00 or 0x01 = arm64.
 	const script = "" +
 		"sw_vers -productVersion 2>/dev/null || " +
 		"/usr/libexec/PlistBuddy -c 'Print :ProductVersion' " +
 		"/System/Library/CoreServices/SystemVersion.plist 2>/dev/null; " +
-		"uname -m; " +
 		"(sysctl -n hw.machine 2>/dev/null || " +
 		"/usr/sbin/sysctl -n hw.machine 2>/dev/null || " +
 		"/var/jb/usr/sbin/sysctl -n hw.machine 2>/dev/null || " +
-		"sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//' || true)"
+		"sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//' || true); " +
+		"od -An -tx1 -j8 -N1 /sbin/launchd 2>/dev/null | tr -d ' \\n'"
 
 	out, _, code, err := c.Run(script)
 	if err != nil || code != 0 {
@@ -66,17 +72,18 @@ func (c *Client) Probe() (ProbeResult, error) {
 	}
 
 	if len(lines) > 1 {
-		arch := strings.TrimSpace(lines[1])
-		switch arch {
-		case "arm64", "arm64e":
-			r.Arch = arch
-		default:
-			r.Arch = "arm64"
-		}
+		r.Model = strings.TrimSpace(lines[1])
 	}
 
 	if len(lines) > 2 {
-		r.Model = strings.TrimSpace(lines[2])
+		switch strings.TrimSpace(lines[2]) {
+		case "02":
+			r.Arch = "arm64e"
+		default:
+			r.Arch = "arm64"
+		}
+	} else {
+		r.Arch = "arm64"
 	}
 
 	r.DeviceFamily = deviceFamilyFromModel(r.Model)
@@ -327,13 +334,22 @@ type EventHandler func(Event)
 // RunHelper spawns the on-device helper for a bundle. bundleID goes to the
 // SpringBoard SBS SPI (only accepted for the main app; empty string skips
 // the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
-func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string, onEvent EventHandler, humanFallback io.Writer) (string, string, int, error) {
-	cmd := fmt.Sprintf("%s -v %q %q %q", helperPath, bundleID, bundlePath, outIPA)
-	// @evt lines on stdout → splitter; LOG/ERR on stderr → humanFallback.
-	splitter := newEventSplitter(onEvent, humanFallback)
+//
+// The helper has one output channel: structured events on stdout. We
+// drive the TUI purely from that stream. When verbose=true we pass `-v`
+// so the helper additionally emits LOG_DEBUG events with extra detail.
+func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string,
+	verbose bool, onEvent EventHandler) (string, string, int, error) {
+	flag := ""
+	if verbose {
+		flag = "-v "
+	}
+	cmd := fmt.Sprintf("%s %sdecrypt %q %q %q",
+		helperPath, flag, bundleID, bundlePath, outIPA)
+	splitter := newEventSplitter(onEvent, io.Discard)
 	defer splitter.Close()
 
-	return c.RunSudoStream(cmd, splitter, humanFallback)
+	return c.RunSudoStream(cmd, splitter, io.Discard)
 }
 
 type eventSplitter struct {
