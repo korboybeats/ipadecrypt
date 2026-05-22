@@ -17,15 +17,18 @@ var (
 
 	bootstrapReset bool
 
-	decryptExtVerID     string
-	decryptOutput       string
-	decryptNoCleanup    bool
-	decryptNoVerify     bool
-	decryptExtraVerify  bool
-	decryptFromAppStore bool
-	decryptUseInstalled bool
-	decryptPatchDevType bool
-	decryptVerbose      bool
+	decryptExtVerID       string
+	decryptOutput         string
+	decryptNoCleanup      bool
+	decryptNoVerify       bool
+	decryptExtraVerify    bool
+	decryptFromAppStore   bool
+	decryptUseInstalled   bool
+	decryptPatchDevType   bool
+	decryptSkipAppex      bool
+	decryptForceUninstall bool
+	decryptNoUninstall    bool
+	decryptVerbose        bool
 
 	versionsLogResponses bool
 )
@@ -64,6 +67,9 @@ func main() {
 	decrypt.Flags().BoolVarP(&decryptFromAppStore, "from-appstore", "", false, "fetch from App Store and reinstall, ignoring what's installed on the device")
 	decrypt.Flags().BoolVar(&decryptUseInstalled, "use-installed", false, "decrypt the installed build directly; skip the App Store path even if a newer version exists")
 	decrypt.Flags().BoolVar(&decryptPatchDevType, "patch-device-type", false, "if the IPA's UIDeviceFamily excludes this device, append the device's family (iPadOS apps then run on iOS)")
+	decrypt.Flags().BoolVar(&decryptSkipAppex, "skip-appex", false, "tell the helper to skip Payload/<App>.app/PlugIns/*.appex; extensions stay encrypted in the output IPA")
+	decrypt.Flags().BoolVar(&decryptForceUninstall, "force-uninstall", false, "always uninstall the app after decryption, even if it was already installed when we started")
+	decrypt.Flags().BoolVar(&decryptNoUninstall, "no-uninstall", false, "never uninstall the app after decryption (default: uninstall only if we installed or replaced it)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")
 
 	versions := &cobra.Command{

@@ -161,6 +161,20 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 	return nil
 }
 
+// Uninstall removes an installed app via `uicache -u <bundleID>`.
+func (c *Client) Uninstall(bundleID string) error {
+	out, errOut, code, err := c.RunSudo(fmt.Sprintf("uicache -u %q", bundleID))
+	if err != nil {
+		return fmt.Errorf("uicache: %w", err)
+	}
+
+	if code != 0 {
+		return fmt.Errorf("uicache exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+
+	return nil
+}
+
 func (c *Client) EnsureHelper() (string, error) {
 	sum := sha256.Sum256(helperArm64)
 	remote := path.Join(RemoteRoot, "helpers",
@@ -335,19 +349,26 @@ type EventHandler func(Event)
 // RunHelper spawns the on-device helper for a bundle. bundleID goes to the
 // SpringBoard SBS SPI (only accepted for the main app; empty string skips
 // the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
+// When skipAppex is true the helper passes --skip-appex, leaving extensions
+// encrypted in the output IPA.
 //
 // The helper has one output channel: structured events on stdout. We
 // drive the TUI purely from that stream. When verbose=true we pass `-v`
 // so the helper additionally emits LOG_DEBUG events with extra detail.
 func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string,
-	verbose bool, onEvent EventHandler) (string, string, int, error) {
-	flag := ""
+	verbose, skipAppex bool, onEvent EventHandler) (string, string, int, error) {
+	gflag := ""
 	if verbose {
-		flag = "-v "
+		gflag = "-v "
 	}
 
-	cmd := fmt.Sprintf("%s %sdecrypt %q %q %q",
-		helperPath, flag, bundleID, bundlePath, outIPA)
+	subflag := ""
+	if skipAppex {
+		subflag = "--skip-appex "
+	}
+
+	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q %q",
+		helperPath, gflag, subflag, bundleID, bundlePath, outIPA)
 
 	splitter := newEventSplitter(onEvent, io.Discard)
 	defer splitter.Close()

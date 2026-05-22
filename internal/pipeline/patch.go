@@ -244,6 +244,16 @@ func rewriteIPA(src, dst string, edit func(map[string]any, int) ([]byte, error),
 	return true, watchRemoved, nil
 }
 
+// isAppExtPath matches Payload/<App>.app/PlugIns/<*>.appex/...
+func isAppExtPath(name string) bool {
+	parts := strings.Split(name, "/")
+
+	return len(parts) >= 4 &&
+		parts[0] == "Payload" &&
+		strings.HasSuffix(parts[1], ".app") &&
+		parts[2] == "PlugIns"
+}
+
 func intSliceEqual(a, b []int) bool {
 	if len(a) != len(b) {
 		return false

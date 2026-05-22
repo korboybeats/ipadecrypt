@@ -6,18 +6,22 @@
 // Subcommand dispatch + flag parsing.
 //
 // Usage:
-//   helper [-v] decrypt <bundle-id> <bundle-src> <out-ipa>
+//   helper [-v] decrypt [--skip-appex] <bundle-id> <bundle-src> <out-ipa>
 //   helper version
 //   helper -h
 //
 // Globals (accepted before or after the subcommand):
 //   -v, --verbose          emit LOG_DEBUG events too (extra detail)
 //   -h, --help             print usage and exit 0
+//
+// decrypt flags:
+//   --skip-appex           don't decrypt Payload/<App>.app/PlugIns/*.appex
 
 typedef struct {
     const char *bundle_id;   // CFBundleIdentifier for SBS, or "" for ptrace-only
     const char *bundle_src;  // installed .app path on disk
     const char *out_ipa;     // output IPA path
+    int skip_appex;          // skip the appex pass; extensions stay encrypted
 } decrypt_args_t;
 
 typedef struct {

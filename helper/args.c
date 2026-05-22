@@ -9,12 +9,14 @@ void args_usage(FILE *out, const char *progname) {
 "usage: %s [-v] <subcommand> [args]\n"
 "\n"
 "subcommands:\n"
-"  decrypt <bundle-id> <bundle-src> <out-ipa>\n"
+"  decrypt [--skip-appex] <bundle-id> <bundle-src> <out-ipa>\n"
 "      Decrypt the installed bundle and write a plaintext IPA.\n"
-"      bundle-id  CFBundleIdentifier; empty string skips SBS and uses\n"
-"                 ptrace-only spawn (required for appex extensions).\n"
-"      bundle-src absolute path to the installed .app on disk.\n"
-"      out-ipa    where to write the decrypted IPA.\n"
+"      --skip-appex  don't decrypt Payload/<App>.app/PlugIns/*.appex;\n"
+"                    extensions stay encrypted in the output IPA.\n"
+"      bundle-id     CFBundleIdentifier; empty string skips SBS and uses\n"
+"                    ptrace-only spawn (required for appex extensions).\n"
+"      bundle-src    absolute path to the installed .app on disk.\n"
+"      out-ipa       where to write the decrypted IPA.\n"
 "\n"
 "  version\n"
 "      Print build identification and exit.\n"
@@ -55,6 +57,7 @@ const char *args_parse(int argc, char **argv,
             exit(0);
         }
         if (parse_global(a, out_globals)) continue;
+        if (eq(a, "--skip-appex")) { out_decrypt->skip_appex = 1; continue; }
 
         if (subcmd == NULL && a[0] != '-') {
             // First non-flag is the subcommand (or, in the backward-compat

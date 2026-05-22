@@ -187,6 +187,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	if decryptForceUninstall && decryptNoUninstall {
+		tui.Err("--force-uninstall and --no-uninstall are mutually exclusive; pass at most one.")
+		return
+	}
+
 	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
 		tui.Err("%v", err)
@@ -223,6 +228,24 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	}
 
 	defer dev.Close()
+
+	var (
+		uninstall         bool
+		uninstallBundleID string
+	)
+
+	defer func() {
+		if !uninstall || uninstallBundleID == "" {
+			return
+		}
+
+		if err := dev.Uninstall(uninstallBundleID); err != nil {
+			tui.Err("uninstall %s: %v", uninstallBundleID, err)
+			return
+		}
+
+		tui.OK("uninstalled %s", uninstallBundleID)
+	}()
 
 	live.Spin("probing device")
 
@@ -287,6 +310,9 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				}
 
 				live.OK("helper ready")
+
+				uninstall = decideUninstall(false, decryptForceUninstall, decryptNoUninstall)
+				uninstallBundleID = target.bundleId
 
 				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", "", nil)
 
@@ -490,7 +516,24 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
+	uninstall = decideUninstall(install.installed || install.reinstalled, decryptForceUninstall, decryptNoUninstall)
+	uninstallBundleID = appBundleID
+
 	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS, patch.previousDeviceFamily)
+}
+
+// decideUninstall picks the post-decrypt cleanup behavior. weInstalledIt
+// is true when this run put the bundle on the device (fresh install or
+// reinstall over a different version). force/no come from the flags.
+func decideUninstall(weInstalledIt, force, no bool) bool {
+	switch {
+	case force:
+		return true
+	case no:
+		return false
+	}
+
+	return weInstalledIt
 }
 
 func verifyOKSummary(res pipeline.VerifyResult, compareSource bool) string {
@@ -582,7 +625,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	// Helper has one output channel: events on stdout. We drive the TUI
 	// from that stream. --verbose passes -v so the helper additionally
 	// emits LOG_DEBUG events.
-	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, decryptVerbose, onEvent)
+	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, decryptVerbose, decryptSkipAppex, onEvent)
 	if err != nil {
 		live.Fail("helper run: %v", err)
 		return
@@ -661,7 +704,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 			live.Spin("verifying Mach-Os (cryptid, zero-fill)")
 		}
 
-		res, err := pipeline.Verify(outLocal, src)
+		res, err := pipeline.Verify(outLocal, src, decryptSkipAppex)
 		if err != nil {
 			live.Fail("verify failed: %v", err)
 			return

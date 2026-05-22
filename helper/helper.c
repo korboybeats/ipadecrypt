@@ -50,7 +50,9 @@ static int run_decrypt(const decrypt_args_t *a) {
     if (a->bundle_id && a->bundle_id[0]) {
         decrypt_bundle(a->bundle_src, bundle_dst, a->bundle_id);
     }
-    decrypt_appexes(a->bundle_src, bundle_dst);
+    if (!a->skip_appex) {
+        decrypt_appexes(a->bundle_src, bundle_dst);
+    }
 
     unlink(a->out_ipa);
     {

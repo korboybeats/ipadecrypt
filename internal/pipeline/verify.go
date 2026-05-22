@@ -51,11 +51,12 @@ func (r VerifyResult) OK() bool {
 // sourceIPA is non-empty, each output is also byte-compared against
 // its source slice outside the cryptid byte and the encrypted region,
 // catching cryptid-zeroed-without-decrypting and any out-of-band byte
-// corruption.
+// corruption. When skipAppex is true, entries under Payload/<App>.app
+// /PlugIns/ are ignored — the helper left them encrypted on purpose.
 //
 // Output is THIN — helper drops fat siblings — so each output entry
 // maps to one specific slice in a (possibly fat) source.
-func Verify(outputIPA, sourceIPA string) (VerifyResult, error) {
+func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 	var res VerifyResult
 
 	out, err := zip.OpenReader(outputIPA)
@@ -81,6 +82,10 @@ func Verify(outputIPA, sourceIPA string) (VerifyResult, error) {
 
 	for _, of := range out.File {
 		if !strings.HasPrefix(of.Name, "Payload/") || of.FileInfo().IsDir() {
+			continue
+		}
+
+		if skipAppex && isAppExtPath(of.Name) {
 			continue
 		}
 
