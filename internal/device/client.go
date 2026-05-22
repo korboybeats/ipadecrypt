@@ -118,6 +118,13 @@ func (c *Client) Close() {
 	c.ssh.Close()
 }
 
+// shellQuote wraps s in single quotes for safe interpolation into a POSIX
+// shell command. Embedded single quotes are escaped by closing the quote,
+// inserting an escaped single quote, and reopening.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func (c *Client) Run(cmd string) (string, string, int, error) {
 	sess, err := c.ssh.NewSession()
 	if err != nil {

@@ -76,7 +76,9 @@ func PatchForInstall(src, dst, target string, deviceFamily int, patchDeviceType 
 				return nil, &ErrDeviceFamilyMismatch{Supported: supported, Device: deviceFamily}
 			}
 
-			expanded := append(append([]int(nil), supported...), deviceFamily)
+			expanded := make([]int, 0, len(supported)+1)
+			expanded = append(expanded, supported...)
+			expanded = append(expanded, deviceFamily)
 			m["UIDeviceFamily"] = toAnySlice(expanded)
 			res.DeviceFamilyExpanded = true
 			res.PreviousDeviceFamily = supported

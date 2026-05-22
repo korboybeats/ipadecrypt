@@ -163,7 +163,7 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 
 // Uninstall removes an installed app via `uicache -u <bundleID>`.
 func (c *Client) Uninstall(bundleID string) error {
-	out, errOut, code, err := c.RunSudo(fmt.Sprintf("uicache -u %q", bundleID))
+	out, errOut, code, err := c.RunSudo("uicache -u " + shellQuote(bundleID))
 	if err != nil {
 		return fmt.Errorf("uicache: %w", err)
 	}
@@ -251,14 +251,6 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 		return version, nil
 	}
 
-	if version, ok := info["CFBundleShortVersionString"]; ok {
-		return strings.TrimSpace(fmt.Sprintf("%v", version)), nil
-	}
-
-	if version, ok := info["CFBundleVersion"]; ok {
-		return strings.TrimSpace(fmt.Sprintf("%v", version)), nil
-	}
-
 	return "", errors.New("installed version not found")
 }
 
@@ -268,13 +260,8 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 // identifier (binary plists may contain the bundle ID as a non-identifier
 // substring, e.g. URL handler/query schemes).
 func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
-	if strings.ContainsAny(bundleID, "'\"\\$`\n") {
-		return "", fmt.Errorf("unsupported characters in bundle-id %q", bundleID)
-	}
-
-	cmd := fmt.Sprintf(
-		"sh -c 'grep -laF \"%s\" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null'",
-		bundleID)
+	cmd := "grep -laF " + shellQuote(bundleID) +
+		" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null"
 
 	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
