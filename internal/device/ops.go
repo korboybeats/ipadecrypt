@@ -167,10 +167,10 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 // first command in a `cmd1; cmd2` chain, otherwise rm runs as mobile and
 // hits the _installd-owned files with EACCES). Order matters:
 //
-//  1. uicache -u <bundlePath>  — unregister from LSApplicationWorkspace
+//  1. uicache -u <bundlePath>  - unregister from LSApplicationWorkspace
 //     so SpringBoard drops the icon and the LS registry forgets the
 //     bundle.
-//  2. rm -rf <UUID-dir>        — remove the bundle dir under
+//  2. rm -rf <UUID-dir>        - remove the bundle dir under
 //     /var/containers/Bundle/Application/.
 //
 // The data container at /var/mobile/Containers/Data/Application/<other-UUID>/
@@ -372,7 +372,7 @@ type FrameHandler func(path string, size int64, r io.Reader) error
 //
 // In this mode the helper writes IPA bytes to stdout and event lines to
 // stderr; we tee stderr through the event splitter while ipaW receives
-// the binary stream — no on-device output file, no sftp pull.
+// the binary stream - no on-device output file, no sftp pull.
 func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
 	verbose, skipAppex bool, onEvent EventHandler, ipaW io.Writer) (int, error) {
 	gflag := ""

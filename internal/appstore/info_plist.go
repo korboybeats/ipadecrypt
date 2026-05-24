@@ -127,5 +127,5 @@ func (c *Client) FetchMinimumOSVersion(meta VersionMetadata) (string, error) {
 		return info.MinimumOSVersion, nil
 	}
 
-	return "", errors.New("Info.plist not found in IPA")
+	return "", errors.New("no Info.plist in IPA")
 }

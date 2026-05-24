@@ -4,24 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
-)
 
-const (
-	mhMagic    = 0xfeedface
-	mhMagic64  = 0xfeedfacf
-	mhCigam    = 0xcefaedfe
-	mhCigam64  = 0xcffaedfe
-	fatMagic   = 0xcafebabe
-	fatCigam   = 0xbebafeca
-	fatMagic64 = 0xcafebabf
-	fatCigam64 = 0xbfbafeca
-
-	lcEncryptionInfo   = 0x21
-	lcEncryptionInfo64 = 0x2c
+	"github.com/londek/ipadecrypt/internal/macho"
 )
 
 type VerifyMismatch struct {
@@ -52,9 +39,9 @@ func (r VerifyResult) OK() bool {
 // its source slice outside the cryptid byte and the encrypted region,
 // catching cryptid-zeroed-without-decrypting and any out-of-band byte
 // corruption. When skipAppex is true, entries under Payload/<App>.app
-// /PlugIns/ are ignored  the helper left them encrypted on purpose.
+// /PlugIns/ are ignored - the helper left them encrypted on purpose.
 //
-// Output is THIN  helper drops fat siblings  so each output entry
+// Output is THIN - helper drops fat siblings - so each output entry
 // maps to one specific slice in a (possibly fat) source.
 func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 	var res VerifyResult
@@ -100,7 +87,7 @@ func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 
 		res.Scanned++
 
-		encrypted, err := sliceHasCryptid(outData)
+		encrypted, err := macho.SliceHasCryptid(outData)
 		if err != nil {
 			res.Skipped = append(res.Skipped, of.Name)
 			continue
@@ -112,7 +99,7 @@ func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 		}
 
 		// Source-bearing path: precise compare (handles its own all-zero
-		// check, gated on srcCrypt.cryptid to avoid false positives on
+		// check, gated on srcCrypt.Cryptid to avoid false positives on
 		// legitimately-plaintext passthrough slices).
 		if sf := srcByName[of.Name]; sf != nil {
 			srcData, srcIsMacho, err := readMachO(sf)
@@ -121,7 +108,7 @@ func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 			}
 
 			// Source isn't Mach-O (TBD stubs, .a archives, resolved
-			// symlinks)  nothing FairPlay touches, skip.
+			// symlinks) - nothing FairPlay touches, skip.
 			if !srcIsMacho {
 				continue
 			}
@@ -143,7 +130,7 @@ func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 		// Source-free fallback: flag thin outputs whose entire crypt
 		// region is zeros. False positives are possible if the source
 		// shipped LC_ENCRYPTION_INFO with cryptid==0 over a genuinely
-		// zero region  rare, and source-aware verify catches it.
+		// zero region - rare, and source-aware verify catches it.
 		if cryptZeroed(outData) {
 			res.AllZeroCrypt = append(res.AllZeroCrypt, of.Name)
 		}
@@ -158,31 +145,16 @@ func cryptZeroed(data []byte) bool {
 	}
 
 	m := binary.LittleEndian.Uint32(data[:4])
-	if m != mhMagic && m != mhMagic64 {
+	if m != macho.MagicLE && m != macho.Magic64LE {
 		return false
 	}
 
-	info, err := readEncryptionInfo(data)
-	if err != nil || info.cryptsize == 0 {
+	info, err := macho.ReadEncryptionInfo(data)
+	if err != nil || info.CryptSize == 0 {
 		return false
 	}
 
-	return isAllZero(data[info.cryptoff : info.cryptoff+info.cryptsize])
-}
-
-func isMachOMagic(b []byte) bool {
-	if len(b) < 4 {
-		return false
-	}
-
-	m := binary.LittleEndian.Uint32(b)
-
-	switch m {
-	case mhMagic, mhMagic64, mhCigam, mhCigam64, fatMagic, fatCigam, fatMagic64, fatCigam64:
-		return true
-	}
-
-	return false
+	return isAllZero(data[info.CryptOff : info.CryptOff+info.CryptSize])
 }
 
 // readMachO returns the file's bytes if it begins with a Mach-O / fat magic.
@@ -195,7 +167,7 @@ func readMachO(f *zip.File) ([]byte, bool, error) {
 	defer rc.Close()
 
 	head := make([]byte, 4)
-	if n, _ := io.ReadFull(rc, head); n < 4 || !isMachOMagic(head) {
+	if n, _ := io.ReadFull(rc, head); n < 4 || !macho.IsMagic(head) {
 		return nil, false, nil
 	}
 
@@ -205,142 +177,6 @@ func readMachO(f *zip.File) ([]byte, bool, error) {
 	}
 
 	return append(head, rest...), true, nil
-}
-
-func sliceHasCryptid(data []byte) (bool, error) {
-	if len(data) < 4 {
-		return false, errors.New("too short")
-	}
-
-	magic := binary.LittleEndian.Uint32(data[:4])
-	switch magic {
-	case fatMagic, fatCigam:
-		return checkFat(data, false)
-	case fatMagic64, fatCigam64:
-		return checkFat(data, true)
-	case mhMagic, mhMagic64:
-		return checkThin(data, false)
-	case mhCigam, mhCigam64:
-		return checkThin(data, true)
-	}
-
-	return false, errors.New("not mach-o")
-}
-
-func checkFat(data []byte, is64 bool) (bool, error) {
-	bo := binary.BigEndian // fat headers are always big-endian on disk
-
-	if len(data) < 8 {
-		return false, errors.New("fat header truncated")
-	}
-
-	nfat := bo.Uint32(data[4:8])
-	if nfat == 0 || nfat > 32 {
-		return false, fmt.Errorf("implausible nfat_arch=%d", nfat)
-	}
-
-	archSize := 20
-	if is64 {
-		archSize = 32
-	}
-
-	off := 8
-	for range nfat {
-		if off+archSize > len(data) {
-			return false, errors.New("fat_arch truncated")
-		}
-
-		var sliceOff, sliceSize uint64
-		if is64 {
-			sliceOff = bo.Uint64(data[off+8 : off+16])
-			sliceSize = bo.Uint64(data[off+16 : off+24])
-		} else {
-			sliceOff = uint64(bo.Uint32(data[off+8 : off+12]))
-			sliceSize = uint64(bo.Uint32(data[off+12 : off+16]))
-		}
-
-		off += archSize
-
-		if sliceOff+sliceSize > uint64(len(data)) {
-			return false, errors.New("fat slice out of range")
-		}
-
-		if sliceSize < 4 {
-			continue
-		}
-
-		slice := data[sliceOff : sliceOff+sliceSize]
-		m := binary.LittleEndian.Uint32(slice[:4])
-
-		enc, err := checkThin(slice, m == mhCigam || m == mhCigam64)
-		if err != nil {
-			return false, err
-		}
-
-		if enc {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-func checkThin(data []byte, swap bool) (bool, error) {
-	var bo binary.ByteOrder = binary.LittleEndian
-	if swap {
-		bo = binary.BigEndian
-	}
-
-	if len(data) < 28 {
-		return false, errors.New("mach_header truncated")
-	}
-
-	magic := bo.Uint32(data[0:4])
-	is64 := magic == mhMagic64 || magic == mhCigam64
-	ncmds := bo.Uint32(data[16:20])
-	sizeofcmds := bo.Uint32(data[20:24])
-
-	headerSize := 28
-	if is64 {
-		headerSize = 32
-	}
-
-	if uint64(headerSize)+uint64(sizeofcmds) > uint64(len(data)) {
-		return false, errors.New("load commands truncated")
-	}
-
-	if ncmds > 1<<16 {
-		return false, fmt.Errorf("implausible ncmds=%d", ncmds)
-	}
-
-	p := headerSize
-	for i := uint32(0); i < ncmds; i++ {
-		if p+8 > len(data) {
-			return false, errors.New("load cmd truncated")
-		}
-
-		cmd := bo.Uint32(data[p : p+4])
-
-		cmdSize := bo.Uint32(data[p+4 : p+8])
-		if cmdSize < 8 || int(cmdSize) > len(data)-p {
-			return false, fmt.Errorf("bad cmdsize=%d", cmdSize)
-		}
-
-		if (is64 && cmd == lcEncryptionInfo64) || (!is64 && cmd == lcEncryptionInfo) {
-			if int(cmdSize) < 20 {
-				return false, errors.New("LC_ENCRYPTION_INFO truncated")
-			}
-
-			cryptid := bo.Uint32(data[p+16 : p+20])
-			if cryptid != 0 {
-				return true, nil
-			}
-		}
-
-		p += int(cmdSize)
-	}
-
-	return false, nil
 }
 
 // compareMachOSlice returns "" when the output is consistent with the
@@ -356,8 +192,8 @@ func compareMachOSlice(outData, srcData []byte) string {
 	}
 
 	outMagic := binary.LittleEndian.Uint32(outData[:4])
-	outIsFat := outMagic == fatMagic || outMagic == fatCigam ||
-		outMagic == fatMagic64 || outMagic == fatCigam64
+	outIsFat := outMagic == macho.FatMagic || outMagic == macho.FatCigam ||
+		outMagic == macho.FatMagic64 || outMagic == macho.FatCigam64
 
 	if outIsFat {
 		if !bytes.Equal(outData, srcData) {
@@ -367,19 +203,19 @@ func compareMachOSlice(outData, srcData []byte) string {
 		return ""
 	}
 
-	outCpu, outSub, err := readThinCpu(outData)
+	outCpu, outSub, err := macho.ReadThinCpu(outData)
 	if err != nil {
 		return "parse output cpu: " + err.Error()
 	}
 
-	srcSlice, err := pickMatchingSlice(srcData, outCpu, outSub)
+	srcSlice, err := macho.PickSlice(srcData, outCpu, outSub)
 	if err != nil {
 		return "match source slice: " + err.Error()
 	}
 
-	outCrypt, err := readEncryptionInfo(outData)
+	outCrypt, err := macho.ReadEncryptionInfo(outData)
 	if err != nil {
-		// No LC_ENCRYPTION_INFO in output  slice was never encrypted.
+		// No LC_ENCRYPTION_INFO in output - slice was never encrypted.
 		// Direct compare without the cryptid/cryptoff skip.
 		if bytes.Equal(outData, srcSlice) {
 			return ""
@@ -388,19 +224,19 @@ func compareMachOSlice(outData, srcData []byte) string {
 		return "thin passthrough differs from source slice"
 	}
 
-	srcCrypt, err := readEncryptionInfo(srcSlice)
+	srcCrypt, err := macho.ReadEncryptionInfo(srcSlice)
 	if err != nil {
 		return "parse source LC_ENCRYPTION_INFO: " + err.Error()
 	}
 
-	// Helper only patches cryptid and decrypts bytes  never moves
+	// Helper only patches cryptid and decrypts bytes - never moves
 	// cryptoff or cryptsize.
-	if outCrypt.cryptoff != srcCrypt.cryptoff ||
-		outCrypt.cryptsize != srcCrypt.cryptsize {
+	if outCrypt.CryptOff != srcCrypt.CryptOff ||
+		outCrypt.CryptSize != srcCrypt.CryptSize {
 		return fmt.Sprintf(
 			"cryptoff/cryptsize moved: output=(%d,%d) source=(%d,%d)",
-			outCrypt.cryptoff, outCrypt.cryptsize,
-			srcCrypt.cryptoff, srcCrypt.cryptsize,
+			outCrypt.CryptOff, outCrypt.CryptSize,
+			srcCrypt.CryptOff, srcCrypt.CryptSize,
 		)
 	}
 
@@ -408,14 +244,14 @@ func compareMachOSlice(outData, srcData []byte) string {
 		return fmt.Sprintf("size differs: output=%d source=%d", len(outData), len(srcSlice))
 	}
 
-	cryptidEnd := outCrypt.cryptidOffset + 4
-	cryptEnd := outCrypt.cryptoff + outCrypt.cryptsize
+	cryptidEnd := outCrypt.CryptidOffset + 4
+	cryptEnd := outCrypt.CryptOff + outCrypt.CryptSize
 
-	if !bytes.Equal(outData[:outCrypt.cryptidOffset], srcSlice[:outCrypt.cryptidOffset]) {
+	if !bytes.Equal(outData[:outCrypt.CryptidOffset], srcSlice[:outCrypt.CryptidOffset]) {
 		return "header diff before cryptid"
 	}
 
-	if !bytes.Equal(outData[cryptidEnd:outCrypt.cryptoff], srcSlice[cryptidEnd:outCrypt.cryptoff]) {
+	if !bytes.Equal(outData[cryptidEnd:outCrypt.CryptOff], srcSlice[cryptidEnd:outCrypt.CryptOff]) {
 		return "header/load-commands diff between cryptid and cryptoff"
 	}
 
@@ -424,12 +260,12 @@ func compareMachOSlice(outData, srcData []byte) string {
 		return "diff after encrypted region (LINKEDIT/etc)"
 	}
 
-	outCryptBytes := outData[outCrypt.cryptoff:cryptEnd]
-	srcCryptBytes := srcSlice[srcCrypt.cryptoff : srcCrypt.cryptoff+srcCrypt.cryptsize]
+	outCryptBytes := outData[outCrypt.CryptOff:cryptEnd]
+	srcCryptBytes := srcSlice[srcCrypt.CryptOff : srcCrypt.CryptOff+srcCrypt.CryptSize]
 
 	// Source already plaintext: bytes must match verbatim, and the
 	// "decrypt bailed" heuristics below would false-flag.
-	if srcCrypt.cryptid == 0 {
+	if srcCrypt.Cryptid == 0 {
 		return ""
 	}
 
@@ -452,166 +288,4 @@ func isAllZero(b []byte) bool {
 	}
 
 	return true
-}
-
-func readThinCpu(data []byte) (uint32, uint32, error) {
-	if len(data) < 16 {
-		return 0, 0, errors.New("mach_header truncated")
-	}
-
-	bo := binary.LittleEndian
-	magic := bo.Uint32(data[0:4])
-
-	if magic != mhMagic && magic != mhMagic64 {
-		return 0, 0, fmt.Errorf("not a thin Mach-O magic=0x%x", magic)
-	}
-
-	return bo.Uint32(data[4:8]), bo.Uint32(data[8:12]), nil
-}
-
-// pickMatchingSlice returns the slice (or whole file when thin) of `data`
-// whose (cputype, cpusubtype masking off feature bits) matches.
-func pickMatchingSlice(data []byte, cpu, sub uint32) ([]byte, error) {
-	if len(data) < 4 {
-		return nil, errors.New("source too short")
-	}
-
-	magic := binary.LittleEndian.Uint32(data[:4])
-	switch magic {
-	case mhMagic, mhMagic64:
-		c, s, err := readThinCpu(data)
-		if err != nil {
-			return nil, err
-		}
-
-		if c == cpu && (s&0x00ffffff) == (sub&0x00ffffff) {
-			return data, nil
-		}
-
-		return nil, fmt.Errorf("source cpu mismatch: have (0x%x,0x%x) want (0x%x,0x%x)", c, s, cpu, sub)
-	case fatMagic, fatMagic64:
-		return pickFatSlice(data, magic == fatMagic64, cpu, sub)
-	}
-
-	return nil, fmt.Errorf("source not Mach-O magic=0x%x", magic)
-}
-
-func pickFatSlice(data []byte, is64 bool, cpu, sub uint32) ([]byte, error) {
-	bo := binary.BigEndian
-
-	if len(data) < 8 {
-		return nil, errors.New("fat truncated")
-	}
-
-	nfat := bo.Uint32(data[4:8])
-	if nfat == 0 || nfat > 32 {
-		return nil, fmt.Errorf("implausible nfat_arch=%d", nfat)
-	}
-
-	archSize := 20
-	if is64 {
-		archSize = 32
-	}
-
-	off := 8
-	for range nfat {
-		if off+archSize > len(data) {
-			return nil, errors.New("fat_arch truncated")
-		}
-
-		cputype := bo.Uint32(data[off : off+4])
-		cpusubtype := bo.Uint32(data[off+4 : off+8])
-
-		var sliceOff, sliceSize uint64
-		if is64 {
-			sliceOff = bo.Uint64(data[off+8 : off+16])
-			sliceSize = bo.Uint64(data[off+16 : off+24])
-		} else {
-			sliceOff = uint64(bo.Uint32(data[off+8 : off+12]))
-			sliceSize = uint64(bo.Uint32(data[off+12 : off+16]))
-		}
-
-		off += archSize
-
-		if cputype == cpu && (cpusubtype&0x00ffffff) == (sub&0x00ffffff) {
-			if sliceOff+sliceSize > uint64(len(data)) {
-				return nil, errors.New("fat slice out of range")
-			}
-
-			return data[sliceOff : sliceOff+sliceSize], nil
-		}
-	}
-
-	return nil, fmt.Errorf("no fat slice matched cputype=0x%x cpusubtype=0x%x", cpu, sub)
-}
-
-type encryptionInfo struct {
-	cryptidOffset uint64 // file offset of the cryptid u32 within the slice
-	cryptoff      uint64
-	cryptsize     uint64
-	cryptid       uint32
-}
-
-func readEncryptionInfo(data []byte) (encryptionInfo, error) {
-	var info encryptionInfo
-
-	if len(data) < 28 {
-		return info, errors.New("mach_header truncated")
-	}
-
-	bo := binary.LittleEndian
-	magic := bo.Uint32(data[0:4])
-	is64 := magic == mhMagic64
-
-	if magic != mhMagic && magic != mhMagic64 {
-		return info, fmt.Errorf("not a thin LE Mach-O magic=0x%x", magic)
-	}
-
-	ncmds := bo.Uint32(data[16:20])
-	sizeofcmds := bo.Uint32(data[20:24])
-
-	headerSize := uint64(28)
-	if is64 {
-		headerSize = 32
-	}
-
-	if headerSize+uint64(sizeofcmds) > uint64(len(data)) {
-		return info, errors.New("load commands truncated")
-	}
-
-	p := headerSize
-	for range ncmds {
-		if p+8 > uint64(len(data)) {
-			return info, errors.New("load cmd truncated")
-		}
-
-		cmd := bo.Uint32(data[p : p+4])
-		cmdSize := bo.Uint32(data[p+4 : p+8])
-
-		if cmdSize < 8 || uint64(cmdSize) > uint64(len(data))-p {
-			return info, fmt.Errorf("bad cmdsize=%d", cmdSize)
-		}
-
-		want := uint32(lcEncryptionInfo)
-		if is64 {
-			want = lcEncryptionInfo64
-		}
-
-		if cmd == want {
-			if cmdSize < 20 {
-				return info, errors.New("LC_ENCRYPTION_INFO truncated")
-			}
-
-			info.cryptoff = uint64(bo.Uint32(data[p+8 : p+12]))
-			info.cryptsize = uint64(bo.Uint32(data[p+12 : p+16]))
-			info.cryptidOffset = p + 16
-			info.cryptid = bo.Uint32(data[p+16 : p+20])
-
-			return info, nil
-		}
-
-		p += uint64(cmdSize)
-	}
-
-	return info, errors.New("no LC_ENCRYPTION_INFO load command")
 }

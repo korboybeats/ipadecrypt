@@ -63,7 +63,7 @@ static int emit_macho_frame(const char *relpath, const char *abs_path) {
 // files: dump.c writes via unlink-then-create, which detaches from the
 // fs_copy_tree hardlink and leaves the new file with nlink=1. Pure
 // hardlinks-from-source stay at nlink>=2 (source bundle copy +
-// staging copy) and are skipped — the host substitutes them from the
+// staging copy) and are skipped - the host substitutes them from the
 // source IPA verbatim.
 //
 // Per-file errors are best-effort: logged and skipped so a single

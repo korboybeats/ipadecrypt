@@ -116,7 +116,7 @@ func Load(path string) (*Config, error) {
 // migrateAppleV1ToV2 lifts the v1 apple.account.* nested object into the
 // flat v2 apple.* fields. Top-level apple.email/apple.password already
 // share JSON keys with the v2 schema, so they're carried over by the
-// initial Unmarshal — this only rescues the account-nested credentials.
+// initial Unmarshal - this only rescues the account-nested credentials.
 func migrateAppleV1ToV2(data []byte, apple *Apple) {
 	var raw struct {
 		Apple struct {

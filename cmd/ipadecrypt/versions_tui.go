@@ -500,7 +500,7 @@ func (ui *versionsUI) fetchWorker(queue <-chan string, results chan<- fetchResul
 		}
 
 		// Range-fetch Info.plist from the IPA URL the metadata call
-		// just gave us. Failures here are non-fatal — the row still
+		// just gave us. Failures here are non-fatal - the row still
 		// shows everything else and just leaves the minOS column blank.
 		var minOS string
 
