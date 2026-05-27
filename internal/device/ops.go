@@ -26,6 +26,43 @@ type ProbeResult struct {
 	// DeviceFamily mirrors UIDeviceFamily values from Info.plist:
 	// 1 = iPhone/iPod, 2 = iPad. 0 if unknown.
 	DeviceFamily int
+	// Jailbreak is the detected jailbreak: "Dopamine", "palera1n",
+	// "checkra1n", "rootless?" (rootless but brand unknown) or "unknown".
+	Jailbreak string
+}
+
+// classifyJailbreak identifies the ACTIVE jailbreak from the live /var/jb
+// symlink target - the hard tell. /var/jb is the rootless prefix every
+// modern jb mounts at boot, and its target is the bootstrap that actually
+// booted this session, so it reflects what is RUNNING, not what is merely
+// installed: a leftover Dopamine.app on a palera1n boot cannot change where
+// /var/jb points. We deliberately ignore installed apps/dpkg packages -
+// they are stale-prone and not authoritative.
+//
+// Verified on iPhone10,5 / A11 / Dopamine: target is
+// /private/preboot/<hash>/dopamine-<rand>/procursus. roothide Dopamine also
+// uses a /var/.jbroot-<hex> scheme. palera1n's rootless bootstrap sits under
+// a jb-<rand> dir; checkra1n is rootful (no /var/jb -> preboot link). The
+// "dopamine" token is empirically confirmed; the palera1n/checkra1n schemes
+// are from their known layouts (no such hardware here to confirm).
+func classifyJailbreak(sig string) string {
+	f := map[string]string{}
+	for _, tok := range strings.Fields(sig) {
+		if k, v, ok := strings.Cut(tok, "="); ok {
+			f[k] = v
+		}
+	}
+	link := strings.ToLower(f["link"])
+	switch {
+	case strings.Contains(link, "dopamine") || strings.Contains(link, ".jbroot"):
+		return "Dopamine"
+	case strings.Contains(link, "palera1n") || strings.Contains(link, "/jb-"):
+		return "palera1n"
+	case f["vjb"] == "1":
+		return "rootless?"
+	default:
+		return "unknown"
+	}
 }
 
 func deviceFamilyFromModel(model string) int {
@@ -50,15 +87,16 @@ func (c *Client) Probe() (ProbeResult, error) {
 	// always thin to the device's actual arch). Offset 8 in the
 	// mach_header_64 is the cpusubtype low byte: 0x02 = arm64e (PAC),
 	// 0x00 or 0x01 = arm64.
-	const script = "" +
-		"sw_vers -productVersion 2>/dev/null || " +
-		"/usr/libexec/PlistBuddy -c 'Print :ProductVersion' " +
-		"/System/Library/CoreServices/SystemVersion.plist 2>/dev/null; " +
-		"(sysctl -n hw.machine 2>/dev/null || " +
-		"/usr/sbin/sysctl -n hw.machine 2>/dev/null || " +
-		"/var/jb/usr/sbin/sysctl -n hw.machine 2>/dev/null || " +
-		"sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//' || true); " +
-		"od -An -tx1 -j8 -N1 /sbin/launchd 2>/dev/null | tr -d ' \\n'"
+	// Line 0: iOS version. Line 1: model. Line 2: launchd cpusubtype byte.
+	// Then a "JB ..." line carrying the live /var/jb symlink target - the
+	// hard tell for the ACTIVE jailbreak (see classifyJailbreak). An absent
+	// or unrecognized jailbreak just yields "unknown"; the probe never fails.
+	const script = `sw_vers -productVersion 2>/dev/null || /usr/libexec/PlistBuddy -c 'Print :ProductVersion' /System/Library/CoreServices/SystemVersion.plist 2>/dev/null
+(sysctl -n hw.machine 2>/dev/null || /usr/sbin/sysctl -n hw.machine 2>/dev/null || /var/jb/usr/sbin/sysctl -n hw.machine 2>/dev/null || sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//' || true)
+od -An -tx1 -j8 -N1 /sbin/launchd 2>/dev/null | tr -d ' \n'; echo
+VJB=0; [ -e /var/jb ] && VJB=1
+LINK=$(readlink /var/jb 2>/dev/null)
+printf 'JB link=%s vjb=%s\n' "$LINK" "$VJB"`
 
 	out, _, code, err := c.Run(script)
 	if err != nil || code != 0 {
@@ -88,6 +126,14 @@ func (c *Client) Probe() (ProbeResult, error) {
 	}
 
 	r.DeviceFamily = deviceFamilyFromModel(r.Model)
+
+	r.Jailbreak = "unknown"
+	for _, ln := range lines {
+		if s := strings.TrimSpace(ln); strings.HasPrefix(s, "JB ") {
+			r.Jailbreak = classifyJailbreak(strings.TrimPrefix(s, "JB "))
+			break
+		}
+	}
 
 	return r, nil
 }

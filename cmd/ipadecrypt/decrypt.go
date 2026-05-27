@@ -283,7 +283,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s", Version, cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch, probe.Model)
+	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s (%s)", Version, cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak)
 
 	if target.bundleId != "" && !decryptFromAppStore {
 		live = tui.NewLive()

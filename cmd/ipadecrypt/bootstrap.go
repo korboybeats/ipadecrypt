@@ -250,6 +250,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		"iOS", probe.IOSVersion,
 		"Arch", probe.Arch,
 		"Model", probe.Model,
+		"Jailbreak", probe.Jailbreak,
 	)
 
 	// ---- Step 3: device prerequisites --------------------------------
