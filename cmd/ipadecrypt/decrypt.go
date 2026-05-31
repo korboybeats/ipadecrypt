@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
@@ -238,25 +242,49 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	defer dev.Close()
+	cleanups := &cleanupStack{}
+	defer cleanups.run()
 
-	var (
-		uninstall         bool
-		uninstallBundleID string
-	)
+	// dev.Close pushed first so it runs LAST: remote rm/uninstall need a
+	// live SSH session.
+	cleanups.push(dev.Close)
 
-	defer func() {
-		if !uninstall || uninstallBundleID == "" {
+	sigCh := make(chan os.Signal, 1)
+
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	go func() {
+		sig, ok := <-sigCh
+		if !ok {
 			return
 		}
 
-		if err := dev.Uninstall(uninstallBundleID); err != nil {
+		// Second Ctrl-C should hard-kill in case cleanup hangs.
+		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+		tui.Warn("interrupted (%v), cleaning up (press again to force quit)", sig)
+		cleanups.run()
+		os.Exit(130)
+	}()
+
+	var (
+		uninstall           bool
+		uninstallBundleID   string
+		uninstallBundlePath string
+	)
+
+	cleanups.push(func() {
+		if !uninstall || uninstallBundlePath == "" {
+			return
+		}
+
+		if err := dev.Uninstall(uninstallBundlePath); err != nil {
 			tui.Err("uninstall %s: %v", uninstallBundleID, err)
 			return
 		}
 
 		tui.OK("uninstalled %s", uninstallBundleID)
-	}()
+	})
 
 	live.Spin("probing device")
 
@@ -266,7 +294,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s", Version, cfg.Device.User, dev.Host(), probe.IOSVersion, probe.Arch, probe.Model)
+	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s (%s)", Version, cfg.Device.User, dev.Host(), probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak)
 
 	//
 	// Fuzzy resolution: if target looks like a search term (no dot), match
@@ -322,7 +350,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				}
 
 				idx, err := tui.Select(
-					fmt.Sprintf("%s v%s is installed - which build do you want decrypted?", target.bundleId, version),
+					fmt.Sprintf("%s v%s is already installed - which build do you want decrypted?", target.bundleId, version),
 					[]string{
 						fmt.Sprintf("Installed build v%s", version),
 						"Latest from App Store",
@@ -359,8 +387,9 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				uninstall = decideUninstall(false, decryptForceUninstall, decryptNoUninstall)
 				uninstallBundleID = target.bundleId
+				uninstallBundlePath = installedPath
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy, "", nil)
+				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "", keepPolicy)
 
 				return
 			}
@@ -391,7 +420,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, newVersion, "", "", keepPolicy, "", nil)
+				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, newVersion, "", keepPolicy)
 
 				return
 			}
@@ -448,7 +477,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 					live.OK("helper ready")
 
-					runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", keepPolicy, "", nil)
+					runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "", keepPolicy)
 					return
 				case 2:
 					extVerID, ok := selectAppStoreVersionForDecrypt(cfg, paths, target)
@@ -582,11 +611,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	defer func() {
+	cleanups.push(func() {
 		if patch.patchedPath != "" {
 			os.Remove(patch.patchedPath)
 		}
-	}()
+	})
+
+	live.OK("patched Info.plist")
 
 	if patch.changed {
 		tui.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
@@ -599,8 +630,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	if patch.watchStripped > 0 {
 		tui.OK("stripped %d Watch/ entries", patch.watchStripped)
 	}
-
-	live.OK("patched Info.plist")
 
 	live = tui.NewLive()
 	live.Spin("preparing install plan")
@@ -616,6 +645,12 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		return
 	}
+
+	cleanups.push(func() {
+		if plan.stagingRemote != "" && !decryptNoCleanup {
+			dev.Remove(plan.stagingRemote)
+		}
+	})
 
 	if plan.bundlePath == "" {
 		live.Spin("preparing install")
@@ -659,8 +694,9 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 	uninstall = decideUninstall(install.installed || install.reinstalled, decryptForceUninstall, decryptNoUninstall)
 	uninstallBundleID = appBundleID
+	uninstallBundlePath = install.bundlePath
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, keepPolicy, patch.previousMinOS, patch.previousDeviceFamily)
+	runDecryptOnBundle(dev, cleanups, plan.helperPath, appBundleID, install.bundlePath, appVersion, encPath, keepPolicy)
 }
 
 // decideUninstall picks the post-decrypt cleanup behavior. weInstalledIt
@@ -720,24 +756,54 @@ func verifyFailureSummary(res pipeline.VerifyResult) string {
 	return strings.Join(parts, ", ")
 }
 
-// runDecryptOnBundle runs helper → pull → verify → cleanup on an
-// installed bundle. stagingRemote may be "" for the use-installed path.
-// srcIPAPath is the source IPA on the host when one exists (App Store
-// download / cache hit / local --ipa); empty for the use-installed path
-// where the source lives on-device only. Used by --extra-verify.
-//
-// originalMinOS / originalDeviceFamily are the pre-PatchForInstall values
-// from the source IPA; when non-empty the output IPA's Info.plist is
-// rewritten back to them after the pull, so the decrypted artifact does
-// not ship with our install-time mutations baked in. Both are empty on
-// the --use-installed path (no patching happened).
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, keepPolicy, originalMinOS string, originalDeviceFamily []int) {
+// runDecryptOnBundle writes the decrypted IPA locally. When srcIPAPath is
+// present, the helper streams only decrypted Mach-Os and the host assembles
+// the IPA from the original source. For use-installed/StoreKit paths, the
+// helper streams a full IPA from the device.
+func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, bundleID, bundlePath, version, srcIPAPath, keepPolicy string) {
 	outRemote := remoteOutputPath(bundleID, version)
 
-	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
-		tui.Err("mkdir work: %v", err)
+	keepDesktop := keepPolicy == config.OutputKeepDesktop || keepPolicy == config.OutputKeepBoth
+	keepDevice := keepPolicy == config.OutputKeepDevice || keepPolicy == config.OutputKeepBoth
+
+	outLocal, cleanupLocal, err := decryptWorkingOutputPath(keepDesktop, bundleID, version)
+	if err != nil {
+		tui.Err("output path: %v", err)
 		return
 	}
+	if cleanupLocal != nil {
+		cleanups.push(cleanupLocal)
+	}
+
+	if keepDevice {
+		if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
+			tui.Err("mkdir device output: %v", err)
+			return
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outLocal), 0o755); err != nil {
+		tui.Err("mkdir local: %v", err)
+		return
+	}
+
+	outFile, err := os.OpenFile(outLocal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		tui.Err("open local: %v", err)
+		return
+	}
+
+	// Best-effort: drop the partially-written IPA on any error return.
+	// Cleared after we commit on success.
+	abandonLocal := true
+
+	cleanups.push(func() {
+		outFile.Close()
+
+		if abandonLocal {
+			os.Remove(outLocal)
+		}
+	})
 
 	live := tui.NewLive()
 	live.Spin("starting helper")
@@ -763,84 +829,53 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 	}
 
-	// Helper has one output channel: events on stdout. We drive the TUI
-	// from that stream. --verbose passes -v so the helper additionally
-	// emits LOG_DEBUG events.
-	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, decryptVerbose, decryptSkipAppex, onEvent)
-	if err != nil {
-		live.Fail("helper run: %v", err)
-		return
-	}
+	cw := &countingWriter{w: outFile, onTick: func(n int64) {
+		live.Message("writing IPA → %s", humanBytes(n))
+	}}
 
-	if code != 0 {
-		live.Fail("helper exit %d", code)
-		return
-	}
+	if srcIPAPath != "" {
+		// Host-side assembly: helper streams decrypted Mach-Os on stdout,
+		// host fuses them with the (unpatched) source IPA into outFile.
+		// No zip on device; output uses the original Info.plist as-is.
+		assembleErr := pipeline.Assemble(srcIPAPath, cw, func(write pipeline.SubstituteWriter) error {
+			code, err := dev.RunHelperExecs(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, func(name string, _ int64, r io.Reader) error {
+				return write(name, r)
+			})
+			if err != nil {
+				return fmt.Errorf("helper run: %w", err)
+			}
 
-	live.OK("%s", progress.Summary())
+			if code != 0 {
+				return fmt.Errorf("helper exit %d", code)
+			}
 
-	keepDesktop := keepPolicy == config.OutputKeepDesktop || keepPolicy == config.OutputKeepBoth
-	keepDevice := keepPolicy == config.OutputKeepDevice || keepPolicy == config.OutputKeepBoth
-
-	outLocal, cleanupLocal, err := decryptWorkingOutputPath(keepDesktop, bundleID, version)
-	if err != nil {
-		tui.Err("output path: %v", err)
-		return
-	}
-	if cleanupLocal != nil {
-		defer cleanupLocal()
-	}
-
-	live = tui.NewLive()
-	if keepDesktop {
-		live.Spin("pulling → %s", filepath.Base(outLocal))
-	} else {
-		live.Spin("preparing local verification copy")
-	}
-
-	remoteSt, err := dev.Stat(outRemote)
-	if err != nil {
-		live.Fail("stat remote: %v", err)
-		return
-	}
-
-	if err := os.MkdirAll(filepath.Dir(outLocal), 0o755); err != nil {
-		live.Fail("mkdir local: %v", err)
-		return
-	}
-
-	outFile, err := os.OpenFile(outLocal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		live.Fail("open local: %v", err)
-		return
-	}
-
-	pw := newProgressWriter(outFile, remoteSt.Size(), func(cur, total int64) {
-		label := "preparing local verification copy"
-		if keepDesktop {
-			label = fmt.Sprintf("pulling → %s", filepath.Base(outLocal))
+			return nil
+		})
+		if assembleErr != nil {
+			live.Fail("assemble: %v", assembleErr)
+			return
 		}
-		live.Message("%s", transferProgressText(label, cur, total))
-		live.Progress(cur, total)
-	})
+	} else {
+		// Use-installed path: no source IPA on host, helper packages the
+		// IPA on device and streams its bytes straight into outFile.
+		code, err := dev.RunHelper(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, cw)
+		if err != nil {
+			live.Fail("helper run: %v", err)
+			return
+		}
 
-	if err := dev.Download(outRemote, pw); err != nil {
-		outFile.Close()
-		live.Fail("pull failed: %v", err)
+		if code != 0 {
+			live.Fail("helper exit %d", code)
+			return
+		}
+	}
 
+	if err := outFile.Sync(); err != nil {
+		live.Fail("sync local: %v", err)
 		return
 	}
 
-	if err := outFile.Close(); err != nil {
-		live.Fail("close local: %v", err)
-		return
-	}
-
-	pw.Flush()
-
-	if !keepDesktop {
-		live.OK("local verification copy ready")
-	}
+	live.OK("%s (%s → %s)", progress.Summary(), humanBytes(cw.n), outLocal)
 
 	if !decryptKeepMetadata || !decryptKeepWatch {
 		live.Spin("cleaning IPA")
@@ -926,15 +961,6 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		live.OK("%s", verifyOKSummary(res, compareSource))
 	}
 
-	if originalMinOS != "" || len(originalDeviceFamily) > 0 {
-		if err := pipeline.RestoreOriginalPlistValues(outLocal, originalMinOS, originalDeviceFamily); err != nil {
-			tui.Err("restore Info.plist: %v", err)
-			return
-		}
-
-		tui.OK("restored Info.plist (MinimumOSVersion, UIDeviceFamily)")
-	}
-
 	if keepDevice {
 		live = tui.NewLive()
 		live.Spin("syncing device copy")
@@ -956,10 +982,6 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 
 		live.OK("device copy ready")
-	} else if err := dev.Remove(outRemote); err != nil {
-		tui.Warn("could not remove device IPA: %v", err)
-	} else {
-		tui.OK("removed device IPA")
 	}
 
 	if keepDesktop {
@@ -969,7 +991,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		tui.OK("kept on device → %s", outRemote)
 	}
 
-	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote)
+	abandonLocal = false
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
@@ -1520,13 +1542,28 @@ func resolveBundleByAppStoreSearch(as *appstore.Client, acc *appstore.Account, t
 	return results[idx].BundleID, nil
 }
 
-func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote string) {
-	if noCleanup {
-		return
-	}
+// cleanupStack is a LIFO of best-effort cleanup callbacks. Drained on normal
+// return (via defer) and on SIGINT/SIGTERM. Idempotent: a second run() is a
+// no-op so the deferred run after signal-driven run is harmless.
+type cleanupStack struct {
+	mu  sync.Mutex
+	fns []func()
+}
 
-	if stagingRemote != "" {
-		dev.Remove(stagingRemote)
+func (c *cleanupStack) push(fn func()) {
+	c.mu.Lock()
+	c.fns = append(c.fns, fn)
+	c.mu.Unlock()
+}
+
+func (c *cleanupStack) run() {
+	c.mu.Lock()
+	fns := c.fns
+	c.fns = nil
+	c.mu.Unlock()
+
+	for i := len(fns) - 1; i >= 0; i-- {
+		fns[i]()
 	}
 }
 
@@ -1555,7 +1592,13 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 		upd.spin = fmt.Sprintf("decrypting %s", ev.Attr("name"))
 	case "pack.begin":
 		upd.note = ""
-		upd.spin = fmt.Sprintf("packaging IPA → %s", path.Base(ev.Attr("ipa")))
+
+		ipa := ev.Attr("ipa")
+		if ipa == "-" {
+			upd.spin = "packaging IPA → stdout"
+		} else {
+			upd.spin = fmt.Sprintf("packaging IPA → %s", path.Base(ipa))
+		}
 
 	// Counters + spinner update on each successful dump.
 	case "image.done":

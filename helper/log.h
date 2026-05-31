@@ -28,6 +28,11 @@ typedef enum {
 
 void log_init(int verbose);
 
+// Redirect the event stream to a different FILE* (default: stdout). Used
+// when streaming the IPA on stdout: events move to stderr so they don't
+// collide with the data channel.
+void log_set_stream(FILE *f);
+
 // Attribute buffer. Stack-allocate, reuse per emit().
 typedef struct {
     char buf[2048];

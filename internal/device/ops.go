@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -33,6 +34,45 @@ type ProbeResult struct {
 	// DeviceFamily mirrors UIDeviceFamily values from Info.plist:
 	// 1 = iPhone/iPod, 2 = iPad. 0 if unknown.
 	DeviceFamily int
+	// Jailbreak is the detected jailbreak: "Dopamine", "palera1n",
+	// "checkra1n", "rootless?" (rootless but brand unknown) or "unknown".
+	Jailbreak string
+}
+
+// classifyJailbreak identifies the ACTIVE jailbreak from the live /var/jb
+// symlink target - the hard tell. /var/jb is the rootless prefix every
+// modern jb mounts at boot, and its target is the bootstrap that actually
+// booted this session, so it reflects what is RUNNING, not what is merely
+// installed: a leftover Dopamine.app on a palera1n boot cannot change where
+// /var/jb points. We deliberately ignore installed apps/dpkg packages -
+// they are stale-prone and not authoritative.
+//
+// Verified on iPhone10,5 / A11 / Dopamine: target is
+// /private/preboot/<hash>/dopamine-<rand>/procursus. roothide Dopamine also
+// uses a /var/.jbroot-<hex> scheme. palera1n's rootless bootstrap sits under
+// a jb-<rand> dir; checkra1n is rootful (no /var/jb -> preboot link). The
+// "dopamine" token is empirically confirmed; the palera1n/checkra1n schemes
+// are from their known layouts (no such hardware here to confirm).
+func classifyJailbreak(sig string) string {
+	f := map[string]string{}
+
+	for _, tok := range strings.Fields(sig) {
+		if k, v, ok := strings.Cut(tok, "="); ok {
+			f[k] = v
+		}
+	}
+
+	link := strings.ToLower(f["link"])
+	switch {
+	case strings.Contains(link, "dopamine") || strings.Contains(link, ".jbroot"):
+		return "Dopamine"
+	case strings.Contains(link, "palera1n") || strings.Contains(link, "/jb-"):
+		return "palera1n"
+	case f["vjb"] == "1":
+		return "rootless?"
+	default:
+		return "unknown"
+	}
 }
 
 func deviceFamilyFromModel(model string) int {
@@ -51,15 +91,22 @@ func (c *Client) Probe() (ProbeResult, error) {
 	// the sysctl / rootless locations, so try a few absolute paths before
 	// giving up. The 2>/dev/null suppresses expected "not found" from the
 	// unmatched ones.
-	const script = "" +
-		"sw_vers -productVersion 2>/dev/null || " +
-		"/usr/libexec/PlistBuddy -c 'Print :ProductVersion' " +
-		"/System/Library/CoreServices/SystemVersion.plist 2>/dev/null; " +
-		"uname -m; " +
-		"(sysctl -n hw.machine 2>/dev/null || " +
-		"/usr/sbin/sysctl -n hw.machine 2>/dev/null || " +
-		"/var/jb/usr/sbin/sysctl -n hw.machine 2>/dev/null || " +
-		"sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//' || true)"
+	// `uname -m` on iOS always returns "arm64"  Apple doesn't expose
+	// the arm64e subtype through the standard syscall. Read cpusubtype
+	// directly from the mach header of `/sbin/launchd` (always present,
+	// always thin to the device's actual arch). Offset 8 in the
+	// mach_header_64 is the cpusubtype low byte: 0x02 = arm64e (PAC),
+	// 0x00 or 0x01 = arm64.
+	// Line 0: iOS version. Line 1: model. Line 2: launchd cpusubtype byte.
+	// Then a "JB ..." line carrying the live /var/jb symlink target - the
+	// hard tell for the ACTIVE jailbreak (see classifyJailbreak). An absent
+	// or unrecognized jailbreak just yields "unknown"; the probe never fails.
+	const script = `sw_vers -productVersion 2>/dev/null || /usr/libexec/PlistBuddy -c 'Print :ProductVersion' /System/Library/CoreServices/SystemVersion.plist 2>/dev/null
+(sysctl -n hw.machine 2>/dev/null || /usr/sbin/sysctl -n hw.machine 2>/dev/null || /var/jb/usr/sbin/sysctl -n hw.machine 2>/dev/null || sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//' || true)
+od -An -tx1 -j8 -N1 /sbin/launchd 2>/dev/null | tr -d ' \n'; echo
+VJB=0; [ -e /var/jb ] && VJB=1
+LINK=$(readlink /var/jb 2>/dev/null)
+printf 'JB link=%s vjb=%s\n' "$LINK" "$VJB"`
 
 	out, _, code, err := c.Run(script)
 	if err != nil || code != 0 {
@@ -74,20 +121,30 @@ func (c *Client) Probe() (ProbeResult, error) {
 	}
 
 	if len(lines) > 1 {
-		arch := strings.TrimSpace(lines[1])
-		switch arch {
-		case "arm64", "arm64e":
-			r.Arch = arch
-		default:
-			r.Arch = "arm64"
-		}
+		r.Model = strings.TrimSpace(lines[1])
 	}
 
 	if len(lines) > 2 {
-		r.Model = strings.TrimSpace(lines[2])
+		switch strings.TrimSpace(lines[2]) {
+		case "02":
+			r.Arch = "arm64e"
+		default:
+			r.Arch = "arm64"
+		}
+	} else {
+		r.Arch = "arm64"
 	}
 
 	r.DeviceFamily = deviceFamilyFromModel(r.Model)
+
+	r.Jailbreak = "unknown"
+
+	for _, ln := range lines {
+		if s := strings.TrimSpace(ln); strings.HasPrefix(s, "JB ") {
+			r.Jailbreak = classifyJailbreak(strings.TrimPrefix(s, "JB "))
+			break
+		}
+	}
 
 	return r, nil
 }
@@ -113,15 +170,6 @@ func (c *Client) LocateAppinst() (string, error) {
 	}
 
 	return "", nil
-}
-
-func (c *Client) LocateBinary(name string) (string, error) {
-	out, _, _, err := c.Run(fmt.Sprintf("command -v %s 2>/dev/null || true", name))
-	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(out), nil
 }
 
 func (c *Client) LocateAppSync() (string, error) {
@@ -162,15 +210,40 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 	return nil
 }
 
-// Uninstall removes an installed app via `uicache -u <bundleID>`.
-func (c *Client) Uninstall(bundleID string) error {
-	out, errOut, code, err := c.RunSudo("uicache -u " + shellQuote(bundleID))
+// Uninstall removes an installed app. Two steps wrapped in a single
+// `sudo sh -c '…'` so both commands run as root (sudo only elevates the
+// first command in a `cmd1; cmd2` chain, otherwise rm runs as mobile and
+// hits the _installd-owned files with EACCES). Order matters:
+//
+//  1. uicache -u <bundlePath>  - unregister from LSApplicationWorkspace
+//     so SpringBoard drops the icon and the LS registry forgets the
+//     bundle.
+//  2. rm -rf <UUID-dir>        - remove the bundle dir under
+//     /var/containers/Bundle/Application/.
+//
+// The data container at /var/mobile/Containers/Data/Application/<other-UUID>/
+// is left behind  finding it would require scanning every container's
+// metadata plist for the bundle id, and the next install spins a fresh
+// one regardless.
+func (c *Client) Uninstall(bundlePath string) error {
+	const bundleRoot = "/var/containers/Bundle/Application/"
+	if !strings.HasPrefix(bundlePath, bundleRoot) {
+		return fmt.Errorf("refuse to uninstall: suspicious bundle path %q", bundlePath)
+	}
+
+	uuidDir := path.Dir(bundlePath)
+
+	cmd := fmt.Sprintf("sh -c %s",
+		shellQuote(fmt.Sprintf("uicache -u %s && rm -rf %s",
+			shellQuote(bundlePath), shellQuote(uuidDir))))
+
+	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
-		return fmt.Errorf("uicache: %w", err)
+		return fmt.Errorf("uninstall: %w", err)
 	}
 
 	if code != 0 {
-		return fmt.Errorf("uicache exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
+		return fmt.Errorf("uninstall exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
 	}
 
 	return nil
@@ -481,13 +554,24 @@ func (c *Client) VerifyHelper(helperPath string) error {
 
 type EventHandler func(Event)
 
-// RunHelper spawns the on-device helper for a bundle. bundleID goes to the
-// SpringBoard SBS SPI (only accepted for the main app; empty string skips
-// the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
-// When skipAppex is true the helper passes --skip-appex, leaving extensions
-// encrypted in the output IPA.
-func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string,
-	verbose, skipAppex bool, onEvent EventHandler) (string, string, int, error) {
+// FrameHandler is invoked once per Mach-O record the helper streams in
+// --execs-only mode. path is the IPA-relative bundle path
+// ("Payload/AppName.app/Frameworks/X.framework/X"). r yields exactly size
+// bytes; the handler must read them fully before returning, or the next
+// frame will deserialize garbage.
+type FrameHandler func(path string, size int64, r io.Reader) error
+
+// RunHelper spawns the on-device helper for a bundle and streams the
+// decrypted IPA bytes into ipaW. bundleID goes to the SpringBoard SBS SPI
+// (only accepted for the main app; empty string skips the main-app pass
+// and just decrypts PlugIns/*.appex + Extensions/*.appex). When skipAppex
+// is true the helper passes --skip-appex, leaving extensions encrypted.
+//
+// In this mode the helper writes IPA bytes to stdout and event lines to
+// stderr; we tee stderr through the event splitter while ipaW receives
+// the binary stream - no on-device output file, no sftp pull.
+func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
+	verbose, skipAppex bool, onEvent EventHandler, ipaW io.Writer) (int, error) {
 	gflag := ""
 	if verbose {
 		gflag = "-v "
@@ -498,13 +582,118 @@ func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string,
 		subflag = "--skip-appex "
 	}
 
-	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q %q",
-		helperPath, gflag, subflag, bundleID, bundlePath, outIPA)
+	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q -",
+		helperPath, gflag, subflag, bundleID, bundlePath)
 
 	splitter := newEventSplitter(onEvent, io.Discard)
 	defer splitter.Close()
 
-	return c.RunSudoStream(cmd, splitter, io.Discard)
+	_, _, code, err := c.RunSudoStream(cmd, ipaW, splitter)
+
+	return code, err
+}
+
+// RunHelperExecs runs the helper in --execs-only mode: the helper streams
+// framed Mach-O records on stdout, events on stderr. onFrame is called
+// once per record. Use this when the host has the source IPA and will
+// assemble the output by substituting the helper-provided execs.
+func (c *Client) RunHelperExecs(helperPath, bundleID, bundlePath string,
+	verbose, skipAppex bool, onEvent EventHandler, onFrame FrameHandler) (int, error) {
+	gflag := ""
+	if verbose {
+		gflag = "-v "
+	}
+
+	subflag := "--execs-only "
+	if skipAppex {
+		subflag += "--skip-appex "
+	}
+
+	cmd := fmt.Sprintf("%s %sdecrypt %s%q %q",
+		helperPath, gflag, subflag, bundleID, bundlePath)
+
+	splitter := newEventSplitter(onEvent, io.Discard)
+	defer splitter.Close()
+
+	// Tee helper stdout into a pipe we read frames from. The SSH session
+	// blocks in a goroutine; we read frames from the main goroutine and
+	// signal completion via done.
+	pr, pw := io.Pipe()
+
+	var (
+		code   int
+		runErr error
+		done   = make(chan struct{})
+	)
+
+	go func() {
+		_, _, code, runErr = c.RunSudoStream(cmd, pw, splitter)
+		pw.Close()
+		close(done)
+	}()
+
+	parseErr := parseFrames(pr, onFrame)
+
+	// Drain any remaining stdout so the SSH session can complete.
+	io.Copy(io.Discard, pr)
+	<-done
+
+	if runErr != nil {
+		return code, runErr
+	}
+
+	if parseErr != nil {
+		return code, parseErr
+	}
+
+	return code, nil
+}
+
+// parseFrames reads [u32be plen][plen-byte path][u64be size][size bytes]
+// records until EOF, invoking onFrame for each.
+func parseFrames(r io.Reader, onFrame FrameHandler) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+
+	for {
+		var hdr [4]byte
+		if _, err := io.ReadFull(br, hdr[:]); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+
+			return fmt.Errorf("read frame plen: %w", err)
+		}
+
+		plen := binary.BigEndian.Uint32(hdr[:])
+		if plen == 0 || plen > 4096 {
+			return fmt.Errorf("invalid frame path length: %d", plen)
+		}
+
+		pathBuf := make([]byte, plen)
+		if _, err := io.ReadFull(br, pathBuf); err != nil {
+			return fmt.Errorf("read frame path: %w", err)
+		}
+
+		var szHdr [8]byte
+		if _, err := io.ReadFull(br, szHdr[:]); err != nil {
+			return fmt.Errorf("read frame size: %w", err)
+		}
+
+		size := int64(binary.BigEndian.Uint64(szHdr[:]))
+		if size < 0 {
+			return fmt.Errorf("negative frame size: %d", size)
+		}
+
+		lr := io.LimitReader(br, size)
+		if err := onFrame(string(pathBuf), size, lr); err != nil {
+			return err
+		}
+
+		// Drain leftovers in case the handler didn't read everything.
+		if _, err := io.Copy(io.Discard, lr); err != nil {
+			return fmt.Errorf("drain frame body: %w", err)
+		}
+	}
 }
 
 type eventSplitter struct {

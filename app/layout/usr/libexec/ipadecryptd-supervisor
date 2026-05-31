@@ -17,6 +17,7 @@ export PATH
 RUN_DIR="$(jb_path /var/jb/var/run)"
 TMP_DIR="$(jb_path /var/jb/tmp)"
 SOCK="$RUN_DIR/ipadecryptd.sock"
+PIDFILE="$RUN_DIR/ipadecryptd.pid"
 BIN="$(jb_path /var/jb/usr/libexec/ipadecryptd)"
 LOG="$TMP_DIR/ipadecryptd.log"
 ERR="$TMP_DIR/ipadecryptd.err"
@@ -24,10 +25,25 @@ ERR="$TMP_DIR/ipadecryptd.err"
 mkdir -p "$RUN_DIR" "$TMP_DIR"
 
 while :; do
-    if [ ! -S "$SOCK" ] || ! ps -axo command | grep -q '[i]padecryptd$'; then
-        killall ipadecryptd 2>/dev/null
-        rm -f "$SOCK"
+    needs_start=0
+
+    if [ ! -S "$SOCK" ]; then
+        needs_start=1
+    fi
+
+    pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        needs_start=1
+    fi
+
+    if [ "$needs_start" = 1 ]; then
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        killall ipadecryptd 2>/dev/null || true
+        rm -f "$SOCK" "$PIDFILE"
         IPADECRYPTD_SOCKET="$SOCK" nohup "$BIN" >"$LOG" 2>"$ERR" &
+        echo "$!" >"$PIDFILE"
     fi
     sleep 10
 done

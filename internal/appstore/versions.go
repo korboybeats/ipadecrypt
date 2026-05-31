@@ -25,7 +25,13 @@ type VersionMetadata struct {
 	BundleVersion     string
 	SupportedDevices  []int
 	ReleaseDate       time.Time
-	Raw               map[string]any
+	// URL and FileSize describe the signed CDN download; they're populated
+	// from the same volumeDownload call that produces metadata so callers
+	// can range-fetch the zip central directory without a second hit on
+	// Apple's auth endpoint.
+	URL      string
+	FileSize int64
+	Raw      map[string]any
 }
 
 func (c *Client) ListVersions(acc *Account, app App) (ListVersionsOutput, error) {
@@ -66,11 +72,15 @@ func (c *Client) GetVersionMetadata(acc *Account, app App, externalVersionID str
 		return VersionMetadata{}, err
 	}
 
+	ticket := DownloadTicket(item)
+
 	out := VersionMetadata{
 		ExternalVersionID: externalVersionID,
 		DisplayVersion:    metaString(item.Metadata, "bundleShortVersionString"),
 		BundleVersion:     metaString(item.Metadata, "bundleVersion"),
 		SupportedDevices:  metaIntSlice(item.Metadata, "softwareSupportedDeviceIds"),
+		URL:               item.URL,
+		FileSize:          ticket.FileSize(),
 		Raw:               item.Metadata,
 	}
 

@@ -223,6 +223,7 @@ type cachedVersion struct {
 	DisplayVersion   string         `json:"displayVersion,omitempty"`
 	BundleVersion    string         `json:"bundleVersion,omitempty"`
 	SupportedDevices []int          `json:"supportedDevices,omitempty"`
+	MinimumOSVersion string         `json:"minimumOSVersion,omitempty"`
 	ReleaseDate      time.Time      `json:"releaseDate,omitempty"`
 	Raw              map[string]any `json:"raw,omitempty"`
 }

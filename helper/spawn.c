@@ -92,6 +92,83 @@ static void emit_csflags(pid_t pid) {
     emit(LOG_DEBUG, "target.csflags", &a, NULL);
 }
 
+// Flip CS_DEBUGGED on an SBS-launched target via a debugger attach, so the
+// cross-task writes dyld_patch makes to the target's (signed) dyld __TEXT
+// pages don't trip code-signing enforcement when dyld later executes them.
+//
+// On strict-CS jailbreaks (checkm8 / rootless iOS 15.x) SBS apps run with
+// CS_HARD|CS_KILL and no CS_DEBUGGED. target_patch_bytes does
+// mprotect(RW|COPY)+write, which COW-forks an UNSIGNED copy of the page;
+// the moment dyld executes any instruction on that page (e.g.
+// mremap_encrypted during normal dependent loading) the kernel kills the
+// process: SIGKILL CODESIGNING, "(Instruction Abort) Permission fault".
+//
+// PT_ATTACHEXC runs cs_allow_invalid() in the kernel: sets CS_DEBUGGED and
+// clears CS_KILL/CS_HARD. The flag is sticky, so we attach, reap the stop,
+// Mach-freeze, then detach - the target stays frozen (suspend count) while
+// CS_DEBUGGED persists for the rest of the decrypt. No-op effect on
+// Dopamine (iOS 16), which bypasses AMFI wholesale; failure here is
+// non-fatal (we just keep the prior behavior).
+static void cs_mark_debugged(task_t task, pid_t pid) {
+    // Only strict-CS jailbreaks need this. When CS_HARD/CS_KILL are set
+    // (checkm8 / palera1n iOS 15.x) executing a COW-modified dyld page is a
+    // fatal CODESIGNING kill unless CS_DEBUGGED is set first. AMFI-bypass
+    // jailbreaks (Dopamine iOS 16) leave those bits clear, so patched pages
+    // run fine and the attach is pure risk: an SBS target is not our child
+    // (its PT_ATTACHEXC stop is never reaped via waitpid) and the detach can
+    // break xpcproxy's launch hand-off, killing the target before it runs a
+    // single instruction - with no crash report. So skip it when CS
+    // enforcement is lax.
+    uint32_t pre = 0;
+    if (csops(pid, 0 /*CS_OPS_STATUS*/, &pre, sizeof(pre)) == 0 &&
+        !(pre & (CS_HARD | CS_KILL))) {
+        attrs_t a; attrs_init(&a);
+        attrs_hex(&a, "csflags", pre);
+        attrs_int(&a, "debugged", !!(pre & CS_DEBUGGED));
+        emit(LOG_DEBUG, "target.cs_debugged", &a,
+             "CS enforcement lax (csflags=0x%x); debugger attach not needed",
+             pre);
+        return;
+    }
+
+    if (ptrace(PT_ATTACHEXC, pid, 0, 0) != 0) {
+        dbg("PT_ATTACHEXC(%d): %s (CS_DEBUGGED unset; dyld patches may "
+            "SIGKILL on strict-CS jailbreaks)", pid, strerror(errno));
+        return;
+    }
+    // Reap the attach-stop. PT_ATTACHEXC's *initial* stop is signal-
+    // delivered (only later exceptions go Mach), so waitpid sees it - but
+    // bound the wait (~1s) with WNOHANG so a jailbreak that delivers it
+    // differently can never hang the helper. CS_DEBUGGED is already set the
+    // instant PT_ATTACHEXC returns, so timing out here is still safe.
+    for (int i = 0; i < 100; i++) {
+        pid_t w = waitpid(pid, NULL, WUNTRACED | WNOHANG);
+        if (w == pid) break;
+        if (w < 0 && errno != EINTR) break;
+        usleep(10 * 1000);
+    }
+    // Freeze at the Mach level while still ptrace-stopped, then detach.
+    // The suspend count keeps the target frozen after PT_DETACH would
+    // otherwise let it run; CS_DEBUGGED survives the detach.
+    task_suspend(task);
+    ptrace(PT_DETACH, pid, 0, 0);
+
+    // Confirm the flag actually flipped (CS_DEBUGGED = 0x10000000). This is
+    // the per-jailbreak ground truth: "set" => dyld patching is safe here;
+    // "NOT set" + a strict-CS jb => expect SIGKILL CODESIGNING (Dopamine
+    // bypasses AMFI so it works regardless).
+    uint32_t csflags = 0;
+    int debugged = csops(pid, 0 /*CS_OPS_STATUS*/, &csflags, sizeof(csflags)) == 0 &&
+                   (csflags & CS_DEBUGGED);
+    attrs_t a; attrs_init(&a);
+    attrs_int(&a, "pid", pid);
+    attrs_hex(&a, "csflags", csflags);
+    attrs_int(&a, "debugged", debugged);
+    emit(LOG_DEBUG, "target.cs_debugged", &a,
+         "CS_DEBUGGED %s (pid=%d csflags=0x%x)",
+         debugged ? "set" : "NOT-set", pid, csflags);
+}
+
 static int sbs_launch(const char *bundle_id, const char *exec_path,
                       pid_t *out_pid, task_t *out_task) {
     if (load_sbs() != 0) return -1;
@@ -111,9 +188,12 @@ static int sbs_launch(const char *bundle_id, const char *exec_path,
         kill(pid, SIGKILL);
         return -1;
     }
-    // SBS's suspended:1 relies on xpcproxy's "not ready" signal, not an
-    // observable task_suspend; freeze the task ourselves so the address
-    // space is stable when we read it.
+    // Attach as debugger to flip CS_DEBUGGED (lets us patch dyld __TEXT
+    // without a CODESIGNING kill on strict-CS jailbreaks). This also
+    // Mach-suspends the task while stopped; SBS's suspended:1 relies on
+    // xpcproxy's "not ready" signal, not an observable task_suspend, so we
+    // freeze the task ourselves anyway for a stable address space.
+    cs_mark_debugged(task, pid);
     task_suspend(task);
     *out_pid = pid;
     *out_task = task;

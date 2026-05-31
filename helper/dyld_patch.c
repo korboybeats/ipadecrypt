@@ -9,330 +9,177 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Scan dyld __TEXT for:
-//   - resolveSymbol's CBZ-Wn → NOP (forces)
-//   - `movz x16,#N; svc #0x80` process-killers → NOP NOP (kills)
-//   - `bl <halt>; brk #1` halt callers → `b +8` (skips, gated on forces)
-//
-// abort_addrs[] (NULL-terminated, max 7 entries) lists target addresses
-// to EXCLUDE from the skip pass  halt's own body ends with
-// `bl abort_with_payload; brk #1` and falling through lands in padding.
-static int scan_dyld_text(task_t task, mach_vm_address_t dyld_base,
-                          const mach_vm_address_t *abort_addrs) {
-    if (!dyld_base) {
-        attrs_t a; attrs_init(&a);
-        attrs_str(&a, "reason", "no_dyld_base");
-        emit(LOG_WARN, "patch.scan_skipped", &a,
-             "dyld scan skipped: target dyld base unknown");
-        return 0;
+// Linear-scan LC_SYMTAB for a defined symbol; return its n_value (link-
+// time VA) or 0 if absent. symtab is nlist_64[] (16 bytes each).
+static uint64_t symtab_lookup(const uint8_t *symtab, uint32_t nsyms,
+                              const char *strtab, uint32_t strsize,
+                              const char *want) {
+    size_t want_len = strlen(want);
+    for (uint32_t i = 0; i < nsyms; i++) {
+        uint32_t n_strx;
+        uint8_t  n_type;
+        uint64_t n_value;
+        memcpy(&n_strx,  symtab + i * 16 + 0, 4);
+        memcpy(&n_type,  symtab + i * 16 + 4, 1);
+        memcpy(&n_value, symtab + i * 16 + 8, 8);
+        if ((n_type & 0x0e) != 0x0e) continue;     // N_SECT only
+        if (n_strx >= strsize) continue;
+        const char *name = strtab + n_strx;
+        if (strncmp(name, want, want_len) == 0 && name[want_len] == '\0')
+            return n_value;
     }
+    return 0;
+}
+
+// Neutralize every `bl <target_va>` call site in [text, text+text_len).
+//   trailing brk #1  -> `b +8`  (skip call + noreturn marker)
+//   otherwise        -> NOP the bl (fall through to the next real insn,
+//                       which on iOS 15 codegen is the no-error path)
+// text_base_va is the runtime VA of text[0]. Returns sites patched.
+//
+// Symbol-driven cross-OS bind survival, located via the target dyld's
+// LC_SYMTAB. dyld 4's resolveSymbol records "Symbol not found" through
+// Diagnostics::error (NOT noreturn); ret-patching its entry leaves diag
+// empty so the caller's hasError() is false, no C++ throw, and
+// resolveSymbol returns the default ResolvedSymbol (bindAbsolute, offset
+// 0) - the clean cross-OS NULL bind. That single suppressor is sufficient:
+// it severs the symbol-not-found path upstream of every downstream halt,
+// so no call-site neutralization is needed (verified on Swift Playgrounds,
+// 114/114 images, with only the two Diagnostics::error rets).
+//
+// All of iOS 15-16 ships dyld 4 - verified empirically on 15.1, 15.4.1
+// and 15.8.1, arm64 and arm64e (Diagnostics::error present in every one).
+// Absent symbols are skipped. Returns total patches; 0 means a stripped
+// dyld (none ship), logged by the caller.
+static int dyld_symtab_patch(task_t task, mach_vm_address_t dyld_base) {
+    if (!dyld_base) return 0;
+
     struct mach_header_64 mh;
     mach_vm_size_t got = 0;
-    kern_return_t kr = mach_vm_read_overwrite(task, dyld_base, sizeof(mh),
-            (mach_vm_address_t)(uintptr_t)&mh, &got);
-    if (kr != KERN_SUCCESS) {
-        attrs_t a; attrs_init(&a);
-        attrs_str(&a, "reason", "read_mh_fail");
-        attrs_int(&a, "kr", kr);
-        attrs_hex(&a, "base", (unsigned long long)dyld_base);
-        emit(LOG_WARN, "patch.scan_skipped", &a,
-             "dyld scan skipped: can't read header at 0x%llx (kr=%d)",
-             (unsigned long long)dyld_base, kr);
+    if (mach_vm_read_overwrite(task, dyld_base, sizeof(mh),
+            (mach_vm_address_t)(uintptr_t)&mh, &got) != KERN_SUCCESS ||
+        got != sizeof(mh) || mh.magic != MH_MAGIC_64) {
+        emit(LOG_DEBUG, "patch.symtab.no_header", NULL, NULL);
         return 0;
     }
-    if (mh.magic != MH_MAGIC_64) {
-        attrs_t a; attrs_init(&a);
-        attrs_str(&a, "reason", "bad_magic");
-        attrs_hex(&a, "magic", mh.magic);
-        emit(LOG_WARN, "patch.scan_skipped", &a, NULL);
+    if (mh.sizeofcmds == 0 || mh.sizeofcmds > 0x100000) return 0;
+
+    uint8_t *lc_buf = malloc(mh.sizeofcmds);
+    if (!lc_buf) return 0;
+    if (mach_vm_read_overwrite(task, dyld_base + sizeof(mh), mh.sizeofcmds,
+            (mach_vm_address_t)(uintptr_t)lc_buf, &got) != KERN_SUCCESS ||
+        got != mh.sizeofcmds) {
+        free(lc_buf);
         return 0;
     }
 
-    // Parse load commands → find __TEXT,__text section bounds. Scanning
-    // beyond __text into __const/__cstring/__data matches the bl+brk
-    // and movz+svc byte patterns inside format strings and constant
-    // tables, then we patch READ-ONLY DATA as if it were code. On iOS
-    // 16.1.1 we hit one such false positive at dyld+0x79650 (the C
-    // string ` => "%s"\n\0tried: '%s' (%s)\0...`)  patching the first
-    // 4 bytes corrupted dyld's error formatter and the target died with
-    // SIGKILL as soon as it tried to format any message.
-    //
-    // We do NOT assume any specific dyld version layout: parse the
-    // mach-O on the fly so iOS 14 / 15 / 16 / 17 + Dopamine sidecar +
-    // checkra1n + palera1n all share one code path.
-    if (mh.cputype != CPU_TYPE_ARM64 || mh.sizeofcmds == 0 ||
-        mh.sizeofcmds > 0x100000 /* 1 MB cap on load commands */) {
-        attrs_t a; attrs_init(&a);
-        attrs_hex(&a, "cputype", mh.cputype);
-        attrs_int(&a, "sizeofcmds", mh.sizeofcmds);
-        emit(LOG_WARN, "patch.scan_skipped", &a,
-             "dyld scan skipped: implausible mach_header");
-        return 0;
-    }
-    size_t lc_total = mh.sizeofcmds;
-    uint8_t *lc_buf = malloc(lc_total);
-    if (!lc_buf) return 0;
-    mach_vm_size_t lc_got = 0;
-    if (mach_vm_read_overwrite(task, dyld_base + sizeof(mh), lc_total,
-            (mach_vm_address_t)(uintptr_t)lc_buf, &lc_got) != KERN_SUCCESS ||
-        lc_got != lc_total) {
-        free(lc_buf);
-        emit(LOG_WARN, "patch.scan_skipped", NULL,
-             "dyld scan skipped: load command read failed");
-        return 0;
-    }
-    uint64_t text_off  = 0;  // VM offset of __text section relative to dyld_base
-    uint64_t text_size = 0;  // byte length of __text section
-    {
-        const uint8_t *p = lc_buf;
-        const uint8_t *end = lc_buf + lc_total;
-        for (uint32_t i = 0; i < mh.ncmds; i++) {
-            if (p + sizeof(struct load_command) > end) break;
-            struct load_command lc; memcpy(&lc, p, sizeof(lc));
-            if (lc.cmdsize < sizeof(struct load_command) ||
-                lc.cmdsize > (uint32_t)(end - p)) break;
-            if (lc.cmd == LC_SEGMENT_64 &&
-                lc.cmdsize >= sizeof(struct segment_command_64)) {
-                struct segment_command_64 sc;
-                memcpy(&sc, p, sizeof(sc));
-                // segname is char[16], null-padded but not necessarily
-                // null-terminated. strncmp with 16 handles both.
-                if (strncmp(sc.segname, "__TEXT", 16) == 0) {
-                    const uint8_t *sp = p + sizeof(sc);
-                    for (uint32_t s = 0; s < sc.nsects; s++) {
-                        if (sp + sizeof(struct section_64) > end) break;
-                        struct section_64 sec;
-                        memcpy(&sec, sp, sizeof(sec));
-                        if (strncmp(sec.sectname, "__text", 16) == 0) {
-                            // Use VM offset (addr - segment vmaddr) since
-                            // mach_vm_read is by VA, not file offset.
-                            text_off  = sec.addr - sc.vmaddr;
-                            text_size = sec.size;
-                            break;
-                        }
-                        sp += sizeof(sec);
-                    }
-                    break;
-                }
+    // Find __TEXT vmaddr (slide), __LINKEDIT (symtab/strtab VAs), and
+    // LC_SYMTAB.
+    uint64_t text_vmaddr = 0, le_vmaddr = 0, le_fileoff = 0;
+    uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
+    const uint8_t *p = lc_buf;
+    const uint8_t *lc_end = lc_buf + mh.sizeofcmds;
+    for (uint32_t i = 0; i < mh.ncmds; i++) {
+        if (p + sizeof(struct load_command) > lc_end) break;
+        struct load_command lc;
+        memcpy(&lc, p, sizeof(lc));
+        if (lc.cmdsize < sizeof(struct load_command) ||
+            lc.cmdsize > (uint32_t)(lc_end - p)) break;
+        if (lc.cmd == LC_SEGMENT_64 &&
+            lc.cmdsize >= sizeof(struct segment_command_64)) {
+            struct segment_command_64 sc;
+            memcpy(&sc, p, sizeof(sc));
+            if (strncmp(sc.segname, "__TEXT", 16) == 0) {
+                text_vmaddr = sc.vmaddr;
+            } else if (strncmp(sc.segname, "__LINKEDIT", 16) == 0) {
+                le_vmaddr = sc.vmaddr;
+                le_fileoff = sc.fileoff;
             }
-            p += lc.cmdsize;
+        } else if (lc.cmd == 0x2 /* LC_SYMTAB */ && lc.cmdsize >= 24) {
+            memcpy(&symoff,  p + 8,  4);
+            memcpy(&nsyms,   p + 12, 4);
+            memcpy(&stroff,  p + 16, 4);
+            memcpy(&strsize, p + 20, 4);
         }
+        p += lc.cmdsize;
     }
     free(lc_buf);
-    if (text_size == 0) {
-        emit(LOG_WARN, "patch.scan_skipped", NULL,
-             "dyld scan skipped: __TEXT,__text section not found");
-        return 0;
-    }
-    // Defensive cap: a normal dyld __text is ~500 KB; anything above
-    // 4 MB suggests a parse error or a non-dyld binary.
-    if (text_size > 4 * 1024 * 1024) {
-        attrs_t a; attrs_init(&a);
-        attrs_int(&a, "text_size", (int)text_size);
-        emit(LOG_WARN, "patch.scan_skipped", &a,
-             "dyld scan skipped: __text section implausibly large (%llu bytes)",
-             (unsigned long long)text_size);
-        return 0;
-    }
 
-    // Read only the __text section bytes. Pages may be lazily mapped
-    // pre-resume so chunk it; a single read of the whole section fails
-    // on the first unfaulted page.
-    size_t text_cap = (size_t)text_size;
-    uint8_t *buf = malloc(text_cap);
-    if (!buf) return 0;
-    size_t total = 0;
+    if (nsyms == 0 || nsyms > 100000) {
+        attrs_t a; attrs_init(&a);
+        attrs_str(&a, "reason", "no_symtab");
+        emit(LOG_DEBUG, "patch.symtab.skipped", &a, NULL);
+        return 0;
+    }
+    if (le_vmaddr == 0 || strsize == 0 || strsize > 4 * 1024 * 1024) return 0;
+
+    // File-offset within __LINKEDIT -> target VM address.
+    //   slide        = dyld_base - text_vmaddr   (text_vmaddr is typically 0)
+    //   file_off N   = le_vmaddr + slide + (N - le_fileoff)
+    mach_vm_address_t slide     = dyld_base - text_vmaddr;
+    mach_vm_address_t symtab_va = le_vmaddr + slide + (symoff - le_fileoff);
+    mach_vm_address_t strtab_va = le_vmaddr + slide + (stroff - le_fileoff);
+
+    size_t symtab_sz = (size_t)nsyms * 16;  // sizeof(struct nlist_64) == 16
+    if (symtab_sz > 4 * 1024 * 1024) return 0;
+
+    uint8_t *symtab = malloc(symtab_sz);
+    char    *strtab = malloc((size_t)strsize + 1);
+    if (!symtab || !strtab) { free(symtab); free(strtab); return 0; }
+
     const size_t chunk = 0x10000;
-    while (total < text_cap) {
-        size_t want = text_cap - total;
+    int ok = 1;
+    for (size_t off = 0; off < symtab_sz && ok; ) {
+        size_t want = symtab_sz - off;
         if (want > chunk) want = chunk;
         mach_vm_size_t cgot = 0;
-        if (mach_vm_read_overwrite(task, dyld_base + text_off + total, want,
-                (mach_vm_address_t)(uintptr_t)(buf + total), &cgot) != KERN_SUCCESS ||
-            cgot == 0) break;
-        total += cgot;
-        if (cgot < want) break;
+        if (mach_vm_read_overwrite(task, symtab_va + off, want,
+                (mach_vm_address_t)(uintptr_t)(symtab + off), &cgot) != KERN_SUCCESS ||
+            cgot == 0 || cgot < want) ok = 0;
+        else off += cgot;
     }
-    if (total < 8) {
-        free(buf);
-        attrs_t a; attrs_init(&a);
-        attrs_str(&a, "reason", "no_text_bytes");
-        emit(LOG_WARN, "patch.scan_skipped", &a, NULL);
+    for (size_t off = 0; off < strsize && ok; ) {
+        size_t want = strsize - off;
+        if (want > chunk) want = chunk;
+        mach_vm_size_t cgot = 0;
+        if (mach_vm_read_overwrite(task, strtab_va + off, want,
+                (mach_vm_address_t)(uintptr_t)(strtab + off), &cgot) != KERN_SUCCESS ||
+            cgot == 0 || cgot < want) ok = 0;
+        else off += cgot;
+    }
+    if (!ok) {
+        free(symtab); free(strtab);
+        emit(LOG_DEBUG, "patch.symtab.read_fail", NULL, NULL);
         return 0;
     }
-    got = total;
+    strtab[strsize] = '\0';
 
-    // Pass 1: resolveSymbol force-weak-NULL (cross-OS bind-fail).
-    // The 12-byte tail is byte-identical across every dyld build observed:
-    //   MOV W9,#2 / STR W9,[X8,#0x40] / STR XZR,[X8,#0x38]
-    // We validate i-4 loads to X8 (LDR or LDUR) and i-8 is CBZ Wn, then
-    // NOP the CBZ. iOS 15.4 19E258: 3 sites. iOS 16.1.1 Dopamine sidecar: 2.
-    static const uint8_t bind_absolute_tail[12] = {
-        0x49, 0x00, 0x80, 0x52,
-        0x09, 0x41, 0x00, 0xb9,
-        0x1f, 0x1d, 0x00, 0xf9,
+    static const uint32_t ret_op = 0xd65f03c0u;
+    int hits = 0;
+
+    // 1) Ret-patch Diagnostics::error (non-noreturn) - the throw suppressor.
+    static const char *diag_syms[] = {
+        "__ZN11Diagnostics5errorEPKcz",
+        "__ZN11Diagnostics5errorEPKcPc",
+        NULL
     };
-    static const uint32_t nop_op = 0xd503201fu;
-    int forces = 0;
-    for (size_t i = 8; i + 12 <= got; i += 4) {
-        if (memcmp(buf + i, bind_absolute_tail, 12) != 0) continue;
-        uint32_t load;
-        memcpy(&load, buf + i - 4, 4);
-        if ((load & 0x1fu) != 8u) continue;
-        int is_ldr  = (load & 0xffc00000u) == 0xf9400000u;
-        int is_ldur = (load & 0xffe00c00u) == 0xf8400000u;
-        if (!is_ldr && !is_ldur) continue;
-        uint32_t cbz;
-        memcpy(&cbz, buf + i - 8, 4);
-        if ((cbz & 0xff000000u) != 0x34000000u) continue;
-        char tag[64];
-        snprintf(tag, sizeof(tag), "force_weak_%d", forces);
-        if (target_patch_bytes(task, dyld_base + text_off + i - 8, &nop_op,
-                sizeof(nop_op), tag) == 0) forces++;
+    for (int t = 0; diag_syms[t]; t++) {
+        uint64_t v = symtab_lookup(symtab, nsyms, strtab, strsize, diag_syms[t]);
+        if (v && target_patch_bytes(task, v + slide, &ret_op,
+                sizeof(ret_op), "diag_error") == 0)
+            hits++;
     }
 
-    // Pass 2: NOP `movz x16,#N; svc #0x80` for *process-killing* syscalls
-    // dyld calls when something goes wrong. Strictly process-exit only;
-    // touching libdispatch / libsystem auxiliary syscalls (kqueue,
-    // psynch, workloop) breaks dyld init and the target gets SIGKILL'd
-    // by the runtime watchdog. Only enabled when force_weak fired,
-    // i.e. the target actually has cross-OS bind risk  for everything
-    // else these patches are pure downside.
-    //
-    // SYS_exit               = 1
-    // SYS_kill               = 37  (0x25)
-    // SYS___pthread_kill     = 328 (0x148)
-    // SYS_terminate_with_payload = 520 (0x208)
-    // SYS_abort_with_payload     = 521 (0x209)
-    int kills = 0;
-    if (forces > 0) {
-        static const uint8_t svc_pattern[4] = { 0x01, 0x10, 0x00, 0xd4 };
-        static const uint32_t kill_imms[] = { 1, 37, 328, 520, 521 };
-        for (size_t i = 4; i + 4 <= got; i += 4) {
-            if (memcmp(buf + i, svc_pattern, 4) != 0) continue;
-            uint32_t prev;
-            memcpy(&prev, buf + i - 4, 4);
-            // movz x16,#imm OR movz w16,#imm (some dyld builds use the
-            // 32-bit form for low immediates).
-            if (((prev & 0xffe0001f) != (0xd2800000 | 16)) &&
-                ((prev & 0xffe0001f) != (0x52800000 | 16))) continue;
-            uint32_t imm = (prev >> 5) & 0xffff;
-            int wanted = 0;
-            for (size_t k = 0; k < sizeof(kill_imms)/sizeof(kill_imms[0]); k++) {
-                if (imm == kill_imms[k]) { wanted = 1; break; }
-            }
-            if (!wanted) continue;
-            static const uint32_t nop_pair[2] = { 0xd503201fu, 0xd503201fu };
-            char tag[64];
-            snprintf(tag, sizeof(tag), "kill_svc_%u_%d", imm, kills);
-            if (target_patch_bytes(task, dyld_base + text_off + i - 4, nop_pair,
-                    sizeof(nop_pair), tag) == 0) kills++;
-        }
-    }
-
-    // Pass 3 (only when forces > 0): rewrite `bl <dyld_halt>; brk #1`
-    // → `b +8` so halt callers fall through the noreturn marker.
-    //
-    // We don't have dyld_halt's address (no symbol resolution from raw
-    // bytes), but it's structurally the bl-target that appears MOST
-    // often in `bl X; brk #1` pairs inside dyld  every internal
-    // assert/error path BLs into the same halt routine before the
-    // brk marker. Build a frequency tally over the matches, pick the
-    // single most-common bl_target (with at least 3 callers), and
-    // patch only that one. False positives in __cstring no longer
-    // happen (we scan only __text), and within __text bl_target
-    // distribution is heavily skewed  dyld_halt wins by >10x in
-    // every tested version (16.1.1: 1 random match vs 44 halt
-    // callers; 16.7.11: similar).
-    int skips = 0;
-    if (forces > 0) {
-        // Two-pass: collect candidate sites, tally bl_target counts,
-        // pick consensus winner, then patch only sites pointing there.
-        typedef struct { size_t i; mach_vm_address_t tgt; } cand_t;
-        size_t cap = 256;
-        cand_t *cands = malloc(cap * sizeof(cand_t));
-        size_t ncands = 0;
-        if (cands) {
-            for (size_t i = 0; i + 8 <= got; i += 4) {
-                uint32_t insn, next_insn;
-                memcpy(&insn, buf + i, 4);
-                memcpy(&next_insn, buf + i + 4, 4);
-                if (next_insn != 0xd4200020u) continue;
-                if ((insn & 0xfc000000u) != 0x94000000u) continue;
-                int32_t imm26 = (int32_t)(insn & 0x03ffffffu);
-                if (imm26 & 0x02000000) imm26 |= (int32_t)0xfc000000u;
-                mach_vm_address_t bl_target =
-                    dyld_base + text_off + i + (int64_t)imm26 * 4;
-                if (ncands == cap) {
-                    cap *= 2;
-                    cand_t *gr = realloc(cands, cap * sizeof(cand_t));
-                    if (!gr) break;
-                    cands = gr;
-                }
-                cands[ncands].i = i;
-                cands[ncands].tgt = bl_target;
-                ncands++;
-            }
-            // Tally → find most common bl_target.
-            mach_vm_address_t halt_addr = 0;
-            int halt_count = 0;
-            for (size_t a = 0; a < ncands; a++) {
-                int c = 0;
-                for (size_t b = 0; b < ncands; b++) {
-                    if (cands[b].tgt == cands[a].tgt) c++;
-                }
-                if (c > halt_count) {
-                    halt_count = c;
-                    halt_addr  = cands[a].tgt;
-                }
-            }
-            attrs_t hd; attrs_init(&hd);
-            attrs_hex(&hd, "halt_addr", (unsigned long long)halt_addr);
-            attrs_int(&hd, "halt_count", halt_count);
-            attrs_int(&hd, "candidates", (int)ncands);
-            emit(LOG_DEBUG, "patch.halt_consensus", &hd,
-                 "skip_halt consensus: halt=0x%llx callers=%d/%zu",
-                 (unsigned long long)halt_addr, halt_count, ncands);
-            // Only patch if winner has a clear majority  at least 3
-            // callers AND at least 3x the second-most-common. Avoids
-            // false positives when dyld is missing patterns entirely.
-            int second_count = 0;
-            for (size_t a = 0; a < ncands; a++) {
-                if (cands[a].tgt == halt_addr) continue;
-                int c = 0;
-                for (size_t b = 0; b < ncands; b++) {
-                    if (cands[b].tgt == cands[a].tgt) c++;
-                }
-                if (c > second_count) second_count = c;
-            }
-            if (halt_count >= 3 && halt_count >= second_count * 3) {
-                static const uint32_t b_plus_8 = 0x14000002u;
-                for (size_t k = 0; k < ncands; k++) {
-                    if (cands[k].tgt != halt_addr) continue;
-                    char tag[64];
-                    snprintf(tag, sizeof(tag), "skip_halt_%d", skips);
-                    if (target_patch_bytes(task,
-                            dyld_base + text_off + cands[k].i,
-                            &b_plus_8, sizeof(b_plus_8),
-                            tag) == 0) skips++;
-                }
-            }
-            free(cands);
-        }
-    }
-    free(buf);
-
-    // Always reassign so prior bundle's value can't leak.
-    g_dyld_force_weak_active = (forces > 0) ? 1 : 0;
+    free(symtab);
+    free(strtab);
 
     attrs_t a; attrs_init(&a);
-    attrs_int(&a, "kills", kills);
-    attrs_int(&a, "forces", forces);
-    attrs_int(&a, "skips", skips);
-    attrs_hex(&a, "bytes", (unsigned long long)got);
-    emit(LOG_INFO, "patch.applied", &a,
-         "dyld patches: kills=%d forces=%d skips=%d", kills, forces, skips);
-    return kills + forces + skips;
+    attrs_int(&a, "hits", hits);
+    attrs_int(&a, "nsyms", (int)nsyms);
+    attrs_hex(&a, "dyld_base", (unsigned long long)dyld_base);
+    emit(LOG_INFO, "patch.symtab", &a,
+         "symtab patches: %d (Diagnostics::error ret)", hits);
+    return hits;
 }
 
 int dyld_patch_apply(task_t task,
@@ -344,19 +191,16 @@ int dyld_patch_apply(task_t task,
     static const char *names[] = { "abort_with_payload", "__abort_with_payload",
                                    "abort", NULL };
     static const uint32_t ret_op = 0xd65f03c0;
-    mach_vm_address_t abort_addrs[8] = {0};
-    int n_abort = 0;
 
-    // Symbol-level patches (libsystem abort entries → ret) are belt-and-
-    // suspenders on top of the __TEXT scan. Only attempt them when we
-    // have both libdyld bases to compute the slide.
+    // Symbol-level patches: ret the libsystem abort entries (shared cache)
+    // so a framework initializer that calls abort() during load can't kill
+    // the target. Only attempt when we have both libdyld bases for the slide.
     if (target_libdyld_fb && helper_libdyld_fb) {
         for (int i = 0; names[i]; i++) {
             void *helper_fn = dlsym(RTLD_DEFAULT, names[i]);
             if (!helper_fn) continue;
             mach_vm_address_t a = target_slide_func(task, imgs, img_count,
                 helper_fn, target_libdyld_fb, helper_libdyld_fb);
-            if (a && n_abort < 7) abort_addrs[n_abort++] = a;
             if (target_patch_bytes(task, a, &ret_op, sizeof(ret_op),
                     names[i]) == 0)
                 hits++;
@@ -400,7 +244,25 @@ int dyld_patch_apply(task_t task,
              (unsigned long long)dyld_base);
         return hits;
     }
-    hits += scan_dyld_text(task, dyld_base, abort_addrs);
+    // Cross-OS bind survival, driven entirely by dyld's own LC_SYMTAB
+    // (see dyld_symtab_patch). Targets functions by name, so it's stable
+    // across compiler builds and iOS 14 dyld 3 / iOS 15+ dyld 4, arm64 and
+    // arm64e alike. Every shipping /usr/lib/dyld (incl. the Dopamine
+    // procursus sidecar) carries a symbol table; a stripped dyld is the
+    // only thing that would defeat it, and none ship.
+    int symtab_hits = dyld_symtab_patch(task, dyld_base);
+    hits += symtab_hits;
+
+    // Always reassign so a prior bundle's value can't leak (the appex
+    // loop runs this per .appex). Arms fault recovery only when we patched.
+    g_dyld_force_weak_active = (symtab_hits > 0) ? 1 : 0;
+    if (symtab_hits == 0) {
+        // No symbol table => no cross-OS patching. Same-OS decrypt still
+        // works (it needs no patching); cross-OS would fail at bind.
+        emit(LOG_WARN, "patch.no_symtab", NULL,
+             "dyld exposes no usable symbol table; cross-OS bind patching "
+             "unavailable");
+    }
     return hits;
 }
 

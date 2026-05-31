@@ -38,10 +38,29 @@ extern int proc_pidpath(int, void *, uint32_t);
 #ifndef PT_CONTINUE
 #define PT_CONTINUE 7
 #endif
+#ifndef PT_DETACH
+#define PT_DETACH 11
+#endif
+#ifndef PT_ATTACHEXC
+#define PT_ATTACHEXC 14
+#endif
 extern int ptrace(int request, pid_t pid, void *addr, int data);
 
 #ifndef VM_PROT_COPY
 #define VM_PROT_COPY 0x10
+#endif
+
+// Code-signing flags (cs_blobs.h) used to decide whether a target is under
+// kill-on-invalid enforcement and thus needs CS_DEBUGGED before we patch
+// its dyld pages.
+#ifndef CS_HARD
+#define CS_HARD 0x00000100
+#endif
+#ifndef CS_KILL
+#define CS_KILL 0x00000200
+#endif
+#ifndef CS_DEBUGGED
+#define CS_DEBUGGED 0x10000000
 #endif
 
 #ifndef LC_ENCRYPTION_INFO

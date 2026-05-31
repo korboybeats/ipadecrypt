@@ -16,12 +16,16 @@
 //
 // decrypt flags:
 //   --skip-appex           don't decrypt Payload/<App>.app/PlugIns/*.appex
+//   --execs-only           stream framed Mach-O records on stdout instead of
+//                          packaging an IPA on-device. Events go to stderr.
+//                          out-ipa is ignored.
 
 typedef struct {
     const char *bundle_id;   // CFBundleIdentifier for SBS, or "" for ptrace-only
     const char *bundle_src;  // installed .app path on disk
-    const char *out_ipa;     // output IPA path
+    const char *out_ipa;     // output IPA path; ignored when execs_only is set
     int skip_appex;          // skip the appex pass; extensions stay encrypted
+    int execs_only;          // emit framed Mach-O records on stdout; no zip
 } decrypt_args_t;
 
 typedef struct {

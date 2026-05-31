@@ -45,6 +45,7 @@ docker run --rm \
             -isysroot "$IPHONEOS_SDK" \
             -isystem "$IPHONEOS_SDK/usr/include" \
             -L "$IPHONEOS_SDK/usr/lib" \
+            -lz \
             -fuse-ld=lld \
             -Wl,-arch,arm64 \
             -Wl,-platform_version,ios,"$IPHONEOS_DEPLOYMENT_TARGET","$IPHONEOS_SDK_VERSION" \

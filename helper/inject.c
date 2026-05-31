@@ -699,6 +699,19 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
     fwvec_t fws = {0};
     collect_candidates(bundle_src, runtime, imgs, img_count, &fws);
 
+    // Keys of every bundle framework we're responsible for loading. The
+    // dep-gate in the topo loop blocks ONLY on these (intra-bundle load
+    // order). External deps - system /usr/lib/swift, /System, or toolchain
+    // dylibs not shipped in the bundle - must never block: dlopen resolves
+    // them from the shared cache / filesystem, or fails cleanly on its own.
+    // The old gate blocked on any unloaded dep, so a single unbundled dep
+    // (e.g. /usr/lib/swift/libswift_Builtin_float.dylib) wrongly skipped
+    // every framework transitively needing it.
+    keyset_t bundle_keys = {0};
+    for (int i = 0; i < fws.count; i++) {
+        if (fws.items[i].self_key) keyset_add(&bundle_keys, fws.items[i].self_key);
+    }
+
     // Count remaining work to size the pool. One pool thread per dlopen
     // attempt  we never reuse, so the pool has to cover the worst-case
     // sum of attempts across topo passes.
@@ -716,6 +729,7 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
     if (candidates == 0) {
         fwvec_free(&fws);
         keyset_free(&loaded);
+        keyset_free(&bundle_keys);
         mach_port_deallocate(mach_task_self(), bootstrap);
         return 0;
     }
@@ -736,6 +750,7 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
              "threadpool init failed  inject skipped");
         fwvec_free(&fws);
         keyset_free(&loaded);
+        keyset_free(&bundle_keys);
         mach_port_deallocate(mach_task_self(), bootstrap);
         return 0;
     }
@@ -743,8 +758,11 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
 
     int injected = 0;
     // Multi-pass topo: pass N picks up frameworks whose deps were loaded
-    // in pass N-1. Loop exits early when a pass loads nothing new.
-    for (int pass = 0; pass < 4; pass++) {
+    // in pass N-1. Loop exits early when a pass loads nothing new, so the
+    // cap is just a safety bound - deep bundle dep chains (e.g. Swift
+    // Playgrounds' SwiftBuild: leaf -> SWBCore -> ... -> SWBBuildSystem ->
+    // SWBBuildService is 5+ levels) need more than a handful of passes.
+    for (int pass = 0; pass < 16; pass++) {
         int loaded_this_pass = 0;
         for (int i = 0; i < fws.count; i++) {
             fw_t *fw = &fws.items[i];
@@ -755,7 +773,10 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
                 char *dk = dep_to_key(fw->deps.deps[j]);
                 if (!dk) continue;
                 int self_dep = (fw->self_key && strcmp(dk, fw->self_key) == 0);
-                if (!self_dep && !keyset_has(&loaded, dk)) {
+                // Only an unloaded *bundle* framework blocks; external deps
+                // are dlopen's problem, not a topo-order constraint.
+                if (!self_dep && keyset_has(&bundle_keys, dk) &&
+                    !keyset_has(&loaded, dk)) {
                     missing = 1;
                     free(dk);
                     break;
@@ -888,7 +909,8 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
             char *dk = dep_to_key(fw->deps.deps[j]);
             if (!dk) continue;
             int self_dep = (fw->self_key && strcmp(dk, fw->self_key) == 0);
-            if (!self_dep && !keyset_has(&loaded, dk)) {
+            if (!self_dep && keyset_has(&bundle_keys, dk) &&
+                !keyset_has(&loaded, dk)) {
                 missing_dep = fw->deps.deps[j];
                 free(dk);
                 break;
@@ -910,5 +932,6 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
     tp_destroy(&tp);
     fwvec_free(&fws);
     keyset_free(&loaded);
+    keyset_free(&bundle_keys);
     return injected;
 }

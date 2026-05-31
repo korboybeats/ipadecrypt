@@ -45,6 +45,7 @@ type versionsRow struct {
 type fetchResult struct {
 	extVerID string
 	meta     appstore.VersionMetadata
+	minOS    string // empty if the range-fetch failed; non-fatal
 	err      error
 }
 
@@ -287,6 +288,7 @@ func (ui *versionsUI) applyResult(res fetchResult) {
 			DisplayVersion:   res.meta.DisplayVersion,
 			BundleVersion:    res.meta.BundleVersion,
 			SupportedDevices: res.meta.SupportedDevices,
+			MinimumOSVersion: res.minOS,
 			ReleaseDate:      res.meta.ReleaseDate,
 			Raw:              res.meta.Raw,
 		}
@@ -542,7 +544,18 @@ func (ui *versionsUI) fetchWorker(queue <-chan string, results chan<- fetchResul
 			logVersionsResponse(ui.logPath, "get_version_metadata", ui.app.BundleID, extVerID, meta.Raw)
 		}
 
-		results <- fetchResult{extVerID: extVerID, meta: meta, err: err}
+		// Range-fetch Info.plist from the IPA URL the metadata call
+		// just gave us. Failures here are non-fatal - the row still
+		// shows everything else and just leaves the minOS column blank.
+		var minOS string
+
+		if err == nil && meta.URL != "" {
+			if v, ferr := ui.as.FetchMinimumOSVersion(meta); ferr == nil {
+				minOS = v
+			}
+		}
+
+		results <- fetchResult{extVerID: extVerID, meta: meta, minOS: minOS, err: err}
 	}
 }
 
@@ -764,13 +777,15 @@ func (ui *versionsUI) render() {
 	colIDW := 13
 	colVerW := 14
 	colBuildW := 14
+	colMinOSW := 8
 	colDevW := 14
 
 	b.WriteString("  \x1b[2m")
-	fmt.Fprintf(&b, "    %-*s  %-*s  %-*s  %-*s",
+	fmt.Fprintf(&b, "    %-*s  %-*s  %-*s  %-*s  %-*s",
 		colIDW, "externalId",
 		colVerW, "version",
 		colBuildW, "build",
+		colMinOSW, "minOS",
 		colDevW, "devices")
 	b.WriteString("\x1b[0m\x1b[K\r\n")
 
@@ -782,7 +797,7 @@ func (ui *versionsUI) render() {
 	for i := ui.offset; i < end; i++ {
 		r := ui.rows[i]
 		selected := i == ui.cursor
-		ui.writeRow(&b, r, selected, colIDW, colVerW, colBuildW, colDevW)
+		ui.writeRow(&b, r, selected, colIDW, colVerW, colBuildW, colMinOSW, colDevW)
 	}
 
 	// Footer (no padding lines - the CSI J below erases anything left).
@@ -803,8 +818,8 @@ func (ui *versionsUI) render() {
 	fmt.Fprint(tui.Out, b.String())
 }
 
-func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool, colIDW, colVerW, colBuildW, colDevW int) {
-	var icon, version, build, devices, note string
+func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool, colIDW, colVerW, colBuildW, colMinOSW, colDevW int) {
+	var icon, version, build, minOS, devices, note string
 
 	versionDim := false
 
@@ -813,11 +828,18 @@ func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool,
 		icon = "\x1b[32m✓\x1b[0m"
 		version = r.meta.DisplayVersion
 		build = r.meta.BundleVersion
+
+		minOS = r.meta.MinimumOSVersion
+		if minOS == "" {
+			minOS = "—"
+		}
+
 		devices = formatDeviceIDs(r.meta.SupportedDevices)
 	case rowPending:
 		icon = "\x1b[36m" + spinnerFrames[ui.tick%len(spinnerFrames)] + "\x1b[0m"
 		version = "…"
 		build = "…"
+		minOS = "…"
 		devices = "…"
 	case rowError:
 		icon = "\x1b[31m✗\x1b[0m"
@@ -834,6 +856,7 @@ func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool,
 		}
 
 		build = "—"
+		minOS = "—"
 		devices = "—"
 	}
 
@@ -845,6 +868,7 @@ func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool,
 	idCol := padOrTrim(r.extVerID, colIDW)
 	version = padOrTrim(version, colVerW)
 	build = padOrTrim(build, colBuildW)
+	minOS = padOrTrim(minOS, colMinOSW)
 	devices = padOrTrim(devices, colDevW)
 
 	if versionDim {
@@ -860,13 +884,14 @@ func (ui *versionsUI) writeRow(b *strings.Builder, r versionsRow, selected bool,
 		}
 	}
 
-	line := fmt.Sprintf("  %s %s%s %s  %s  %s  %s  %s",
+	line := fmt.Sprintf("  %s %s%s %s  %s  %s  %s  %s  %s",
 		cursor,
 		mark,
 		icon,
 		idCol,
 		version,
 		build,
+		minOS,
 		devices,
 		note)
 

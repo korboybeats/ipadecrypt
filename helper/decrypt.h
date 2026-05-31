@@ -11,8 +11,7 @@ int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
 // .appex bundle via the ptrace path.
 void decrypt_appexes(const char *bundle_src, const char *bundle_dst);
 
-// Zip the staging tree into out_ipa. Tries /var/jb/usr/bin/zip first
-// (procursus rootless) then /usr/bin/zip (rootful).
+// Zip the staging tree's Payload/ into out_ipa ("-" streams to stdout).
 int run_zip(const char *staging, const char *ipa_path);
 
 #endif // HELPER_DECRYPT_H

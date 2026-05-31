@@ -135,7 +135,68 @@ func Load(path string) (*Config, error) {
 		cfg.Version = SchemaVersion
 	}
 
+	if cfg.Version < 2 {
+		migrateAppleV1ToV2(data, &cfg.Apple)
+		cfg.Version = 2
+
+		// Persist the migrated shape so subsequent loads are clean and
+		// the old apple.account.* nested object stops shadowing the new
+		// flat fields if anyone hand-edits the file.
+		if err := cfg.Save(); err != nil {
+			return nil, fmt.Errorf("save migrated config: %w", err)
+		}
+	}
+
 	return cfg, nil
+}
+
+// migrateAppleV1ToV2 lifts the v1 apple.account.* nested object into the
+// flat v2 apple.* fields. Top-level apple.email/apple.password already
+// share JSON keys with the v2 schema, so they're carried over by the
+// initial Unmarshal - this only rescues the account-nested credentials.
+func migrateAppleV1ToV2(data []byte, apple *Apple) {
+	var raw struct {
+		Apple struct {
+			Account struct {
+				Email               string `json:"email"`
+				PasswordToken       string `json:"passwordToken"`
+				DirectoryServicesID string `json:"directoryServicesIdentifier"`
+				StoreFront          string `json:"storeFront"`
+				Password            string `json:"password"`
+				Pod                 string `json:"pod"`
+			} `json:"account"`
+		} `json:"apple"`
+	}
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return
+	}
+
+	a := raw.Apple.Account
+
+	if apple.Email == "" {
+		apple.Email = a.Email
+	}
+
+	if apple.Password == "" {
+		apple.Password = a.Password
+	}
+
+	if apple.PasswordToken == "" {
+		apple.PasswordToken = a.PasswordToken
+	}
+
+	if apple.DirectoryServicesIdentifier == "" {
+		apple.DirectoryServicesIdentifier = a.DirectoryServicesID
+	}
+
+	if apple.StoreFront == "" {
+		apple.StoreFront = a.StoreFront
+	}
+
+	if apple.Pod == "" {
+		apple.Pod = a.Pod
+	}
 }
 
 func (c *Config) Save() error {

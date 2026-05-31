@@ -29,17 +29,20 @@ SHELL_BIN="$(jb_path /var/jb/bin/sh)"
 PLIST="$(jb_path /var/jb/Library/LaunchDaemons/com.korboy.ipadecryptd.plist)"
 RUN_DIR="$(jb_path /var/jb/var/run)"
 TMP_DIR="$(jb_path /var/jb/tmp)"
+PIDFILE="$RUN_DIR/ipadecryptd.pid"
 OUTROOT="$(mobile_path /var/mobile/Documents/ipadecrypt)"
 OUTDIR="$OUTROOT/decrypted"
 LOGDIR="$OUTROOT/logs"
 OLD_APP_LOG="$(mobile_path /var/mobile/Documents/ipadecrypt-app.log)"
 
 launchctl bootout system "$PLIST" 2>/dev/null || true
-ps -axo pid,command | awk '/[i]padecryptd-supervisor/ { print $1 }' | while read -r pid; do
-    kill "$pid" 2>/dev/null || true
-done
+if command -v ps >/dev/null 2>&1; then
+    ps -axo pid,command | awk '/[i]padecryptd-supervisor/ { print $1 }' | while read -r pid; do
+        kill "$pid" 2>/dev/null || true
+    done
+fi
 killall ipadecryptd 2>/dev/null || true
-rm -f "$RUN_DIR/ipadecryptd.sock" 2>/dev/null || true
+rm -f "$RUN_DIR/ipadecryptd.sock" "$PIDFILE" 2>/dev/null || true
 
 chmod 755 "$BIN" "$SUPERVISOR"
 chown 0:0 "$BIN" "$SUPERVISOR"
