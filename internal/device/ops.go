@@ -23,9 +23,32 @@ var helperArm64 []byte
 var appdlArm64 []byte
 
 //go:embed ipadecryptautoalert.deb
-var autoalertDeb []byte
+var autoalertRootlessDeb []byte
+
+//go:embed ipadecryptautoalert-roothide.deb
+var autoalertRoothideDeb []byte
 
 const autoalertPackage = "com.korboy.ipadecryptautoalert"
+
+// SSH non-interactive shells on iOS often have a trimmed PATH that omits
+// sysctl and rootless tools, so this script tries absolute paths before
+// falling back. `uname -m` always reports arm64 on iOS; RootHide's dpkg
+// architecture is a better arm64e signal than /sbin/launchd on remapped
+// filesystems.
+const deviceProbeScript = `IOS=$(sw_vers -productVersion 2>/dev/null || /usr/libexec/PlistBuddy -c 'Print :ProductVersion' /System/Library/CoreServices/SystemVersion.plist 2>/dev/null || true)
+MODEL=$(sysctl -n hw.machine 2>/dev/null || /usr/sbin/sysctl -n hw.machine 2>/dev/null || /var/jb/usr/sbin/sysctl -n hw.machine 2>/dev/null || (sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//') || true)
+PKGARCH=$(dpkg --print-architecture 2>/dev/null || /var/jb/usr/bin/dpkg --print-architecture 2>/dev/null || true)
+ARCH="$PKGARCH"
+if [ -z "$ARCH" ]; then ARCH=$(od -An -tx1 -j8 -N1 /sbin/launchd 2>/dev/null | tr -d ' \n'); fi
+VJB=0; [ -e /var/jb ] && VJB=1
+LINK=$(readlink /var/jb 2>/dev/null)
+RH=0
+ls -d /var/containers/Bundle/Application/.jbroot-* /private/var/containers/Bundle/Application/.jbroot-* /rootfs/var/containers/Bundle/Application/.jbroot-* >/dev/null 2>&1 && RH=1
+[ "$LINK" = "/" ] && [ "$PKGARCH" = "iphoneos-arm64e" ] && RH=1
+printf 'ios=%s\n' "$IOS"
+printf 'model=%s\n' "$MODEL"
+printf 'arch=%s\n' "$ARCH"
+printf 'jb link=%s vjb=%s rh=%s archpkg=%s\n' "$LINK" "$VJB" "$RH" "$PKGARCH"`
 
 type ProbeResult struct {
 	IOSVersion string
@@ -34,22 +57,20 @@ type ProbeResult struct {
 	// DeviceFamily mirrors UIDeviceFamily values from Info.plist:
 	// 1 = iPhone/iPod, 2 = iPad. 0 if unknown.
 	DeviceFamily int
-	// Jailbreak is the detected jailbreak: "Dopamine", "palera1n",
-	// "checkra1n", "rootless?" (rootless but brand unknown) or "unknown".
+	// Jailbreak is the detected jailbreak: "roothide", "Dopamine",
+	// "palera1n", "checkra1n", "rootless?" or "unknown".
 	Jailbreak string
 }
 
-// classifyJailbreak identifies the ACTIVE jailbreak from the live /var/jb
-// symlink target - the hard tell. /var/jb is the rootless prefix every
-// modern jb mounts at boot, and its target is the bootstrap that actually
-// booted this session, so it reflects what is RUNNING, not what is merely
-// installed: a leftover Dopamine.app on a palera1n boot cannot change where
-// /var/jb points. We deliberately ignore installed apps/dpkg packages -
-// they are stale-prone and not authoritative.
+// classifyJailbreak identifies the active jailbreak from live filesystem
+// signals. /var/jb is the rootless prefix every modern jailbreak mounts at
+// boot, so its target reflects the bootstrap currently running. RootHide can
+// remap that view, so Probe also passes explicit RootHide markers from the app
+// container namespace and dpkg's active package architecture.
 //
 // Verified on iPhone10,5 / A11 / Dopamine: target is
-// /private/preboot/<hash>/dopamine-<rand>/procursus. roothide Dopamine also
-// uses a /var/.jbroot-<hex> scheme. palera1n's rootless bootstrap sits under
+// /private/preboot/<hash>/dopamine-<rand>/procursus. RootHide Dopamine also
+// uses a .jbroot-<hex> scheme. palera1n's rootless bootstrap sits under
 // a jb-<rand> dir; checkra1n is rootful (no /var/jb -> preboot link). The
 // "dopamine" token is empirically confirmed; the palera1n/checkra1n schemes
 // are from their known layouts (no such hardware here to confirm).
@@ -64,7 +85,9 @@ func classifyJailbreak(sig string) string {
 
 	link := strings.ToLower(f["link"])
 	switch {
-	case strings.Contains(link, "dopamine") || strings.Contains(link, ".jbroot"):
+	case f["rh"] == "1" || strings.Contains(link, ".jbroot"):
+		return "roothide"
+	case strings.Contains(link, "dopamine"):
 		return "Dopamine"
 	case strings.Contains(link, "palera1n") || strings.Contains(link, "/jb-"):
 		return "palera1n"
@@ -72,6 +95,15 @@ func classifyJailbreak(sig string) string {
 		return "rootless?"
 	default:
 		return "unknown"
+	}
+}
+
+func probeArch(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case "iphoneos-arm64e", "arm64e", "02":
+		return "arm64e"
+	default:
+		return "arm64"
 	}
 }
 
@@ -87,66 +119,45 @@ func deviceFamilyFromModel(model string) int {
 }
 
 func (c *Client) Probe() (ProbeResult, error) {
-	// SSH non-interactive shells on iOS often have a trimmed PATH that omits
-	// the sysctl / rootless locations, so try a few absolute paths before
-	// giving up. The 2>/dev/null suppresses expected "not found" from the
-	// unmatched ones.
-	// `uname -m` on iOS always returns "arm64"  Apple doesn't expose
-	// the arm64e subtype through the standard syscall. Read cpusubtype
-	// directly from the mach header of `/sbin/launchd` (always present,
-	// always thin to the device's actual arch). Offset 8 in the
-	// mach_header_64 is the cpusubtype low byte: 0x02 = arm64e (PAC),
-	// 0x00 or 0x01 = arm64.
-	// Line 0: iOS version. Line 1: model. Line 2: launchd cpusubtype byte.
-	// Then a "JB ..." line carrying the live /var/jb symlink target - the
-	// hard tell for the ACTIVE jailbreak (see classifyJailbreak). An absent
-	// or unrecognized jailbreak just yields "unknown"; the probe never fails.
-	const script = `sw_vers -productVersion 2>/dev/null || /usr/libexec/PlistBuddy -c 'Print :ProductVersion' /System/Library/CoreServices/SystemVersion.plist 2>/dev/null
-(sysctl -n hw.machine 2>/dev/null || /usr/sbin/sysctl -n hw.machine 2>/dev/null || /var/jb/usr/sbin/sysctl -n hw.machine 2>/dev/null || sysctl hw.machine 2>/dev/null | sed 's/^hw.machine: *//' || true)
-od -An -tx1 -j8 -N1 /sbin/launchd 2>/dev/null | tr -d ' \n'; echo
-VJB=0; [ -e /var/jb ] && VJB=1
-LINK=$(readlink /var/jb 2>/dev/null)
-printf 'JB link=%s vjb=%s\n' "$LINK" "$VJB"`
-
-	out, _, code, err := c.Run(script)
+	out, _, code, err := c.Run(deviceProbeScript)
 	if err != nil || code != 0 {
 		return ProbeResult{}, fmt.Errorf("probe (exit %d): %w", code, err)
 	}
 
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	return parseProbeOutput(out), nil
+}
 
+func parseProbeOutput(out string) ProbeResult {
 	var r ProbeResult
-	if len(lines) > 0 {
-		r.IOSVersion = strings.TrimSpace(lines[0])
-	}
+	r.Arch = "arm64"
+	r.Jailbreak = "unknown"
 
-	if len(lines) > 1 {
-		r.Model = strings.TrimSpace(lines[1])
-	}
-
-	if len(lines) > 2 {
-		switch strings.TrimSpace(lines[2]) {
-		case "02":
-			r.Arch = "arm64e"
-		default:
-			r.Arch = "arm64"
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for _, ln := range lines {
+		s := strings.TrimSpace(ln)
+		if s == "" {
+			continue
 		}
-	} else {
-		r.Arch = "arm64"
+		if sig, ok := strings.CutPrefix(s, "jb "); ok {
+			r.Jailbreak = classifyJailbreak(sig)
+			continue
+		}
+		key, value, ok := strings.Cut(s, "=")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "ios":
+			r.IOSVersion = strings.TrimSpace(value)
+		case "model":
+			r.Model = strings.TrimSpace(value)
+		case "arch":
+			r.Arch = probeArch(value)
+		}
 	}
 
 	r.DeviceFamily = deviceFamilyFromModel(r.Model)
-
-	r.Jailbreak = "unknown"
-
-	for _, ln := range lines {
-		if s := strings.TrimSpace(ln); strings.HasPrefix(s, "JB ") {
-			r.Jailbreak = classifyJailbreak(strings.TrimPrefix(s, "JB "))
-			break
-		}
-	}
-
-	return r, nil
+	return r
 }
 
 func (c *Client) LocateAppinst() (string, error) {
@@ -276,19 +287,21 @@ func (c *Client) CleanupLegacyRemoteRoot() {
 
 // IsAutoalertInstalled checks if the SpringBoard auto-confirm tweak is
 // installed via dpkg.
-func (c *Client) IsAutoalertInstalled() bool {
-	out, _, code, _ := c.RunSudo(fmt.Sprintf("dpkg -s %s 2>/dev/null | grep -q '^Status: install ok installed' && echo yes", autoalertPackage))
-	return code == 0 && strings.TrimSpace(out) == "yes"
+func (c *Client) IsAutoalertInstalled(jailbreak string) bool {
+	_, expectedArch := autoalertDebForJailbreak(jailbreak)
+	out, _, code, _ := c.RunSudo(fmt.Sprintf("dpkg -s %s 2>/dev/null | awk -F': ' '/^Status:/{status=$2} /^Architecture:/{arch=$2} END{if (status==\"install ok installed\") print arch}'", autoalertPackage))
+	return code == 0 && strings.TrimSpace(out) == expectedArch
 }
 
 // EnsureAutoalert installs the SpringBoard auto-confirm tweak via dpkg.
 // Caller is responsible for respringing SpringBoard afterward.
-func (c *Client) EnsureAutoalert() error {
-	if c.IsAutoalertInstalled() {
+func (c *Client) EnsureAutoalert(jailbreak string) error {
+	if c.IsAutoalertInstalled(jailbreak) {
 		return nil
 	}
-	remote := path.Join(RemoteRoot, "tweaks", "ipadecryptautoalert.deb")
-	if err := c.Upload(bytes.NewReader(autoalertDeb), remote, 0o644); err != nil {
+	deb, _ := autoalertDebForJailbreak(jailbreak)
+	remote := path.Join(RemoteRoot, "tweaks", autoalertDebName(jailbreak))
+	if err := c.Upload(bytes.NewReader(deb), remote, 0o644); err != nil {
 		return fmt.Errorf("upload tweak deb: %w", err)
 	}
 	_, errOut, code, err := c.RunSudo(fmt.Sprintf("dpkg -i %q", remote))
@@ -299,6 +312,20 @@ func (c *Client) EnsureAutoalert() error {
 		return fmt.Errorf("dpkg -i exit %d: %s", code, strings.TrimSpace(errOut))
 	}
 	return nil
+}
+
+func autoalertDebForJailbreak(jailbreak string) ([]byte, string) {
+	if jailbreak == "roothide" {
+		return autoalertRoothideDeb, "iphoneos-arm64e"
+	}
+	return autoalertRootlessDeb, "iphoneos-arm64"
+}
+
+func autoalertDebName(jailbreak string) string {
+	if jailbreak == "roothide" {
+		return "ipadecryptautoalert-roothide.deb"
+	}
+	return "ipadecryptautoalert-rootless.deb"
 }
 
 // Respring kills SpringBoard so it relaunches.
@@ -440,30 +467,47 @@ type InstalledApp struct {
 	Path        string // /var/containers/Bundle/Application/<UUID>/<Name>.app
 }
 
-// ListInstalledApps enumerates every installed .app under
-// /var/containers/Bundle/Application and returns its CFBundleIdentifier and
-// display name. Uses python3's plistlib to parse all Info.plists in a single
-// process (~0.2s for ~100 apps).
-func (c *Client) ListInstalledApps() ([]InstalledApp, error) {
-	const script = `python3 -c '
-import os, plistlib, glob
-for app in sorted(glob.glob("/var/containers/Bundle/Application/*/*.app")):
-    p = os.path.join(app, "Info.plist")
-    try:
-        with open(p, "rb") as f:
-            d = plistlib.load(f)
-        bid = d.get("CFBundleIdentifier", "")
-        name = d.get("CFBundleDisplayName") or d.get("CFBundleName") or ""
-        if bid: print(f"{bid}\t{name}\t{app}")
-    except: pass
-' 2>/dev/null`
-	out, _, code, err := c.RunSudo(script)
+// SearchInstalledApps returns installed apps whose Info.plist contains term.
+// It prefilters matching plists before parsing, so common fuzzy searches do
+// not enumerate every installed app.
+func (c *Client) SearchInstalledApps(term string) ([]InstalledApp, error) {
+	term = strings.TrimSpace(term)
+	if term == "" {
+		return nil, nil
+	}
+
+	out, _, code, err := c.RunSudo("sh -c " + shellQuote(installedAppSearchScript(term)))
 	if err != nil {
-		return nil, fmt.Errorf("list installed: %w", err)
+		return nil, fmt.Errorf("search installed: %w", err)
 	}
 	if code != 0 {
-		return nil, fmt.Errorf("list installed exit %d", code)
+		return nil, fmt.Errorf("search installed exit %d", code)
 	}
+
+	return parseInstalledApps(out), nil
+}
+
+func installedAppSearchScript(term string) string {
+	return `plutil_bin=""
+for p in /usr/bin/plutil /var/jb/usr/bin/plutil; do
+    if [ -x "$p" ]; then plutil_bin="$p"; break; fi
+done
+[ -n "$plutil_bin" ] || exit 127
+plget() {
+    "$plutil_bin" -key "$1" "$2" 2>/dev/null | sed -n '1p'
+}
+grep -RilaF -- ` + shellQuote(term) + ` /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null | while IFS= read -r info; do
+    [ -r "$info" ] || continue
+    app=${info%/Info.plist}
+    bid=$(plget CFBundleIdentifier "$info")
+    [ -n "$bid" ] || continue
+    name=$(plget CFBundleDisplayName "$info")
+    [ -n "$name" ] || name=$(plget CFBundleName "$info")
+    printf '%s\t%s\t%s\n' "$bid" "$name" "$app"
+done`
+}
+
+func parseInstalledApps(out string) []InstalledApp {
 	var apps []InstalledApp
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line == "" {
@@ -475,7 +519,56 @@ for app in sorted(glob.glob("/var/containers/Bundle/Application/*/*.app")):
 		}
 		apps = append(apps, InstalledApp{BundleID: parts[0], DisplayName: parts[1], Path: parts[2]})
 	}
-	return apps, nil
+	return apps
+}
+
+// EnsureBundleExecutables sets +x on the main executable for the app, appex,
+// and framework bundles the helper may need to spawn or read. Some App Store
+// installs leave extension executables mode 0644; doing this over SSH as root
+// is more reliable on RootHide than asking the helper process to chmod later.
+func (c *Client) EnsureBundleExecutables(bundlePath string) error {
+	out, errOut, code, err := c.RunSudo("sh -c " + shellQuote(ensureBundleExecutablesScript(bundlePath)))
+	if err != nil {
+		return fmt.Errorf("prepare executable modes: %w", err)
+	}
+	if code != 0 {
+		msg := strings.TrimSpace(errOut)
+		if msg == "" {
+			msg = strings.TrimSpace(out)
+		}
+		return fmt.Errorf("prepare executable modes exit %d: %s", code, msg)
+	}
+	return nil
+}
+
+func ensureBundleExecutablesScript(bundlePath string) string {
+	return `bundle=` + shellQuote(bundlePath) + `
+plutil_bin=""
+for p in /usr/bin/plutil /var/jb/usr/bin/plutil; do
+    if [ -x "$p" ]; then plutil_bin="$p"; break; fi
+done
+bundle_executable() {
+    b="$1"
+    if [ -n "$plutil_bin" ] && [ -r "$b/Info.plist" ]; then
+        exe=$("$plutil_bin" -key CFBundleExecutable "$b/Info.plist" 2>/dev/null | sed -n '1p')
+        if [ -n "$exe" ]; then printf '%s\n' "$exe"; return 0; fi
+    fi
+    base=${b##*/}
+    printf '%s\n' "${base%.*}"
+}
+chmod_bundle_exec() {
+    b="$1"
+    [ -d "$b" ] || return 0
+    exe=$(bundle_executable "$b")
+    [ -n "$exe" ] || return 0
+    target="$b/$exe"
+    [ -f "$target" ] || return 0
+    chmod a+x "$target"
+}
+chmod_bundle_exec "$bundle"
+for b in "$bundle"/Frameworks/*.framework "$bundle"/PlugIns/*.appex "$bundle"/Extensions/*.appex; do
+    chmod_bundle_exec "$b"
+done`
 }
 
 // FindInstalledByBundleID returns the .app path and canonical CFBundleIdentifier
@@ -572,6 +665,10 @@ type FrameHandler func(path string, size int64, r io.Reader) error
 // the binary stream - no on-device output file, no sftp pull.
 func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
 	verbose, skipAppex bool, onEvent EventHandler, ipaW io.Writer) (int, error) {
+	if err := c.EnsureBundleExecutables(bundlePath); err != nil {
+		return 1, err
+	}
+
 	gflag := ""
 	if verbose {
 		gflag = "-v "
@@ -599,6 +696,10 @@ func (c *Client) RunHelper(helperPath, bundleID, bundlePath string,
 // assemble the output by substituting the helper-provided execs.
 func (c *Client) RunHelperExecs(helperPath, bundleID, bundlePath string,
 	verbose, skipAppex bool, onEvent EventHandler, onFrame FrameHandler) (int, error) {
+	if err := c.EnsureBundleExecutables(bundlePath); err != nil {
+		return 1, err
+	}
+
 	gflag := ""
 	if verbose {
 		gflag = "-v "

@@ -326,7 +326,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	tui.Step(5, 5, "Install the auto-confirm tweak")
 	tui.Info("An optional SpringBoard tweak that taps the App Store older-version\nDownload prompt only while ipadecrypt's Latest iOS-compatible sentinel is armed.\nWithout it, you tap Download manually each time.")
 
-	if dev.IsAutoalertInstalled() {
+	if dev.IsAutoalertInstalled(probe.Jailbreak) {
 		tui.OK("ipadecryptautoalert already installed")
 	} else {
 		idx, err := tui.Select("install ipadecryptautoalert?", []string{
@@ -341,7 +341,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		} else {
 			live = tui.NewLive()
 			live.Spin("installing ipadecryptautoalert")
-			if err := dev.EnsureAutoalert(); err != nil {
+			if err := dev.EnsureAutoalert(probe.Jailbreak); err != nil {
 				live.Fail("install: %v", err)
 				tui.Info("StoreKit downloads will still work but you'll have to tap 'Download' manually")
 			} else {

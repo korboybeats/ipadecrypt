@@ -250,6 +250,7 @@ func doctorDeviceConfigReady(cfg *config.Config) bool {
 }
 
 func (r *doctorRun) remoteChecks(dev *device.Client) {
+	jailbreak := "unknown"
 	r.start("device probe")
 	if probe, err := dev.Probe(); err != nil {
 		r.add(doctorCheck{
@@ -258,10 +259,11 @@ func (r *doctorRun) remoteChecks(dev *device.Client) {
 			Detail: err.Error(),
 		})
 	} else {
+		jailbreak = probe.Jailbreak
 		r.add(doctorCheck{
 			Status: doctorPass,
 			Name:   "device probe",
-			Detail: fmt.Sprintf("iOS %s %s %s", probe.IOSVersion, probe.Arch, probe.Model),
+			Detail: fmt.Sprintf("iOS %s %s %s %s", probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak),
 		})
 	}
 
@@ -298,7 +300,7 @@ func (r *doctorRun) remoteChecks(dev *device.Client) {
 	r.start("device output")
 	r.add(doctorOutputDirCheck(dev))
 	r.helperChecks(dev)
-	r.autoalertChecks(dev)
+	r.autoalertChecks(dev, jailbreak)
 	r.appChecks(dev)
 }
 
@@ -387,9 +389,9 @@ func (r *doctorRun) helperChecks(dev *device.Client) {
 	}
 }
 
-func (r *doctorRun) autoalertChecks(dev *device.Client) {
+func (r *doctorRun) autoalertChecks(dev *device.Client, jailbreak string) {
 	r.start("auto-confirm tweak")
-	if dev.IsAutoalertInstalled() {
+	if dev.IsAutoalertInstalled(jailbreak) {
 		r.add(doctorCheck{Status: doctorPass, Name: "auto-confirm tweak", Detail: "installed"})
 	} else {
 		r.add(doctorCheck{

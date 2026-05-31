@@ -8,6 +8,10 @@
 .claude
 dist/
 .grepai/
+.codemap/
+/ipadecrypt
+/app/Resources/appstore-helper.arm64
+/app/layout/usr/libexec/ipadecryptd
 
 # theos build artifacts
 .theos/

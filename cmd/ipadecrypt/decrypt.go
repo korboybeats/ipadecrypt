@@ -1473,9 +1473,9 @@ func resolveBundleByFuzzy(dev *device.Client, as *appstore.Client, acc *appstore
 	live := tui.NewLive()
 	live.Spin("searching installed apps for %q", term)
 
-	apps, err := dev.ListInstalledApps()
+	apps, err := dev.SearchInstalledApps(term)
 	if err != nil {
-		live.Fail("list installed apps: %v", err)
+		live.Fail("search installed apps: %v", err)
 		return "", err
 	}
 

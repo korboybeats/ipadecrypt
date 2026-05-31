@@ -71,6 +71,11 @@ func handle(c net.Conn) {
 		return
 	}
 
+	if err := ensureBundleExecutables(bundlePath); err != nil {
+		emit(c, "event=daemon phase=failed reason=prepare_executables message=%q", err.Error())
+		return
+	}
+
 	cmd := exec.Command(helper, bundleID, bundlePath, outIPA)
 	cmd.Dir = "/var/root"
 	pathEnv := os.Getenv("PATH")
@@ -117,6 +122,42 @@ func handle(c net.Conn) {
 	emit(c, "event=daemon phase=exit code=%d", code)
 	fmt.Fprintf(c, "__ipadecryptd_exit %d\n", code)
 	mu.Unlock()
+}
+
+func ensureBundleExecutables(bundlePath string) error {
+	script := `bundle=$1
+plutil_bin=""
+for p in /usr/bin/plutil /var/jb/usr/bin/plutil; do
+    if [ -x "$p" ]; then plutil_bin="$p"; break; fi
+done
+bundle_executable() {
+    b="$1"
+    if [ -n "$plutil_bin" ] && [ -r "$b/Info.plist" ]; then
+        exe=$("$plutil_bin" -key CFBundleExecutable "$b/Info.plist" 2>/dev/null | sed -n '1p')
+        if [ -n "$exe" ]; then printf '%s\n' "$exe"; return 0; fi
+    fi
+    base=${b##*/}
+    printf '%s\n' "${base%.*}"
+}
+chmod_bundle_exec() {
+    b="$1"
+    [ -d "$b" ] || return 0
+    exe=$(bundle_executable "$b")
+    [ -n "$exe" ] || return 0
+    target="$b/$exe"
+    [ -f "$target" ] || return 0
+    chmod a+x "$target"
+}
+chmod_bundle_exec "$bundle"
+for b in "$bundle"/Frameworks/*.framework "$bundle"/PlugIns/*.appex "$bundle"/Extensions/*.appex; do
+    chmod_bundle_exec "$b"
+done`
+	cmd := exec.Command("sh", "-c", script, "ipadecryptd-prepare", bundlePath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func readLine(r *bufio.Reader) (string, error) {

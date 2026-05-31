@@ -209,7 +209,28 @@ static int sbs_launch(const char *bundle_id, const char *exec_path,
 // the main exec at the PT_ATTACHEXC stop and terminates without ever
 // resuming, so we don't need to mark the target debugged  it never
 // runs a single instruction past exec.
-static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
+static void retry_exec_chmod(const char *exec_path, int status) {
+    struct stat st;
+    if (stat(exec_path, &st) != 0) {
+        er("retry chmod stat %s: %s", exec_path, strerror(errno));
+        return;
+    }
+
+    mode_t want = st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH;
+    if (chmod(exec_path, want) != 0) {
+        er("retry chmod +x %s: %s", exec_path, strerror(errno));
+        return;
+    }
+
+    attrs_t a; attrs_init(&a);
+    attrs_str(&a, "exec", exec_path);
+    attrs_fmt(&a, "old_mode", "%o", st.st_mode & 0777);
+    attrs_fmt(&a, "status", "0x%x", status);
+    emit(LOG_WARN, "target.spawn.retry_chmod", &a,
+         "exec failed before trap; chmod +x and retrying %s", exec_path);
+}
+
+static int do_ptrace_spawn_once(const char *exec_path, pid_t *out_pid, int *out_status) {
     pid_t pid = fork();
     if (pid < 0) { er("fork: %s", strerror(errno)); return -1; }
     if (pid == 0) {
@@ -223,12 +244,27 @@ static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
     int status;
     pid_t w;
     do { w = waitpid(pid, &status, WUNTRACED); } while (w < 0 && errno == EINTR);
+    if (out_status) *out_status = status;
     if (w < 0 || WIFEXITED(status) || WIFSIGNALED(status)) {
         er("child died during exec of %s (status=0x%x)", exec_path, status);
         return -1;
     }
     *out_pid = pid;
     return 0;
+}
+
+static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int status = 0;
+        if (do_ptrace_spawn_once(exec_path, out_pid, &status) == 0) {
+            return 0;
+        }
+        if (attempt != 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 127) {
+            return -1;
+        }
+        retry_exec_chmod(exec_path, status);
+    }
+    return -1;
 }
 
 // ----- Main entry points -----------------------------------------------------

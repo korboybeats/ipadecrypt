@@ -84,6 +84,7 @@ auto-confirm tweak:
 - `com.korboy.ipadecrypt_0.0.1_iphoneos-arm64.deb`
 - `com.korboy.ipadecrypt_0.0.1_iphoneos-arm64e.deb` for RootHide
 - `com.korboy.ipadecryptautoalert_0.0.1_iphoneos-arm64.deb`
+- `com.korboy.ipadecryptautoalert_0.0.1_iphoneos-arm64e.deb` for RootHide
 
 To build and install the rootless app locally:
 
