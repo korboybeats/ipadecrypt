@@ -27,6 +27,7 @@ This fork adds a handful of QoL features on top of upstream:
 - **Auto-confirm tweak (`ipadecryptautoalert`).** Optional SpringBoard tweak installed during bootstrap via `dpkg`. When ipadecrypt starts a **Latest iOS-compatible** StoreKit download, it arms a short-lived sentinel file; the tweak only auto-taps the `Download` action on the App Store older-version alert while that sentinel is valid.
 - **Configurable decrypted IPA retention.** Choose whether CLI decrypt output is kept on the desktop, device, or both.
 - **Single PC workspace.** CLI config, cookies, cache, and logs live under `~/ipadecrypt/`; decrypted PC outputs default to `~/ipadecrypt/decrypted/`.
+- **RootHide-aware device workspace.** RootHide device files are kept under `/rootfs/private/var/mobile/Documents/ipadecrypt/`.
 - **Faster IPA post-processing.** Metadata/Watch cleanup is combined into one scanned pass and skips rewriting entirely when there is nothing to remove. Cryptid verification streams Mach-O load commands instead of reading whole binaries into memory.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
 - **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `-dl` (download), `-a`/`auth` (refresh Apple ID auth), `-k` (keep policy), `-u` (update).
@@ -45,7 +46,7 @@ All installable through Sileo:
 | **AppSync Unified** | Bypasses installd's signature check (add repo `https://lukezgd.github.io/repo`) |
 | **appinst** | Installs modified IPAs on the device (add repo `https://lukezgd.github.io/repo`) |
 
-> Tested on iOS 16.7.11 with palera1n rootless and Dopamine on iPhone 8 Plus. iOS 14 through 17 on A10–A14 devices are expected to work.
+> Tested on palera1n rootless, Dopamine rootless, and RootHide. iOS 14 through 17 on A10–A14 devices are expected to work.
 
 ## Install
 
@@ -81,10 +82,10 @@ Refer to [BUILDING.md](BUILDING.md) for helper and release-style build details.
 The release includes `.deb` packages for the on-device app and the optional
 auto-confirm tweak:
 
-- `com.korboy.ipadecrypt_0.0.1_iphoneos-arm64.deb`
-- `com.korboy.ipadecrypt_0.0.1_iphoneos-arm64e.deb` for RootHide
-- `com.korboy.ipadecryptautoalert_0.0.1_iphoneos-arm64.deb`
-- `com.korboy.ipadecryptautoalert_0.0.1_iphoneos-arm64e.deb` for RootHide
+- `com.korboy.ipadecrypt_0.7.0-korboy.1_iphoneos-arm64.deb`
+- `com.korboy.ipadecrypt_0.7.0-korboy.1_iphoneos-arm64e.deb` for RootHide
+- `com.korboy.ipadecryptautoalert_0.7.0-korboy.1_iphoneos-arm64.deb`
+- `com.korboy.ipadecryptautoalert_0.7.0-korboy.1_iphoneos-arm64e.deb` for RootHide
 
 To build and install the rootless app locally:
 
@@ -170,8 +171,9 @@ ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 
 By default, decrypted IPAs are saved to `~/ipadecrypt/decrypted/` on your
 computer and kept on the device under
-`/var/mobile/Documents/ipadecrypt/decrypted/`. Run `ipadecrypt keep` to change
-that retention policy.
+`/var/mobile/Documents/ipadecrypt/decrypted/` on rootless jailbreaks or
+`/rootfs/private/var/mobile/Documents/ipadecrypt/decrypted/` on RootHide.
+Run `ipadecrypt keep` to change that retention policy.
 When decrypting by bundle ID or App Store search result in a terminal, the
 build picker can also open the App Store version table so you can choose a
 specific historical version to install and decrypt.
