@@ -16,7 +16,7 @@ IOS_SDK_VERSION=$(basename "$IOS_SDK" | sed 's/iPhoneOS//; s/\.sdk//')
   GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
   CC="$THEOS/toolchain/linux/host/bin/clang-13 -target arm64-apple-ios15.0 -isysroot $IOS_SDK -Wno-incompatible-sysroot -Wno-unused-command-line-argument" \
   CGO_LDFLAGS="-fuse-ld=lld -Wl,-platform_version,ios,15.0,$IOS_SDK_VERSION" \
-  "$GO" build -trimpath -ldflags="-s -w -X main.defaultRootDir=/rootfs/var/mobile/Documents/ipadecrypt" -o app/Resources/appstore-helper.arm64 ./cmd/ipadecrypt-appstore-helper )
+  "$GO" build -trimpath -ldflags="-s -w" -o app/Resources/appstore-helper.arm64 ./cmd/ipadecrypt-appstore-helper )
 ldid -Sappstore-helper.entitlements.plist Resources/appstore-helper.arm64
 chmod +x Resources/appstore-helper.arm64
 

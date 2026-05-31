@@ -10,13 +10,17 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 @property (nonatomic, copy) NSString *outIPA;
 @property (nonatomic, strong) UIBarButtonItem *shareItem;
 @property (nonatomic, strong) UIBarButtonItem *logsItem;
+@property (nonatomic, strong) NSMutableArray<NSString *> *pendingStatusLines;
 @end
 
 @implementation IDDecryptProgressViewController
 
 - (instancetype)initWithTitle:(NSString *)title {
     self = [super init];
-    if (self) self.title = title;
+    if (self) {
+        self.title = title;
+        self.pendingStatusLines = [NSMutableArray array];
+    }
     return self;
 }
 
@@ -31,6 +35,12 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
     self.textView.contentInset = UIEdgeInsetsMake(8, 8, 8, 8);
     [self.view addSubview:self.textView];
 
+    NSArray<NSString *> *pending = [self.pendingStatusLines copy];
+    [self.pendingStatusLines removeAllObjects];
+    for (NSString *line in pending) {
+        [self appendStatus:line];
+    }
+
     self.spinner = [[UIActivityIndicatorView alloc]
         initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
     [self.spinner startAnimating];
@@ -40,6 +50,13 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 
 - (void)appendStatus:(NSString *)line {
     if (line.length == 0) return;
+    if (!self.textView) {
+        if (!self.pendingStatusLines) {
+            self.pendingStatusLines = [NSMutableArray array];
+        }
+        [self.pendingStatusLines addObject:line];
+        return;
+    }
     NSString *cur = self.textView.text ?: @"";
     self.textView.text = [cur stringByAppendingFormat:@"%@\n", line];
     NSRange end = NSMakeRange(self.textView.text.length, 0);

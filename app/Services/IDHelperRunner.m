@@ -33,6 +33,15 @@ static NSDictionary *parseEvent(NSString *line) {
         }
         if (key && value) out[key] = value;
     }
+    NSString *event = out[@"event"];
+    NSRange dot = [event rangeOfString:@"."];
+    if (dot.location != NSNotFound && dot.location > 0 && dot.location + 1 < event.length) {
+        out[@"raw_event"] = event;
+        out[@"event"] = [event substringToIndex:dot.location];
+        if (!out[@"phase"]) {
+            out[@"phase"] = [event substringFromIndex:dot.location + 1];
+        }
+    }
     return out;
 }
 

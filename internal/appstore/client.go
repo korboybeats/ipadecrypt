@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	cookiejar "github.com/juju/persistent-cookiejar"
@@ -15,6 +17,12 @@ type Client struct {
 }
 
 func New(cookiesFile string) (*Client, error) {
+	if cookiesFile != "" {
+		if err := os.MkdirAll(filepath.Dir(cookiesFile), 0o755); err != nil {
+			return nil, err
+		}
+	}
+
 	jar, err := cookiejar.New(&cookiejar.Options{Filename: cookiesFile})
 	if err != nil {
 		return nil, err

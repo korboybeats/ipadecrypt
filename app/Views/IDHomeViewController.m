@@ -451,6 +451,21 @@ static NSString *IDPrettyImageName(NSString *name) {
         } else if ([type isEqualToString:@"spawn_path_fallback"]) {
             [vc appendStatus:[NSString stringWithFormat:@"  SBS failed on %@, falling back to ptrace",
                               [ev[@"exec"] lastPathComponent] ?: @""]];
+        } else if ([type isEqualToString:@"target"] && [phase isEqualToString:@"spawned"]) {
+            NSString *method = ev[@"method"] ?: @"";
+            NSString *target = ev[@"exec"] ?: ev[@"bundle_id"] ?: @"target";
+            [vc appendStatus:[NSString stringWithFormat:@"  spawned %@%@",
+                              [target lastPathComponent] ?: target,
+                              method.length ? [NSString stringWithFormat:@" via %@", method] : @""]];
+        } else if ([type isEqualToString:@"target"] && [phase isEqualToString:@"spawn.fallback"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  SBS failed for %@, falling back to ptrace",
+                              ev[@"bundle_id"] ?: @"target"]];
+        } else if ([type isEqualToString:@"target"] && [phase isEqualToString:@"spawn.failed"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  could not spawn %@",
+                              [ev[@"exec"] lastPathComponent] ?: @"target"]];
+        } else if ([type isEqualToString:@"bundle"] && [phase isEqualToString:@"begin"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  decrypting %@",
+                              [ev[@"src"] lastPathComponent] ?: @"bundle"]];
         } else if ([type isEqualToString:@"dyld"] && [phase isEqualToString:@"settled"]) {
             return;
         } else if ([type isEqualToString:@"dyld"] && [phase isEqualToString:@"trapped"]) {
@@ -469,13 +484,16 @@ static NSString *IDPrettyImageName(NSString *name) {
         } else if ([type isEqualToString:@"bundle"] && [phase isEqualToString:@"skipped"]) {
             [vc appendStatus:[NSString stringWithFormat:@"  bundle skipped: %@ (%@)",
                               [name lastPathComponent] ?: name, ev[@"reason"] ?: @"unknown"]];
+        } else if ([type isEqualToString:@"bundle"] && [phase isEqualToString:@"spawn_failed"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  could not spawn %@ (skipped)",
+                              [name lastPathComponent] ?: name]];
         } else if ([type isEqualToString:@"bundle"] && [phase isEqualToString:@"done"]) {
             NSString *extras = ev[@"extras"] ?: @"0";
             if (![extras isEqualToString:@"0"]) {
                 [vc appendStatus:[NSString stringWithFormat:@"  bundle done (%@)",
                                   IDPluralize(extras, @"framework")]];
             }
-        } else if ([type isEqualToString:@"pack"] && [phase isEqualToString:@"start"]) {
+        } else if ([type isEqualToString:@"pack"] && ([phase isEqualToString:@"start"] || [phase isEqualToString:@"begin"])) {
             [vc appendStatus:[NSString stringWithFormat:@"  packaging IPA -> %@",
                               [ev[@"ipa"] lastPathComponent] ?: @""]];
         } else if ([type isEqualToString:@"pack"] && [phase isEqualToString:@"progress"]) {
