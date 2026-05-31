@@ -802,8 +802,6 @@ static NSString *IDPrettyImageName(NSString *name) {
             [vc appendStatus:[NSString stringWithFormat:@"  %@", IDAppStoreStepTitle(ev[@"name"])]];
         } else if ([phase isEqualToString:@"auth-required"]) {
             [vc appendStatus:@"  Apple ID sign-in required"];
-        } else if ([phase isEqualToString:@"done"] && [ev[@"name"] isEqualToString:@"authenticated"]) {
-            [vc appendStatus:@"  Apple ID auth verified"];
         } else if ([phase isEqualToString:@"failed"]) {
             failureReason = ev[@"reason"];
             failureMessage = ev[@"message"];
@@ -845,7 +843,7 @@ static NSString *IDPrettyImageName(NSString *name) {
         }
 
         [self setAppleAuthVerified:YES refreshing:NO];
-        [vc markCompleteWithMessage:@"Apple ID auth verified" error:nil];
+        [vc markCompleteWithMessage:@"Authorization not needed" error:nil];
     }];
 }
 
