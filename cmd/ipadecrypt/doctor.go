@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -298,8 +299,8 @@ func (r *doctorRun) remoteChecks(dev *device.Client) {
 
 	r.prereqChecks(dev)
 	r.start("device output")
-	r.add(doctorOutputDirCheck(dev))
-	r.helperChecks(dev)
+	r.add(doctorOutputDirCheck(dev, jailbreak))
+	r.helperChecks(dev, jailbreak)
 	r.autoalertChecks(dev, jailbreak)
 	r.appChecks(dev)
 }
@@ -358,11 +359,11 @@ func doctorLocateRemoteTool(dev *device.Client, name string) string {
 	return strings.TrimSpace(out)
 }
 
-func doctorOutputDirCheck(dev *device.Client) doctorCheck {
-	const dir = "/var/mobile/Documents/ipadecrypt/decrypted"
-	cmd := "mkdir -p /var/mobile/Documents/ipadecrypt/decrypted && " +
-		"chown mobile:mobile /var/mobile/Documents/ipadecrypt /var/mobile/Documents/ipadecrypt/decrypted 2>/dev/null || true; " +
-		"test -w /var/mobile/Documents/ipadecrypt/decrypted && echo yes"
+func doctorOutputDirCheck(dev *device.Client, jailbreak string) doctorCheck {
+	dir := path.Join(device.RemoteRootForJailbreak(jailbreak), "decrypted")
+	root := device.RemoteRootForJailbreak(jailbreak)
+	cmd := fmt.Sprintf("mkdir -p %s && chown mobile:mobile %s %s 2>/dev/null || true; test -w %s && echo yes",
+		shellQuoteForDoctor(dir), shellQuoteForDoctor(root), shellQuoteForDoctor(dir), shellQuoteForDoctor(dir))
 	out, errOut, code, err := dev.RunSudo(cmd)
 	if err != nil {
 		return doctorCheck{Status: doctorFail, Name: "device output", Detail: err.Error()}
@@ -373,9 +374,9 @@ func doctorOutputDirCheck(dev *device.Client) doctorCheck {
 	return doctorCheck{Status: doctorPass, Name: "device output", Detail: dir}
 }
 
-func (r *doctorRun) helperChecks(dev *device.Client) {
+func (r *doctorRun) helperChecks(dev *device.Client, jailbreak string) {
 	r.start("decrypt helper upload")
-	helper, err := dev.EnsureHelper()
+	helper, err := dev.EnsureHelper(jailbreak)
 	if err != nil {
 		r.add(doctorCheck{Status: doctorFail, Name: "decrypt helper", Detail: err.Error()})
 		return
@@ -387,6 +388,10 @@ func (r *doctorRun) helperChecks(dev *device.Client) {
 	} else {
 		r.add(doctorCheck{Status: doctorPass, Name: "decrypt helper exec", Detail: "usage check passed"})
 	}
+}
+
+func shellQuoteForDoctor(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func (r *doctorRun) autoalertChecks(dev *device.Client, jailbreak string) {

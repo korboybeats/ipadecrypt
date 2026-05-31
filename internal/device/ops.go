@@ -209,13 +209,24 @@ func (c *Client) LocateAppSync() (string, error) {
 }
 
 func (c *Client) Install(appinstPath, ipaRemote string) error {
-	out, errOut, code, err := c.RunSudo(fmt.Sprintf("%s %q", appinstPath, ipaRemote))
+	cmd := fmt.Sprintf("%s %s", shellQuote(appinstPath), shellQuote(ipaRemote))
+	out, errOut, code, err := c.Run(cmd)
+	if err == nil && code == 0 {
+		return nil
+	}
+
+	firstErr := fmt.Errorf("appinst exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
 	if err != nil {
-		return fmt.Errorf("appinst: %w", err)
+		firstErr = fmt.Errorf("appinst: %w", err)
+	}
+
+	out, errOut, code, err = c.RunSudo(cmd)
+	if err != nil {
+		return fmt.Errorf("%v\nsudo fallback: appinst: %w", firstErr, err)
 	}
 
 	if code != 0 {
-		return fmt.Errorf("appinst exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
+		return fmt.Errorf("%v\nsudo fallback: appinst exit %d:\nstdout: %s\nstderr: %s", firstErr, code, out, errOut)
 	}
 
 	return nil
@@ -260,11 +271,11 @@ func (c *Client) Uninstall(bundlePath string) error {
 	return nil
 }
 
-func (c *Client) EnsureHelper() (string, error) {
+func (c *Client) EnsureHelper(jailbreak string) (string, error) {
 	c.CleanupLegacyRemoteRoot()
 
 	sum := sha256.Sum256(helperArm64)
-	remote := helperRemotePath(hex.EncodeToString(sum[:])[:12])
+	remote := helperRemotePath(jailbreak, hex.EncodeToString(sum[:])[:12])
 
 	if c.Exists(remote) {
 		return remote, nil
@@ -277,8 +288,8 @@ func (c *Client) EnsureHelper() (string, error) {
 	return remote, nil
 }
 
-func helperRemotePath(sumPrefix string) string {
-	return path.Join(RemoteRoot, "helpers", fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", sumPrefix))
+func helperRemotePath(jailbreak, sumPrefix string) string {
+	return path.Join(RemoteRootForJailbreak(jailbreak), "helpers", fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", sumPrefix))
 }
 
 func (c *Client) CleanupLegacyRemoteRoot() {
@@ -300,7 +311,7 @@ func (c *Client) EnsureAutoalert(jailbreak string) error {
 		return nil
 	}
 	deb, _ := autoalertDebForJailbreak(jailbreak)
-	remote := path.Join(RemoteRoot, "tweaks", autoalertDebName(jailbreak))
+	remote := path.Join(RemoteRootForJailbreak(jailbreak), "tweaks", autoalertDebName(jailbreak))
 	if err := c.Upload(bytes.NewReader(deb), remote, 0o644); err != nil {
 		return fmt.Errorf("upload tweak deb: %w", err)
 	}
@@ -344,9 +355,9 @@ func (c *Client) Respring() error {
 // adds its CDHash to Dopamine's trust cache so AMFI honors its entitlements.
 // Returns the remote path. Trust cache add is idempotent and harmless on
 // jailbreaks where it's not needed.
-func (c *Client) EnsureAppdl() (string, error) {
+func (c *Client) EnsureAppdl(jailbreak string) (string, error) {
 	sum := sha256.Sum256(appdlArm64)
-	remote := path.Join(RemoteRoot, "helpers",
+	remote := path.Join(RemoteRootForJailbreak(jailbreak), "helpers",
 		fmt.Sprintf("ipadecrypt-appdl-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
 
 	if !c.Exists(remote) {

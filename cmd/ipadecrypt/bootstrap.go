@@ -291,7 +291,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	// ---- Step 4: helper upload + verify ------------------------------
 
 	tui.Step(4, 5, "Install the decrypt helper")
-	tui.Info("A small embedded C binary that reads FairPlay-decrypted pages from a\nsuspended task. Uploaded once to /var/mobile/Documents/ipadecrypt/helpers/\nand cached by SHA thereafter.")
+	tui.Info("A small embedded C binary that reads FairPlay-decrypted pages from a\nsuspended task. Uploaded once to %s/helpers/\nand cached by SHA thereafter.", device.RemoteRootForJailbreak(probe.Jailbreak))
 
 	live := tui.NewLive()
 	live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
@@ -306,7 +306,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	live.Spin("uploading helper binary")
 
-	helperPath, err := dev.EnsureHelper()
+	helperPath, err := dev.EnsureHelper(probe.Jailbreak)
 	if err != nil {
 		live.Fail("upload failed: %v", err)
 		return

@@ -20,6 +20,7 @@ import (
 )
 
 const RemoteRoot = "/var/mobile/Documents/ipadecrypt"
+const RootHideRemoteRoot = "/rootfs/private/var/mobile/Documents/ipadecrypt"
 const LegacyRemoteRoot = "/var/mobile/Media/ipadecrypt"
 
 var ErrSudoPasswordRejected = errors.New("sudo password rejected")
@@ -149,6 +150,20 @@ func (c *Client) Host() string {
 func (c *Client) Close() {
 	c.sftp.Close()
 	c.ssh.Close()
+}
+
+func RemoteRootForJailbreak(jailbreak string) string {
+	if jailbreak == "roothide" {
+		return RootHideRemoteRoot
+	}
+	return RemoteRoot
+}
+
+func ResolveRemotePath(jailbreak, p string) string {
+	if jailbreak == "roothide" && strings.HasPrefix(p, "/var/") {
+		return path.Join("/rootfs/private", strings.TrimPrefix(p, "/"))
+	}
+	return p
 }
 
 // shellQuote wraps s in single quotes for safe interpolation into a POSIX

@@ -50,11 +50,12 @@ type patchResult struct {
 }
 
 type installPlan struct {
-	helperPath    string
-	appinstPath   string
-	bundleID      string
-	bundlePath    string
-	stagingRemote string
+	helperPath          string
+	appinstPath         string
+	bundleID            string
+	bundlePath          string
+	stagingRemote       string
+	stagingUploadRemote string
 }
 
 type installResult struct {
@@ -377,7 +378,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				live = tui.NewLive()
 				live.Spin("preparing helper")
 
-				helperPath, err := dev.EnsureHelper()
+				helperPath, err := dev.EnsureHelper(probe.Jailbreak)
 				if err != nil {
 					live.Fail("helper upload: %v", err)
 					return
@@ -389,13 +390,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				uninstallBundleID = target.bundleId
 				uninstallBundlePath = installedPath
 
-				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "", keepPolicy)
+				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "", keepPolicy, probe.Jailbreak)
 
 				return
 			}
 
 			if useStoreKit {
-				if ok := runStoreKitInstall(dev, target.bundleId, version); !ok {
+				if ok := runStoreKitInstall(dev, target.bundleId, version, probe.Jailbreak); !ok {
 					return
 				}
 				// re-resolve installed path/version after the install
@@ -412,7 +413,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				live = tui.NewLive()
 				live.Spin("preparing helper")
 
-				helperPath, err := dev.EnsureHelper()
+				helperPath, err := dev.EnsureHelper(probe.Jailbreak)
 				if err != nil {
 					live.Fail("helper upload: %v", err)
 					return
@@ -420,7 +421,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, newVersion, "", keepPolicy)
+				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, newVersion, "", keepPolicy, probe.Jailbreak)
 
 				return
 			}
@@ -453,7 +454,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				switch idx {
 				case 1:
-					if ok := runStoreKitInstall(dev, target.bundleId, ""); !ok {
+					if ok := runStoreKitInstall(dev, target.bundleId, "", probe.Jailbreak); !ok {
 						return
 					}
 					installedPath, _, _ := dev.FindInstalledByBundleID(target.bundleId)
@@ -469,7 +470,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 					live = tui.NewLive()
 					live.Spin("preparing helper")
 
-					helperPath, err := dev.EnsureHelper()
+					helperPath, err := dev.EnsureHelper(probe.Jailbreak)
 					if err != nil {
 						live.Fail("helper upload: %v", err)
 						return
@@ -477,7 +478,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 					live.OK("helper ready")
 
-					runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "", keepPolicy)
+					runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "", keepPolicy, probe.Jailbreak)
 					return
 				case 2:
 					extVerID, ok := selectAppStoreVersionForDecrypt(cfg, paths, target)
@@ -634,7 +635,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	live = tui.NewLive()
 	live.Spin("preparing install plan")
 
-	plan, err := buildInstallPlan(dev, patch.uploadPath, appBundleID)
+	plan, err := buildInstallPlan(dev, patch.uploadPath, appBundleID, probe.Jailbreak)
 	if err != nil {
 		switch {
 		case errors.Is(err, errAppinstNotFound):
@@ -649,6 +650,9 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	cleanups.push(func() {
 		if plan.stagingRemote != "" && !decryptNoCleanup {
 			dev.Remove(plan.stagingRemote)
+		}
+		if plan.stagingUploadRemote != "" && plan.stagingUploadRemote != plan.stagingRemote && !decryptNoCleanup {
+			dev.Remove(plan.stagingUploadRemote)
 		}
 	})
 
@@ -696,7 +700,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	uninstallBundleID = appBundleID
 	uninstallBundlePath = install.bundlePath
 
-	runDecryptOnBundle(dev, cleanups, plan.helperPath, appBundleID, install.bundlePath, appVersion, encPath, keepPolicy)
+	runDecryptOnBundle(dev, cleanups, plan.helperPath, appBundleID, install.bundlePath, appVersion, encPath, keepPolicy, probe.Jailbreak)
 }
 
 // decideUninstall picks the post-decrypt cleanup behavior. weInstalledIt
@@ -760,8 +764,8 @@ func verifyFailureSummary(res pipeline.VerifyResult) string {
 // present, the helper streams only decrypted Mach-Os and the host assembles
 // the IPA from the original source. For use-installed/StoreKit paths, the
 // helper streams a full IPA from the device.
-func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, bundleID, bundlePath, version, srcIPAPath, keepPolicy string) {
-	outRemote := remoteOutputPath(bundleID, version)
+func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, bundleID, bundlePath, version, srcIPAPath, keepPolicy, jailbreak string) {
+	outRemote := remoteOutputPath(bundleID, version, jailbreak)
 
 	keepDesktop := keepPolicy == config.OutputKeepDesktop || keepPolicy == config.OutputKeepBoth
 	keepDevice := keepPolicy == config.OutputKeepDevice || keepPolicy == config.OutputKeepBoth
@@ -1167,8 +1171,8 @@ func patchSourceForDevice(encPath, iosVersion string, deviceFamily int, patchDev
 	}, nil
 }
 
-func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installPlan, error) {
-	helperPath, err := dev.EnsureHelper()
+func buildInstallPlan(dev *device.Client, uploadPath, bundleID, jailbreak string) (installPlan, error) {
+	helperPath, err := dev.EnsureHelper(jailbreak)
 	if err != nil {
 		return installPlan{}, fmt.Errorf("helper upload: %w", err)
 	}
@@ -1187,12 +1191,15 @@ func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installP
 		return installPlan{}, fmt.Errorf("scan installed: %w", err)
 	}
 
+	stagingRemote := path.Join(device.RemoteRoot, "staging", filepath.Base(uploadPath))
+
 	return installPlan{
-		helperPath:    helperPath,
-		appinstPath:   appinstPath,
-		bundleID:      bundleID,
-		bundlePath:    bundlePath,
-		stagingRemote: path.Join(device.RemoteRoot, "staging", filepath.Base(uploadPath)),
+		helperPath:          helperPath,
+		appinstPath:         appinstPath,
+		bundleID:            bundleID,
+		bundlePath:          bundlePath,
+		stagingRemote:       stagingRemote,
+		stagingUploadRemote: device.ResolveRemotePath(jailbreak, stagingRemote),
 	}, nil
 }
 
@@ -1259,7 +1266,12 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 	}
 
 	pr := newProgressReader(src, st.Size(), onProgress)
-	if err := dev.Upload(pr, plan.stagingRemote, 0); err != nil {
+	uploadRemote := plan.stagingUploadRemote
+	if uploadRemote == "" {
+		uploadRemote = plan.stagingRemote
+	}
+
+	if err := dev.Upload(pr, uploadRemote, 0o644); err != nil {
 		return installResult{}, fmt.Errorf("upload: %w", err)
 	}
 
@@ -1288,8 +1300,8 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 	}, nil
 }
 
-func remoteOutputPath(bundleID, version string) string {
-	return path.Join("/var/mobile/Documents/ipadecrypt/decrypted", fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version))
+func remoteOutputPath(bundleID, version, jailbreak string) string {
+	return path.Join(device.RemoteRootForJailbreak(jailbreak), "decrypted", fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version))
 }
 
 func effectiveDecryptKeepPolicy(cfg *config.Config) (string, error) {
@@ -1355,11 +1367,11 @@ func safeFilename(s string) string {
 // as an "Install" prompt on the device that the user must confirm), then
 // polls until the install changes. Detects re-installs (path/UUID changes)
 // and version bumps. Returns true on success.
-func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion string) bool {
+func runStoreKitInstall(dev *device.Client, bundleID, beforeVersion, jailbreak string) bool {
 	live := tui.NewLive()
 	live.Spin("uploading StoreKit helper")
 
-	appdlPath, err := dev.EnsureAppdl()
+	appdlPath, err := dev.EnsureAppdl(jailbreak)
 	if err != nil {
 		live.Fail("appdl upload: %v", err)
 		return false
