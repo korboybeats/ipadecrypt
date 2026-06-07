@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"howett.net/plist"
 )
@@ -54,6 +55,10 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 
 	if err := c.jar.Save(); err != nil {
 		return nil, fmt.Errorf("save cookies: %w", err)
+	}
+
+	if res.StatusCode == http.StatusTooManyRequests {
+		return res, fmt.Errorf("rate limited by Apple (HTTP %d): %s", res.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	if out == nil {
