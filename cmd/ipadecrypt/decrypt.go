@@ -730,6 +730,8 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 
 	live.OK("%s (%s → %s)", progress.Summary(), humanBytes(cw.n), outLocal)
 
+	abandonLocal = false
+
 	if !decryptNoVerify {
 		if decryptExtraVerify && srcIPAPath == "" {
 			tui.Info("extra-verify unavailable when source ipa is not present")
@@ -775,8 +777,6 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 
 		live.OK("%s", verifyOKSummary(res, compareSource))
 	}
-
-	abandonLocal = false
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
