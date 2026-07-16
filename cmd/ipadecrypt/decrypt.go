@@ -773,6 +773,30 @@ func shouldAbandonLocalOutput(completed bool) bool {
 	return !completed
 }
 
+func pushProvisionalLocalCleanup(cleanups *cleanupStack, cleanupTemp func()) func() {
+	if cleanupTemp == nil {
+		return func() {}
+	}
+
+	var mu sync.Mutex
+	armed := true
+	cleanups.push(func() {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if armed {
+			cleanupTemp()
+			armed = false
+		}
+	})
+
+	return func() {
+		mu.Lock()
+		armed = false
+		mu.Unlock()
+	}
+}
+
 func pushLocalOutputCleanup(cleanups *cleanupStack, outFile io.Closer, outLocal string, cleanupTemp func(), completed, delivered *bool) {
 	cleanups.push(func() {
 		outFile.Close()
@@ -803,6 +827,7 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 		tui.Err("output path: %v", err)
 		return
 	}
+	disarmProvisionalCleanup := pushProvisionalLocalCleanup(cleanups, cleanupLocal)
 
 	if keepDevice {
 		if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
@@ -827,6 +852,7 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 	localOutputComplete := false
 	localOutputDelivered := false
 	pushLocalOutputCleanup(cleanups, outFile, outLocal, cleanupLocal, &localOutputComplete, &localOutputDelivered)
+	disarmProvisionalCleanup()
 
 	live := tui.NewLive()
 	live.Spin("starting helper")

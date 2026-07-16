@@ -76,3 +76,34 @@ func TestLocalOutputCleanupRemovesDeliveredTemp(t *testing.T) {
 		t.Fatalf("delivered temporary output still exists: %v", err)
 	}
 }
+
+func TestProvisionalLocalCleanupRemovesTempBeforeHandoff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "provisional.ipa")
+	if err := os.WriteFile(path, []byte("partial"), 0o644); err != nil {
+		t.Fatalf("write output: %v", err)
+	}
+
+	cleanups := &cleanupStack{}
+	pushProvisionalLocalCleanup(cleanups, func() { os.Remove(path) })
+	cleanups.run()
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("provisional output still exists: %v", err)
+	}
+}
+
+func TestProvisionalLocalCleanupDisarmsAfterHandoff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "handed-off.ipa")
+	if err := os.WriteFile(path, []byte("complete"), 0o644); err != nil {
+		t.Fatalf("write output: %v", err)
+	}
+
+	cleanups := &cleanupStack{}
+	disarm := pushProvisionalLocalCleanup(cleanups, func() { os.Remove(path) })
+	disarm()
+	cleanups.run()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("handed-off output was removed: %v", err)
+	}
+}
