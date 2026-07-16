@@ -699,7 +699,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                                      trackID:trackID
                                  displayName:displayName
                            externalVersionID:externalVersionID
-                                         code:(needsCode && email.length && password.length)
+                                         code:needsCode
                                            vc:vc
                                         email:email
                                      password:password];
@@ -842,7 +842,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                 [vc appendStatus:@"  Apple ID verification code required"];
             }
             [self setAppleAuthVerified:NO refreshing:NO];
-            [self promptAppleAuthForRefreshCode:(needsCode && email.length && password.length)
+            [self promptAppleAuthForRefreshCode:needsCode
                                              vc:vc
                                           email:email
                                        password:password];
@@ -861,7 +861,7 @@ static NSString *IDPrettyImageName(NSString *name) {
         }
 
         [self setAppleAuthVerified:YES refreshing:NO];
-        [vc markCompleteWithMessage:@"Authorization not needed" error:nil];
+        [vc markCompleteWithMessage:@"Authorization refreshed" error:nil];
     }];
 }
 

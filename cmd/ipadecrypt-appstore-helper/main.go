@@ -25,6 +25,8 @@ var rootDir = firstNonEmpty(strings.TrimSpace(os.Getenv("IPADECRYPT_ROOT_DIR")),
 
 var errAuthRequired = errors.New("sign in with Apple ID required")
 
+type appleLoginFunc func(email, password, authCode string) error
+
 type installedApp struct {
 	BundleID string
 	Name     string
@@ -126,25 +128,33 @@ func runAuthOnly(email, password, authCode string) error {
 		return fmt.Errorf("appstore client: %w", err)
 	}
 
-	if email == "" && password == "" && authCode == "" {
-		if cfg.Apple.PasswordToken != "" && cfg.Apple.DirectoryServicesIdentifier != "" {
-			emit("phase", "done", "name", "authenticated")
-			return nil
+	err = refreshAppleAuth(cfg, email, password, authCode, func(email, password, authCode string) error {
+		emit("phase", "step", "name", "authenticating")
+		return appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode)
+	})
+	if err != nil {
+		if errors.Is(err, errAuthRequired) {
+			emit("phase", "auth-required")
 		}
-		emit("phase", "auth-required")
-		return errAuthRequired
+		return err
 	}
 
-	if email == "" || password == "" {
+	emit("phase", "done", "name", "authenticated")
+	return nil
+}
+
+func refreshAppleAuth(cfg *config.Config, email, password, authCode string, login appleLoginFunc) error {
+	if email == "" && password == "" {
+		email = cfg.Apple.Email
+		password = cfg.Apple.Password
+		if email == "" || password == "" {
+			return errAuthRequired
+		}
+	} else if email == "" || password == "" {
 		return errors.New("missing Apple ID email or password")
 	}
 
-	emit("phase", "step", "name", "authenticating")
-	if err := appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode); err != nil {
-		return err
-	}
-	emit("phase", "done", "name", "authenticated")
-	return nil
+	return login(email, password, authCode)
 }
 
 func run(bundleID, trackID, email, password, authCode, externalVersionID string) error {
@@ -216,11 +226,11 @@ func prepareAppStore(bundleID, trackID, email, password, authCode string) (*conf
 	}
 
 	if email != "" || password != "" || authCode != "" {
-		if email == "" || password == "" {
-			return nil, nil, appstore.App{}, errors.New("missing Apple ID email or password")
-		}
-		emit("phase", "step", "name", "authenticating")
-		if err := appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode); err != nil {
+		err := refreshAppleAuth(cfg, email, password, authCode, func(email, password, authCode string) error {
+			emit("phase", "step", "name", "authenticating")
+			return appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode)
+		})
+		if err != nil {
 			return nil, nil, appstore.App{}, err
 		}
 		emit("phase", "done", "name", "authenticated")

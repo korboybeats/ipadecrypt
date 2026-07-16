@@ -81,7 +81,7 @@
         BOOL needsCredentials = code == 20;
         BOOL needsCode = code == 21;
         if (needsCredentials || needsCode) {
-            [self promptAppleAuthCodeOnly:(needsCode && self.email.length && self.password.length)];
+            [self promptAppleAuthCodeOnly:needsCode];
             return;
         }
 
@@ -184,7 +184,7 @@
         BOOL needsCredentials = code == 20;
         BOOL needsCode = code == 21;
         if (needsCredentials || needsCode) {
-            [self promptAppleAuthCodeOnly:(needsCode && self.email.length && self.password.length)];
+            [self promptAppleAuthCodeOnly:needsCode];
             return;
         }
 
