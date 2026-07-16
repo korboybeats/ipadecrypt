@@ -82,10 +82,10 @@ Refer to [BUILDING.md](BUILDING.md) for helper and release-style build details.
 The release includes `.deb` packages for the on-device app and the optional
 auto-confirm tweak:
 
-- `com.korboy.ipadecrypt_0.7.3-korboy.1_iphoneos-arm64.deb`
-- `com.korboy.ipadecrypt_0.7.3-korboy.1_iphoneos-arm64e.deb` for RootHide
-- `com.korboy.ipadecryptautoalert_0.7.3-korboy.1_iphoneos-arm64.deb`
-- `com.korboy.ipadecryptautoalert_0.7.3-korboy.1_iphoneos-arm64e.deb` for RootHide
+- `com.korboy.ipadecrypt_0.7.3-korboy.2_iphoneos-arm64.deb`
+- `com.korboy.ipadecrypt_0.7.3-korboy.2_iphoneos-arm64e.deb` for RootHide
+- `com.korboy.ipadecryptautoalert_0.7.3-korboy.2_iphoneos-arm64.deb`
+- `com.korboy.ipadecryptautoalert_0.7.3-korboy.2_iphoneos-arm64e.deb` for RootHide
 
 To build and install the rootless app locally:
 
