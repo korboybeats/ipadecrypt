@@ -49,8 +49,8 @@ func TestDecryptWorkingOutputPathDeviceUsesTemp(t *testing.T) {
 	if cleanup == nil {
 		t.Fatal("device output did not return cleanup function")
 	}
-	if filepath.Dir(got) != os.TempDir() {
-		t.Fatalf("device output dir = %q, want temp dir %q", filepath.Dir(got), os.TempDir())
+	if filepath.Dir(got) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("device output dir = %q, want temp dir %q", filepath.Dir(got), filepath.Clean(os.TempDir()))
 	}
 
 	if err := os.WriteFile(got, []byte("x"), 0o644); err != nil {
