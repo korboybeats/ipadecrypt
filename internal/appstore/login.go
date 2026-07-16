@@ -130,6 +130,12 @@ func interpretLogin(res *http.Response, out *loginResult, attempt int, authCode 
 	if attempt == 1 && out.FailureType == failureInvalidCredentials {
 		return "", true, nil
 	}
+	if out.FailureType == failureInvalidCredentials {
+		if out.CustomerMessage != "" {
+			return "", false, fmt.Errorf("%w: %s", ErrInvalidCredentials, out.CustomerMessage)
+		}
+		return "", false, ErrInvalidCredentials
+	}
 
 	if out.FailureType == "" && authCode == "" && out.CustomerMessage == custMsgBadLogin {
 		return "", false, ErrAuthCodeRequired

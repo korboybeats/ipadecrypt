@@ -29,6 +29,38 @@ func TestRefreshAppleAuthUsesSavedCredentials(t *testing.T) {
 	}
 }
 
+func TestSavedAppleAuthAvailable(t *testing.T) {
+	complete := &config.Config{Apple: config.Apple{
+		Email:                       "test@example.com",
+		Password:                    "password",
+		PasswordToken:               "token",
+		DirectoryServicesIdentifier: "123",
+		StoreFront:                  "143441-1,29",
+	}}
+	if !savedAppleAuthAvailable(complete) {
+		t.Fatal("complete saved auth reported unavailable")
+	}
+
+	tests := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "nil config", cfg: nil},
+		{name: "missing email", cfg: &config.Config{Apple: config.Apple{Password: "password", PasswordToken: "token", DirectoryServicesIdentifier: "123", StoreFront: "143441-1,29"}}},
+		{name: "missing password", cfg: &config.Config{Apple: config.Apple{Email: "test@example.com", PasswordToken: "token", DirectoryServicesIdentifier: "123", StoreFront: "143441-1,29"}}},
+		{name: "missing token", cfg: &config.Config{Apple: config.Apple{Email: "test@example.com", Password: "password", DirectoryServicesIdentifier: "123", StoreFront: "143441-1,29"}}},
+		{name: "missing directory ID", cfg: &config.Config{Apple: config.Apple{Email: "test@example.com", Password: "password", PasswordToken: "token", StoreFront: "143441-1,29"}}},
+		{name: "missing storefront", cfg: &config.Config{Apple: config.Apple{Email: "test@example.com", Password: "password", PasswordToken: "token", DirectoryServicesIdentifier: "123"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if savedAppleAuthAvailable(tt.cfg) {
+				t.Fatal("incomplete saved auth reported available")
+			}
+		})
+	}
+}
+
 func TestRefreshAppleAuthPrefersProvidedCredentials(t *testing.T) {
 	cfg := &config.Config{Apple: config.Apple{
 		Email:    "saved@example.com",

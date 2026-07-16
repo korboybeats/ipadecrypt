@@ -1,6 +1,33 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoadReadOnlyMigratesInMemoryWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	original := []byte(`{"version":1,"apple":{"email":"test@example.com","password":"password","account":{"passwordToken":"token","directoryServicesIdentifier":"123","storeFront":"143441-1,29"}}}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadReadOnly(path)
+	if err != nil {
+		t.Fatalf("LoadReadOnly: %v", err)
+	}
+	if cfg.Version != SchemaVersion || cfg.Apple.PasswordToken != "token" {
+		t.Fatalf("config not migrated in memory: %+v", cfg.Apple)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(original) {
+		t.Fatal("LoadReadOnly modified the config file")
+	}
+}
 
 func TestNormalizeOutputKeep(t *testing.T) {
 	tests := []struct {

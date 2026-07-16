@@ -1,6 +1,7 @@
 package appstore
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -9,6 +10,19 @@ import (
 	cookiejar "github.com/juju/persistent-cookiejar"
 	"howett.net/plist"
 )
+
+func TestInterpretLoginReturnsTypedInvalidCredentials(t *testing.T) {
+	res := testHTTPResponse(http.StatusOK, "")
+	out := &loginResult{FailureType: failureInvalidCredentials, CustomerMessage: "Incorrect Apple ID or password"}
+
+	_, retry, err := interpretLogin(res, out, 2, "")
+	if retry {
+		t.Fatal("invalid credentials should not retry after the first attempt")
+	}
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("error = %v, want ErrInvalidCredentials", err)
+	}
+}
 
 func TestLoginEndpointDiscoveryDoesNotConsumeLogicalAttempt(t *testing.T) {
 	var attempts []string

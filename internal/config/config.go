@@ -121,6 +121,15 @@ func (c *Config) OutputKeep() string {
 }
 
 func Load(path string) (*Config, error) {
+	return load(path, true)
+}
+
+// LoadReadOnly loads and migrates a config in memory without modifying it on disk.
+func LoadReadOnly(path string) (*Config, error) {
+	return load(path, false)
+}
+
+func load(path string, persistMigration bool) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -142,8 +151,10 @@ func Load(path string) (*Config, error) {
 		// Persist the migrated shape so subsequent loads are clean and
 		// the old apple.account.* nested object stops shadowing the new
 		// flat fields if anyone hand-edits the file.
-		if err := cfg.Save(); err != nil {
-			return nil, fmt.Errorf("save migrated config: %w", err)
+		if persistMigration {
+			if err := cfg.Save(); err != nil {
+				return nil, fmt.Errorf("save migrated config: %w", err)
+			}
 		}
 	}
 

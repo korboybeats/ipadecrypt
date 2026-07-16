@@ -42,6 +42,7 @@ func main() {
 	var listVersions bool
 	var versionMetadata bool
 	var authOnly bool
+	var authStatus bool
 	var externalVersionID string
 	var decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA string
 	flag.StringVar(&bundleID, "bundle-id", "", "bundle identifier")
@@ -53,6 +54,7 @@ func main() {
 	flag.BoolVar(&listVersions, "list-versions", false, "list App Store external version IDs")
 	flag.BoolVar(&versionMetadata, "version-metadata", false, "fetch metadata for one App Store external version ID")
 	flag.BoolVar(&authOnly, "auth-only", false, "refresh App Store authentication and exit")
+	flag.BoolVar(&authStatus, "auth-status", false, "report whether complete saved App Store authentication is available")
 	flag.StringVar(&externalVersionID, "external-version-id", "", "pin to a specific historical App Store version")
 	flag.StringVar(&decryptHelper, "decrypt-helper", "", "run decrypt helper and relay events")
 	flag.StringVar(&decryptBundleID, "decrypt-bundle-id", "", "bundle identifier for decrypt helper")
@@ -81,7 +83,20 @@ func main() {
 			if errors.Is(err, appstore.ErrAuthCodeRequired) {
 				code = 21
 				reason = "auth-code-required"
-			} else if errors.Is(err, errAuthRequired) {
+			} else if errors.Is(err, errAuthRequired) || errors.Is(err, appstore.ErrInvalidCredentials) {
+				code = 20
+				reason = "auth-required"
+			}
+			fail(code, reason, err.Error())
+		}
+		return
+	}
+
+	if authStatus {
+		if err := runAuthStatus(); err != nil {
+			code := 1
+			reason := "error"
+			if errors.Is(err, errAuthRequired) {
 				code = 20
 				reason = "auth-required"
 			}
@@ -108,12 +123,43 @@ func main() {
 		if errors.Is(err, appstore.ErrAuthCodeRequired) {
 			code = 21
 			reason = "auth-code-required"
-		} else if errors.Is(err, errAuthRequired) {
+		} else if errors.Is(err, errAuthRequired) || errors.Is(err, appstore.ErrInvalidCredentials) {
 			code = 20
 			reason = "auth-required"
 		}
 		fail(code, reason, err.Error())
 	}
+}
+
+func runAuthStatus() error {
+	emit("phase", "step", "name", "loading-config")
+
+	cfg, err := config.LoadReadOnly(configFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return errAuthRequired
+	}
+	if err != nil {
+		return err
+	}
+	if !savedAppleAuthAvailable(cfg) {
+		emit("phase", "auth-required")
+		return errAuthRequired
+	}
+
+	emit("phase", "done", "name", "authenticated")
+	return nil
+}
+
+func savedAppleAuthAvailable(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	a := cfg.Apple
+	return strings.TrimSpace(a.Email) != "" &&
+		a.Password != "" &&
+		strings.TrimSpace(a.PasswordToken) != "" &&
+		strings.TrimSpace(a.DirectoryServicesIdentifier) != "" &&
+		strings.TrimSpace(a.StoreFront) != ""
 }
 
 func runAuthOnly(email, password, authCode string) error {

@@ -10,7 +10,7 @@ APPLICATION_NAME = ipadecrypt
 
 ipadecrypt_FILES = main.m AppDelegate.m SceneDelegate.m Logging.m PrivateAPI.m IDJailbreakPaths.m \
                    Models/IDInstalledApp.m Models/IDSearchResult.m Models/IDAppStoreVersion.m \
-                   Models/IDAppStoreInstallPolicy.c \
+                   Models/IDAppStoreInstallPolicy.c Models/IDAppleAuthState.c \
                    Services/IDAppEnumerator.m Services/IDITunesSearch.m \
                    Services/IDAutoalertArmer.m Services/IDStoreKitDownloader.m \
                    Services/IDHelperRunner.m Services/IDAppStoreHelperRunner.m \

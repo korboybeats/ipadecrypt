@@ -66,6 +66,7 @@ const (
 
 var (
 	ErrAuthCodeRequired       = errors.New("auth code required")
+	ErrInvalidCredentials     = errors.New("invalid Apple ID credentials")
 	ErrPasswordTokenExpired   = errors.New("password token expired")
 	ErrLicenseRequired        = errors.New("license required")
 	ErrLicenseAlreadyExists   = errors.New("license already exists")

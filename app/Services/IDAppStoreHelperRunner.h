@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "IDAppleAuthState.h"
 
 @interface IDAppStoreHelperRunner : NSObject
 
@@ -42,10 +43,14 @@
                      onEvent:(void (^)(NSDictionary *event))eventBlock
                   completion:(void (^)(int exitCode, NSError *err))completion;
 
++ (void)checkSavedAuthWithCompletion:(void (^)(int exitCode, NSError *err))completion;
+
 + (void)verifyIPA:(NSString *)ipaPath
           onEvent:(void (^)(NSDictionary *event))eventBlock
        completion:(void (^)(int exitCode, NSError *err))completion;
 
 + (NSString *)bundledHelperPath;
++ (BOOL)hasActiveOperation;
++ (IDAppleAuthCheckResult)lastAuthResult;
 
 @end

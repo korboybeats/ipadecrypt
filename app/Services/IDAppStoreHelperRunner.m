@@ -11,6 +11,11 @@ extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t *attr, uid_t p
 extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *attr, uid_t uid);
 extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *attr, uid_t gid);
 
+static NSInteger IDActiveAppStoreHelperCount = 0;
+static BOOL IDAuthHelperRunning = NO;
+static NSMutableArray *IDPendingAuthOperations = nil;
+static IDAppleAuthCheckResult IDLastAuthResult = IDAppleAuthCheckResultNone;
+
 static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     if (![line hasPrefix:@"@evt "]) return nil;
     NSString *body = [line substringFromIndex:5];
@@ -39,6 +44,65 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
 
 @implementation IDAppStoreHelperRunner
 
++ (BOOL)hasActiveOperation {
+    @synchronized (self) {
+        return IDActiveAppStoreHelperCount > 0;
+    }
+}
+
++ (IDAppleAuthCheckResult)lastAuthResult {
+    @synchronized (self) {
+        return IDLastAuthResult;
+    }
+}
+
++ (void)enqueueAuthOperation:(dispatch_block_t)operation {
+    dispatch_block_t start = nil;
+    @synchronized (self) {
+        if (!IDPendingAuthOperations) IDPendingAuthOperations = [NSMutableArray array];
+        if (IDAuthHelperRunning) {
+            [IDPendingAuthOperations addObject:[operation copy]];
+            return;
+        }
+        IDAuthHelperRunning = YES;
+        start = [operation copy];
+    }
+    start();
+}
+
++ (void)finishAuthOperation {
+    dispatch_block_t next = nil;
+    @synchronized (self) {
+        if (IDPendingAuthOperations.count > 0) {
+            next = IDPendingAuthOperations.firstObject;
+            [IDPendingAuthOperations removeObjectAtIndex:0];
+        } else {
+            IDAuthHelperRunning = NO;
+        }
+    }
+    if (next) next();
+}
+
++ (void)spawnAuthWithArguments:(NSArray<NSString *> *)args
+                       onEvent:(void (^)(NSDictionary *))eventBlock
+                    completion:(void (^)(int, NSError *))completion {
+    [self enqueueAuthOperation:^{
+        [self spawnWithArguments:args onEvent:eventBlock completion:^(int code, NSError *err) {
+            @synchronized (self) {
+                if (code == 0 && !err) {
+                    IDLastAuthResult = IDAppleAuthCheckResultSuccess;
+                } else if (code == 20 || code == 21) {
+                    IDLastAuthResult = IDAppleAuthCheckResultAuthRequired;
+                } else {
+                    IDLastAuthResult = IDAppleAuthCheckResultInconclusive;
+                }
+            }
+            if (completion) completion(code, err);
+            [self finishAuthOperation];
+        }];
+    }];
+}
+
 + (NSString *)bundledHelperPath {
     return [[NSBundle mainBundle] pathForResource:@"appstore-helper" ofType:@"arm64"];
 }
@@ -46,6 +110,17 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
 + (void)spawnWithArguments:(NSArray<NSString *> *)args
                    onEvent:(void (^)(NSDictionary *))eventBlock
                 completion:(void (^)(int, NSError *))completion {
+    void (^callerCompletion)(int, NSError *) = [completion copy];
+    @synchronized (self) {
+        IDActiveAppStoreHelperCount++;
+    }
+    completion = ^(int code, NSError *err) {
+        @synchronized (self) {
+            IDActiveAppStoreHelperCount--;
+        }
+        if (callerCompletion) callerCompletion(code, err);
+    };
+
     NSString *helper = [self bundledHelperPath];
     if (!helper || ![[NSFileManager defaultManager] isExecutableFileAtPath:helper]) {
         completion(-1, [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:1
@@ -210,7 +285,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
         [args addObjectsFromArray:@[@"--auth-code", authCode]];
     }
 
-    [self spawnWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
 }
 
 + (void)listVersionsWithBundleID:(NSString *)bundleID
@@ -237,7 +312,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
         [args addObjectsFromArray:@[@"--auth-code", authCode]];
     }
 
-    [self spawnWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
 }
 
 + (void)fetchVersionMetadataWithBundleID:(NSString *)bundleID
@@ -268,7 +343,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
         [args addObjectsFromArray:@[@"--auth-code", authCode]];
     }
 
-    [self spawnWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
 }
 
 + (void)refreshAuthWithEmail:(NSString *)email
@@ -287,7 +362,11 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
         [args addObjectsFromArray:@[@"--auth-code", authCode]];
     }
 
-    [self spawnWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
+}
+
++ (void)checkSavedAuthWithCompletion:(void (^)(int, NSError *))completion {
+    [self spawnWithArguments:@[@"--auth-status"] onEvent:nil completion:completion];
 }
 
 + (void)verifyIPA:(NSString *)ipaPath
