@@ -29,3 +29,12 @@ func TestRemoteOutputPathRootHide(t *testing.T) {
 		t.Fatalf("remoteOutputPath() = %q, want %q", got, want)
 	}
 }
+
+func TestShouldAbandonLocalOutput(t *testing.T) {
+	if !shouldAbandonLocalOutput(false) {
+		t.Fatal("incomplete output must be abandoned")
+	}
+	if shouldAbandonLocalOutput(true) {
+		t.Fatal("completed output must be retained when later verification fails")
+	}
+}
