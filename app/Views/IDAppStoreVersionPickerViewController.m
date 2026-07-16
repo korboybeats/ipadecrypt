@@ -7,7 +7,8 @@
 @property (nonatomic, copy) NSString *displayTitle;
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic) NSInteger trackID;
-@property (nonatomic, copy) void (^completion)(NSString *externalVersionID);
+@property (nonatomic, copy) void (^completion)(NSString *externalVersionID,
+                                                IDAppStoreVersionAction action);
 @property (nonatomic, strong) NSMutableArray<IDAppStoreVersion *> *versions;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, IDAppStoreVersion *> *versionsByID;
 @property (nonatomic, copy) NSString *email;
@@ -23,7 +24,8 @@
 - (instancetype)initWithTitle:(NSString *)title
                       bundleID:(NSString *)bundleID
                        trackID:(NSInteger)trackID
-                    completion:(void (^)(NSString *externalVersionID))completion {
+                    completion:(void (^)(NSString *externalVersionID,
+                                          IDAppStoreVersionAction action))completion {
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
     if (self) {
         _displayTitle = [title copy];
@@ -89,7 +91,7 @@
             self.statusText = err.localizedDescription ?: @"Failed to load versions";
         } else {
             self.loaded = YES;
-            self.statusText = self.versions.count ? @"Tap a version to decrypt." : @"No versions found.";
+            self.statusText = self.versions.count ? @"Tap a version for actions." : @"No versions found.";
         }
         [self.tableView reloadData];
     }];
@@ -117,7 +119,7 @@
     } else if ([phase isEqualToString:@"version-row"]) {
         [self upsertVersionFromEvent:ev];
     } else if ([phase isEqualToString:@"version-list-done"]) {
-        self.statusText = self.versions.count ? @"Tap a version to decrypt." : @"No versions found.";
+        self.statusText = self.versions.count ? @"Tap a version for actions." : @"No versions found.";
         [self.tableView reloadData];
     } else if ([phase isEqualToString:@"failed"]) {
         self.statusText = ev[@"message"] ?: @"Failed to load versions";
@@ -195,7 +197,7 @@
             self.statusText = current.message;
         } else {
             current.status = @"fetched";
-            self.statusText = @"Tap the version again to decrypt.";
+            self.statusText = @"Tap the version again for actions.";
         }
         [self.tableView reloadData];
     }];
@@ -264,13 +266,35 @@
         alertControllerWithTitle:(v.displayVersion.length ? v.displayVersion : v.externalVersionID)
                          message:v.externalVersionID
                   preferredStyle:UIAlertControllerStyleActionSheet];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Install this version"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        NSString *version = v.displayVersion.length ? v.displayVersion : v.externalVersionID;
+        UIAlertController *confirm = [UIAlertController
+            alertControllerWithTitle:[NSString stringWithFormat:@"Install %@?", version]
+                             message:@"This replaces the currently installed app. Older versions may not understand data created by newer versions."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                    style:UIAlertActionStyleCancel
+                                                  handler:nil]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"Install"
+                                                    style:UIAlertActionStyleDestructive
+                                                  handler:^(UIAlertAction *confirmAction) {
+            if (self.completion) {
+                NSString *external = v.externalVersionID;
+                [self.navigationController popViewControllerAnimated:NO];
+                self.completion(external, IDAppStoreVersionActionInstall);
+            }
+        }]];
+        [self presentViewController:confirm animated:YES completion:nil];
+    }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Decrypt this version"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
         if (self.completion) {
             NSString *external = v.externalVersionID;
             [self.navigationController popViewControllerAnimated:NO];
-            self.completion(external);
+            self.completion(external, IDAppStoreVersionActionDecrypt);
         }
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"

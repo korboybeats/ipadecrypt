@@ -27,6 +27,8 @@ var errAuthRequired = errors.New("sign in with Apple ID required")
 
 type appleLoginFunc func(email, password, authCode string) error
 
+type commandRunner func(name string, args ...string) error
+
 type installedApp struct {
 	BundleID string
 	Name     string
@@ -210,6 +212,20 @@ func run(bundleID, trackID, email, password, authCode, externalVersionID string)
 		return err
 	}
 	emit("phase", "installed", "bundle", installed.BundleID, "version", installed.Version, "path", installed.Path)
+
+	registrationErr := refreshApplicationRegistration(
+		installed.Path,
+		jailbreakCandidates("/var/jb/usr/bin/uicache", "/usr/bin/uicache"),
+		fileExists,
+		func(name string, args ...string) error {
+			return exec.Command(name, args...).Run()
+		},
+	)
+	if registrationErr != nil {
+		emit("phase", "registration", "status", "warning", "message", registrationErr.Error())
+	} else {
+		emit("phase", "registration", "status", "ok")
+	}
 
 	return nil
 }
@@ -501,6 +517,25 @@ func runAppinst(appinst, ipa string) error {
 		return fmt.Errorf("appinst: %w", err)
 	}
 	return nil
+}
+
+func refreshApplicationRegistration(appPath string, candidates []string, exists func(string) bool, run commandRunner) error {
+	var lastErr error
+	for _, candidate := range candidates {
+		if !exists(candidate) {
+			continue
+		}
+		if err := run(candidate, "-p", appPath); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("uicache: %w", lastErr)
+	}
+	return errors.New("uicache not found")
 }
 
 func findInstalled(bundleID string) (installedApp, error) {

@@ -126,6 +126,86 @@ func TestRefreshAppleAuthPropagatesLoginError(t *testing.T) {
 	}
 }
 
+func TestRefreshApplicationRegistrationUsesFirstExistingCandidate(t *testing.T) {
+	var gotName string
+	var gotArgs []string
+	err := refreshApplicationRegistration(
+		"/apps/Test.app",
+		[]string{"/missing", "/uicache"},
+		func(path string) bool { return path == "/uicache" },
+		func(name string, args ...string) error {
+			gotName = name
+			gotArgs = append([]string(nil), args...)
+			return nil
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("refreshApplicationRegistration returned error: %v", err)
+	}
+	if gotName != "/uicache" || !reflect.DeepEqual(gotArgs, []string{"-p", "/apps/Test.app"}) {
+		t.Fatalf("command = %q %#v, want /uicache -p /apps/Test.app", gotName, gotArgs)
+	}
+}
+
+func TestRefreshApplicationRegistrationRequiresUICache(t *testing.T) {
+	called := false
+	err := refreshApplicationRegistration(
+		"/apps/Test.app",
+		[]string{"/missing"},
+		func(string) bool { return false },
+		func(string, ...string) error {
+			called = true
+			return nil
+		},
+	)
+
+	if err == nil || err.Error() != "uicache not found" {
+		t.Fatalf("error = %v, want uicache not found", err)
+	}
+	if called {
+		t.Fatal("command ran without a uicache executable")
+	}
+}
+
+func TestRefreshApplicationRegistrationTriesNextCandidateAfterFailure(t *testing.T) {
+	var attempted []string
+	err := refreshApplicationRegistration(
+		"/apps/Test.app",
+		[]string{"/broken-uicache", "/working-uicache"},
+		func(string) bool { return true },
+		func(name string, _ ...string) error {
+			attempted = append(attempted, name)
+			if name == "/broken-uicache" {
+				return errors.New("broken")
+			}
+			return nil
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("refreshApplicationRegistration returned error: %v", err)
+	}
+	want := []string{"/broken-uicache", "/working-uicache"}
+	if !reflect.DeepEqual(attempted, want) {
+		t.Fatalf("attempted = %#v, want %#v", attempted, want)
+	}
+}
+
+func TestRefreshApplicationRegistrationReturnsCommandFailure(t *testing.T) {
+	want := errors.New("command failed")
+	err := refreshApplicationRegistration(
+		"/apps/Test.app",
+		[]string{"/uicache"},
+		func(string) bool { return true },
+		func(string, ...string) error { return want },
+	)
+
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want wrapped command failure", err)
+	}
+}
+
 func TestNewestFirstReversesAppleVersionOrder(t *testing.T) {
 	got := newestFirst([]string{"old", "middle", "new"})
 	want := []string{"new", "middle", "old"}

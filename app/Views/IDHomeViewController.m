@@ -1,6 +1,7 @@
 #import "IDHomeViewController.h"
 #import "IDAppRowCell.h"
 #import "IDInstalledApp.h"
+#import "IDAppStoreInstallPolicy.h"
 #import "IDSearchResult.h"
 #import "IDAppEnumerator.h"
 #import "IDITunesSearch.h"
@@ -373,6 +374,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                                      trackID:trackID
                                 displayName:title
                            externalVersionID:nil
+                          decryptAfterInstall:YES
                                       email:nil
                                    password:nil
                                    authCode:nil];
@@ -391,11 +393,12 @@ static NSString *IDPrettyImageName(NSString *name) {
         initWithTitle:title
              bundleID:bundleID
               trackID:trackID
-           completion:^(NSString *externalVersionID) {
+           completion:^(NSString *externalVersionID, IDAppStoreVersionAction action) {
         [self latestFromAppStoreBundleID:bundleID
                                  trackID:trackID
                              displayName:title
                        externalVersionID:externalVersionID
+                      decryptAfterInstall:(action == IDAppStoreVersionActionDecrypt)
                                    email:nil
                                 password:nil
                                 authCode:nil];
@@ -572,6 +575,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                             trackID:(NSInteger)trackID
                        displayName:(NSString *)displayName
                   externalVersionID:(NSString *)externalVersionID
+                 decryptAfterInstall:(BOOL)decryptAfterInstall
                               email:(NSString *)email
                            password:(NSString *)password
                            authCode:(NSString *)authCode {
@@ -587,6 +591,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                                trackID:trackID
                            displayName:displayName
                       externalVersionID:externalVersionID
+                     decryptAfterInstall:decryptAfterInstall
                                  email:email
                               password:password
                               authCode:authCode
@@ -597,6 +602,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                              trackID:(NSInteger)trackID
                          displayName:(NSString *)displayName
                     externalVersionID:(NSString *)externalVersionID
+                   decryptAfterInstall:(BOOL)decryptAfterInstall
                                email:(NSString *)email
                             password:(NSString *)password
                             authCode:(NSString *)authCode
@@ -674,6 +680,9 @@ static NSString *IDPrettyImageName(NSString *name) {
             installedVersion = ev[@"version"] ?: @"";
             installedPath = ev[@"path"] ?: @"";
             [vc appendStatus:[NSString stringWithFormat:@"  Installed version %@", installedVersion.length ? installedVersion : @"unknown"]];
+        } else if ([phase isEqualToString:@"registration"] && [ev[@"status"] isEqualToString:@"warning"]) {
+            [vc appendStatus:[NSString stringWithFormat:@"  Icon cache refresh warning: %@",
+                              ev[@"message"] ?: @"unknown error"]];
         } else if ([phase isEqualToString:@"failed"]) {
             failureReason = ev[@"reason"];
             failureMessage = ev[@"message"];
@@ -699,6 +708,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                                      trackID:trackID
                                  displayName:displayName
                            externalVersionID:externalVersionID
+                          decryptAfterInstall:decryptAfterInstall
                                          code:needsCode
                                            vc:vc
                                         email:email
@@ -706,23 +716,36 @@ static NSString *IDPrettyImageName(NSString *name) {
             return;
         }
 
-        if (err) {
-            [self setAppleAuthVerified:NO refreshing:NO];
-            if (lastHelperStderr.length && [err.localizedDescription containsString:lastHelperStderr]) {
-                err = [NSError errorWithDomain:err.domain code:err.code
-                                      userInfo:@{NSLocalizedDescriptionKey:
-                                          [NSString stringWithFormat:@"appstore helper exit %d", code]}];
+        IDPostInstallOutcome outcome = IDPostInstallOutcomeForState(err == nil,
+                                                                     installedPath.length > 0,
+                                                                     decryptAfterInstall);
+        if (outcome == IDPostInstallOutcomeError) {
+            if (err) {
+                [self setAppleAuthVerified:NO refreshing:NO];
+                if (lastHelperStderr.length && [err.localizedDescription containsString:lastHelperStderr]) {
+                    err = [NSError errorWithDomain:err.domain code:err.code
+                                          userInfo:@{NSLocalizedDescriptionKey:
+                                              [NSString stringWithFormat:@"appstore helper exit %d", code]}];
+                }
+                [vc markCompleteWithOutputIPA:@"" error:err];
+                return;
             }
-            [vc markCompleteWithOutputIPA:@"" error:err];
-            return;
-        }
-
-        [self setAppleAuthVerified:YES refreshing:NO];
-        if (installedPath.length == 0) {
             NSError *missing = [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:4
                                                userInfo:@{NSLocalizedDescriptionKey:
                                                    @"helper finished without installed bundle path"}];
             [vc markCompleteWithOutputIPA:@"" error:missing];
+            return;
+        }
+
+        [self setAppleAuthVerified:YES refreshing:NO];
+        self.installed = [IDAppEnumerator installedApps];
+        self.installedFiltered = self.installed;
+        [self.tableView reloadData];
+
+        if (outcome == IDPostInstallOutcomeComplete) {
+            NSString *version = installedVersion.length ? installedVersion : @"unknown";
+            [vc markCompleteWithMessage:[NSString stringWithFormat:@"Installed version %@ successfully.", version]
+                                  error:nil];
             return;
         }
 
@@ -731,9 +754,6 @@ static NSString *IDPrettyImageName(NSString *name) {
         installed.displayName = displayName;
         installed.version = installedVersion ?: @"";
         installed.appBundlePath = installedPath;
-        self.installed = [IDAppEnumerator installedApps];
-        self.installedFiltered = self.installed;
-        [self.tableView reloadData];
         [self decryptInstalled:installed reuseVC:vc];
     }];
 }
@@ -742,6 +762,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                             trackID:(NSInteger)trackID
                         displayName:(NSString *)displayName
                   externalVersionID:(NSString *)externalVersionID
+                 decryptAfterInstall:(BOOL)decryptAfterInstall
                                 code:(BOOL)codeOnly
                                   vc:(IDDecryptProgressViewController *)vc
                                email:(NSString *)email
@@ -793,6 +814,7 @@ static NSString *IDPrettyImageName(NSString *name) {
                                    trackID:trackID
                                displayName:displayName
                           externalVersionID:externalVersionID
+                         decryptAfterInstall:decryptAfterInstall
                                      email:nextEmail
                                   password:nextPassword
                                   authCode:nextCode
