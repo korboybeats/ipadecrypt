@@ -166,9 +166,7 @@ func extractURLs(body []byte) []string {
 	text := html.UnescapeString(strings.ReplaceAll(string(body), `\/`, "/"))
 	matches := urlPattern.FindAllString(text, -1)
 	urls := make([]string, 0, len(matches))
-	for _, match := range matches {
-		urls = append(urls, match)
-	}
+	urls = append(urls, matches...)
 	return urls
 }
 

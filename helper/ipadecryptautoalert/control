@@ -1,6 +1,6 @@
 Package: com.korboy.ipadecryptautoalert
 Name: ipadecryptautoalert
-Version: 0.7.0-korboy.1
+Version: 0.7.3-korboy.1
 Architecture: iphoneos-arm64
 Description: Auto-confirms App Store "Download older version" prompts when armed by ipadecrypt.
 Maintainer: Korboy

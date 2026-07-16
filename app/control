@@ -1,6 +1,6 @@
 Package: com.korboy.ipadecrypt
 Name: ipadecrypt
-Version: 0.7.0-korboy.1
+Version: 0.7.3-korboy.1
 Architecture: iphoneos-arm64
 Description: On-device IPA decrypter.
 Maintainer: Korboy
