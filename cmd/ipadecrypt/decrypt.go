@@ -309,7 +309,12 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			tui.Err("appstore client: %v", err)
 			return
 		}
-		resolved, err := resolveBundleByFuzzy(dev, as, cfg.Apple.Account(), target.bundleId)
+		acc, err := accountWithStorefront(cfg, decryptStorefront)
+		if err != nil {
+			tui.Err("storefront: %v", err)
+			return
+		}
+		resolved, err := resolveBundleByFuzzy(dev, as, acc, target.bundleId)
 		if err != nil {
 			tui.Err("%v", err)
 			return
@@ -521,7 +526,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		acc := cfg.Apple.Account()
+		acc, err := accountWithStorefront(cfg, decryptStorefront)
+		if err != nil {
+			tui.Err("storefront: %v", err)
+			return
+		}
 
 		appStoreCountry, err := appstore.CountryCodeFromStoreFront(acc.StoreFront)
 		if err != nil {
@@ -760,6 +769,10 @@ func verifyFailureSummary(res pipeline.VerifyResult) string {
 	return strings.Join(parts, ", ")
 }
 
+func shouldAbandonLocalOutput(completed bool) bool {
+	return !completed
+}
+
 // runDecryptOnBundle writes the decrypted IPA locally. When srcIPAPath is
 // present, the helper streams only decrypted Mach-Os and the host assembles
 // the IPA from the original source. For use-installed/StoreKit paths, the
@@ -797,14 +810,14 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 		return
 	}
 
-	// Best-effort: drop the partially-written IPA on any error return.
-	// Cleared after we commit on success.
-	abandonLocal := true
+	// Drop only a partial stream. Once the IPA has been completely written and
+	// synced, retain it even if cleanup or verification later reports a failure.
+	localOutputComplete := false
 
 	cleanups.push(func() {
 		outFile.Close()
 
-		if abandonLocal {
+		if shouldAbandonLocalOutput(localOutputComplete) {
 			os.Remove(outLocal)
 		}
 	})
@@ -878,6 +891,7 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 		live.Fail("sync local: %v", err)
 		return
 	}
+	localOutputComplete = true
 
 	live.OK("%s (%s → %s)", progress.Summary(), humanBytes(cw.n), outLocal)
 
@@ -994,8 +1008,6 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 	if keepDevice {
 		tui.OK("kept on device → %s", outRemote)
 	}
-
-	abandonLocal = false
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
@@ -1025,6 +1037,11 @@ func selectAppStoreVersionForDecrypt(cfg *config.Config, paths *config.Paths, ta
 		tui.Err("appstore client: %v", err)
 		return "", false
 	}
+	acc, err := accountWithStorefront(cfg, decryptStorefront)
+	if err != nil {
+		tui.Err("storefront: %v", err)
+		return "", false
+	}
 
 	live := tui.NewLive()
 	if target.appId != "" {
@@ -1033,7 +1050,7 @@ func selectAppStoreVersionForDecrypt(cfg *config.Config, paths *config.Paths, ta
 		live.Spin("resolving bundleId %s", target.bundleId)
 	}
 
-	app, err := lookupTargetApp(as, cfg.Apple.Account(), target)
+	app, err := lookupTargetApp(as, acc, target)
 	if err != nil {
 		live.Fail("lookup failed: %v", err)
 		return "", false

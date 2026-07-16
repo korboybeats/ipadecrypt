@@ -207,6 +207,7 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 
 ## Known issues
 
+- [New, unsupported SC_Info format is shipped with some apps, ipadecrypt will fail to decrypt them.](https://github.com/londek/ipadecrypt/issues/34)
 - Due to arm64e PPL guards on A12+, some apps such as Apple's are not expected to work.
 
 ## License

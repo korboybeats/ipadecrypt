@@ -59,7 +59,13 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 	}
 
 	if out == nil {
-		io.Copy(io.Discard, res.Body)
+		data, err := io.ReadAll(res.Body)
+		if err != nil {
+			return nil, err
+		}
+		if res.StatusCode == http.StatusTooManyRequests {
+			return res, fmt.Errorf("apple auth is rate-limited (HTTP 429): %s", responsePreview(data))
+		}
 		return res, nil
 	}
 
@@ -68,7 +74,7 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 		return nil, err
 	}
 	if res.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("apple auth is rate-limited (HTTP 429): %s", responsePreview(data))
+		return res, fmt.Errorf("apple auth is rate-limited (HTTP 429): %s", responsePreview(data))
 	}
 
 	switch format {
@@ -78,8 +84,13 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 		}
 	case formatXML:
 		if _, err := plist.Unmarshal(normalizePlist(data), out); err != nil {
-			return nil, fmt.Errorf("decode plist: %w; response status=%d content-type=%q body=%q",
-				err, res.StatusCode, res.Header.Get("Content-Type"), responsePreview(data))
+			return res, &ResponseDecodeError{
+				Cause:       err,
+				StatusCode:  res.StatusCode,
+				ContentType: res.Header.Get("Content-Type"),
+				Body:        responsePreview(data),
+				URLs:        extractURLs(data),
+			}
 		}
 	}
 
@@ -129,6 +140,34 @@ func normalizePlist(body []byte) []byte {
 	}
 
 	return n
+}
+
+type ResponseDecodeError struct {
+	Cause       error
+	StatusCode  int
+	ContentType string
+	Body        string
+	URLs        []string
+}
+
+func (e *ResponseDecodeError) Error() string {
+	return fmt.Sprintf("decode plist: %v; response status=%d content-type=%q body=%q",
+		e.Cause, e.StatusCode, e.ContentType, e.Body)
+}
+
+func (e *ResponseDecodeError) Unwrap() error {
+	return e.Cause
+}
+
+var urlPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+func extractURLs(body []byte) []string {
+	matches := urlPattern.FindAll(body, -1)
+	urls := make([]string, 0, len(matches))
+	for _, match := range matches {
+		urls = append(urls, string(match))
+	}
+	return urls
 }
 
 func responsePreview(body []byte) string {

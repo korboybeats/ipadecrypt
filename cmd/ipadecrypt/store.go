@@ -16,6 +16,24 @@ const (
 	authRetryingDownload                      // kicking the call off again
 )
 
+// accountWithStorefront returns the configured Apple account, overriding the
+// storefront when flag is non-empty.
+func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, error) {
+	acc := cfg.Apple.Account()
+	if flag == "" {
+		return acc, nil
+	}
+
+	sf, err := appstore.ResolveStorefront(flag)
+	if err != nil {
+		return nil, err
+	}
+
+	acc.StoreFront = sf
+
+	return acc, nil
+}
+
 // withAuth runs fn with up to `retries` attempts, recovering from the two
 // well-known recoverable errors from the private App Store endpoint:
 // ErrPasswordTokenExpired via reauth and ErrLicenseRequired via

@@ -17,6 +17,38 @@ func CountryCodeFromStoreFront(storeFront string) (string, error) {
 	return "", fmt.Errorf("country code mapping for store front (%s) was not found", storeFront)
 }
 
+// ResolveStorefront turns a user-provided storefront value into a numeric
+// Apple Store Front ID.  It accepts both the canonical ID (e.g. "143441")
+// and two-letter country codes (e.g. "US", "pl").
+func ResolveStorefront(input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", nil
+	}
+
+	// Already a numeric storefront ID.
+	allDigits := true
+
+	for _, r := range input {
+		if r < '0' || r > '9' {
+			allDigits = false
+			break
+		}
+	}
+
+	if allDigits {
+		return input, nil
+	}
+
+	// Country code lookup (case-insensitive).
+	cc := strings.ToUpper(input)
+	if id, ok := storeFronts[cc]; ok {
+		return id, nil
+	}
+
+	return "", fmt.Errorf("unknown storefront %q (expected numeric ID or two-letter country code)", input)
+}
+
 var storeFronts = map[string]string{
 	"AE": "143481",
 	"AG": "143540",
