@@ -564,7 +564,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live = tui.NewLive()
 		live.Spin("fetching download metadata")
 
-		disposition, err := fetchRemoteEncryptedSource(cfg, paths, as, app, selectedExtVerID, func(e authEvent) {
+		disposition, err := fetchRemoteEncryptedSource(cfg, paths, as, app, selectedExtVerID, decryptStorefront, func(e authEvent) {
 			switch e {
 			case authReauth:
 				live.Spin("re-authenticating")
@@ -773,6 +773,21 @@ func shouldAbandonLocalOutput(completed bool) bool {
 	return !completed
 }
 
+func pushLocalOutputCleanup(cleanups *cleanupStack, outFile io.Closer, outLocal string, cleanupTemp func(), completed, delivered *bool) {
+	cleanups.push(func() {
+		outFile.Close()
+
+		if shouldAbandonLocalOutput(*completed) {
+			os.Remove(outLocal)
+			return
+		}
+
+		if cleanupTemp != nil && *delivered {
+			cleanupTemp()
+		}
+	})
+}
+
 // runDecryptOnBundle writes the decrypted IPA locally. When srcIPAPath is
 // present, the helper streams only decrypted Mach-Os and the host assembles
 // the IPA from the original source. For use-installed/StoreKit paths, the
@@ -787,9 +802,6 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 	if err != nil {
 		tui.Err("output path: %v", err)
 		return
-	}
-	if cleanupLocal != nil {
-		cleanups.push(cleanupLocal)
 	}
 
 	if keepDevice {
@@ -813,14 +825,8 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 	// Drop only a partial stream. Once the IPA has been completely written and
 	// synced, retain it even if cleanup or verification later reports a failure.
 	localOutputComplete := false
-
-	cleanups.push(func() {
-		outFile.Close()
-
-		if shouldAbandonLocalOutput(localOutputComplete) {
-			os.Remove(outLocal)
-		}
-	})
+	localOutputDelivered := false
+	pushLocalOutputCleanup(cleanups, outFile, outLocal, cleanupLocal, &localOutputComplete, &localOutputDelivered)
 
 	live := tui.NewLive()
 	live.Spin("starting helper")
@@ -998,6 +1004,7 @@ func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, 
 			live.Fail("close final IPA: %v", err)
 			return
 		}
+		localOutputDelivered = true
 
 		live.OK("device copy ready")
 	}
@@ -1066,7 +1073,7 @@ func selectAppStoreVersionForDecrypt(cfg *config.Config, paths *config.Paths, ta
 	live = tui.NewLive()
 	live.Spin("listing versions for %s", app.BundleID)
 
-	list, err := listVersionsWithAuth(cfg, as, app)
+	list, err := listVersionsWithAuth(cfg, as, app, decryptStorefront)
 	if err != nil {
 		live.Fail("list versions failed: %v", err)
 		return "", false
@@ -1080,7 +1087,7 @@ func selectAppStoreVersionForDecrypt(cfg *config.Config, paths *config.Paths, ta
 		return "", false
 	}
 
-	extVerID, err := runSingleVersionPicker(cfg, as, app, list, cache, cachePath, "")
+	extVerID, err := runSingleVersionPicker(cfg, as, app, list, cache, cachePath, "", decryptStorefront)
 	if err != nil {
 		if !errors.Is(err, errVersionSelectionAborted) {
 			tui.Err("%v", err)
@@ -1100,7 +1107,7 @@ type remoteSourceDisposition struct {
 	kind    sourceDisposition
 }
 
-func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *appstore.Client, app appstore.App, extVerID string, onAuth func(authEvent), onProgress func(cur, total int64)) (remoteSourceDisposition, error) {
+func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *appstore.Client, app appstore.App, extVerID, storefront string, onAuth func(authEvent), onProgress func(cur, total int64)) (remoteSourceDisposition, error) {
 	if extVerID == "" {
 		encPath, err := paths.CachedEncryptedIPA(app.BundleID, app.Version)
 		if err != nil {
@@ -1116,8 +1123,8 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 		}
 	}
 
-	ticket, err := withAuth(cfg, as, app, 3, onAuth, func() (appstore.DownloadTicket, error) {
-		return as.PrepareDownload(cfg.Apple.Account(), app, extVerID)
+	ticket, err := withAuth(cfg, as, app, storefront, 3, onAuth, func(acc *appstore.Account) (appstore.DownloadTicket, error) {
+		return as.PrepareDownload(acc, app, extVerID)
 	})
 	if err != nil {
 		return remoteSourceDisposition{}, err
@@ -1136,7 +1143,10 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 		}, nil
 	}
 
-	if _, err := as.CompleteDownload(cfg.Apple.Account(), ticket, encPath, onProgress); err != nil {
+	_, err = withStorefrontAccount(cfg, storefront, func(acc *appstore.Account) (appstore.DownloadOutput, error) {
+		return as.CompleteDownload(acc, ticket, encPath, onProgress)
+	})
+	if err != nil {
 		return remoteSourceDisposition{}, fmt.Errorf("%w: %w", errRemoteDownloadFailed, err)
 	}
 

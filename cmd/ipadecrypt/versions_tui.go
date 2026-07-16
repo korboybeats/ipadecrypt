@@ -50,11 +50,12 @@ type fetchResult struct {
 }
 
 type versionsUI struct {
-	cfg       *config.Config
-	as        *appstore.Client
-	app       appstore.App
-	cachePath string
-	logPath   string
+	cfg        *config.Config
+	as         *appstore.Client
+	app        appstore.App
+	cachePath  string
+	logPath    string
+	storefront string
 
 	cache   *versionsCache
 	cacheMu sync.Mutex
@@ -77,17 +78,17 @@ type versionsUI struct {
 
 var errVersionSelectionAborted = errors.New("version selection aborted")
 
-func runVersionsTUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) error {
-	_, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, 0)
+func runVersionsTUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath, storefront string) error {
+	_, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, storefront, 0)
 	return err
 }
 
-func runVersionsPicker(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) ([]string, error) {
-	return runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, -1)
+func runVersionsPicker(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath, storefront string) ([]string, error) {
+	return runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, storefront, -1)
 }
 
-func runSingleVersionPicker(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string) (string, error) {
-	selected, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, 1)
+func runSingleVersionPicker(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath, storefront string) (string, error) {
+	selected, err := runVersionsUI(cfg, as, app, list, cache, cachePath, logPath, storefront, 1)
 	if err != nil {
 		return "", err
 	}
@@ -99,7 +100,7 @@ func runSingleVersionPicker(cfg *config.Config, as *appstore.Client, app appstor
 	return selected[0], nil
 }
 
-func runVersionsUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath string, selectionLimit int) ([]string, error) {
+func runVersionsUI(cfg *config.Config, as *appstore.Client, app appstore.App, list appstore.ListVersionsOutput, cache *versionsCache, cachePath, logPath, storefront string, selectionLimit int) ([]string, error) {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
 		return nil, fmt.Errorf("versions: stdin is not a terminal")
@@ -130,6 +131,7 @@ func runVersionsUI(cfg *config.Config, as *appstore.Client, app appstore.App, li
 		app:            app,
 		cachePath:      cachePath,
 		logPath:        logPath,
+		storefront:     storefront,
 		cache:          cache,
 		rows:           rows,
 		latestExtVerID: list.LatestExternalVersionID,
@@ -539,7 +541,7 @@ func (ui *versionsUI) fetchWorker(queue <-chan string, results chan<- fetchResul
 	defer wg.Done()
 
 	for extVerID := range queue {
-		meta, err := getVersionMetadataWithAuth(ui.cfg, ui.as, ui.app, extVerID)
+		meta, err := getVersionMetadataWithAuth(ui.cfg, ui.as, ui.app, extVerID, ui.storefront)
 		if err == nil {
 			logVersionsResponse(ui.logPath, "get_version_metadata", ui.app.BundleID, extVerID, meta.Raw)
 		}

@@ -102,6 +102,21 @@ func TestSendPreservesDiscoveryURLAndRedactsDecodeError(t *testing.T) {
 	}
 }
 
+func TestResponsePreviewRedactsEverySensitiveOccurrence(t *testing.T) {
+	inputs := []string{
+		`passwordToken = "first"; passwordToken = "second"; status = "failed";`,
+		`{"passwordToken":"first","nested":{"passwordToken":"second"}}`,
+		`<key>passwordToken</key><string>first</string><key>passwordToken</key><string>second</string>`,
+	}
+
+	for _, input := range inputs {
+		got := responsePreview([]byte(input))
+		if strings.Contains(got, "first") || strings.Contains(got, "second") {
+			t.Fatalf("responsePreview leaked a secret: %q", got)
+		}
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

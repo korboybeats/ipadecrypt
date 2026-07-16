@@ -91,7 +91,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 	live = tui.NewLive()
 	live.Spin("listing versions for %s", app.BundleID)
 
-	list, err := listVersionsWithAuth(cfg, as, app)
+	list, err := listVersionsWithAuth(cfg, as, app, versionsStorefront)
 	if err != nil {
 		live.Fail("list versions failed: %v", err)
 		return
@@ -107,7 +107,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if err := runVersionsTUI(cfg, as, app, list, cache, cachePath, logPath); err != nil {
+	if err := runVersionsTUI(cfg, as, app, list, cache, cachePath, logPath, versionsStorefront); err != nil {
 		if !errors.Is(err, errVersionSelectionAborted) {
 			tui.Err("%v", err)
 		}
@@ -116,15 +116,15 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 	}
 }
 
-func listVersionsWithAuth(cfg *config.Config, as *appstore.Client, app appstore.App) (appstore.ListVersionsOutput, error) {
-	return withAuth(cfg, as, app, 3, nil, func() (appstore.ListVersionsOutput, error) {
-		return as.ListVersions(cfg.Apple.Account(), app)
+func listVersionsWithAuth(cfg *config.Config, as *appstore.Client, app appstore.App, storefront string) (appstore.ListVersionsOutput, error) {
+	return withAuth(cfg, as, app, storefront, 3, nil, func(acc *appstore.Account) (appstore.ListVersionsOutput, error) {
+		return as.ListVersions(acc, app)
 	})
 }
 
-func getVersionMetadataWithAuth(cfg *config.Config, as *appstore.Client, app appstore.App, extVerID string) (appstore.VersionMetadata, error) {
-	return withAuth(cfg, as, app, 3, nil, func() (appstore.VersionMetadata, error) {
-		return as.GetVersionMetadata(cfg.Apple.Account(), app, extVerID)
+func getVersionMetadataWithAuth(cfg *config.Config, as *appstore.Client, app appstore.App, extVerID, storefront string) (appstore.VersionMetadata, error) {
+	return withAuth(cfg, as, app, storefront, 3, nil, func(acc *appstore.Account) (appstore.VersionMetadata, error) {
+		return as.GetVersionMetadata(acc, app, extVerID)
 	})
 }
 

@@ -34,14 +34,27 @@ func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, 
 	return acc, nil
 }
 
+func withStorefrontAccount[T any](cfg *config.Config, flag string, fn func(*appstore.Account) (T, error)) (T, error) {
+	var zero T
+
+	acc, err := accountWithStorefront(cfg, flag)
+	if err != nil {
+		return zero, err
+	}
+
+	return fn(acc)
+}
+
 // withAuth runs fn with up to `retries` attempts, recovering from the two
 // well-known recoverable errors from the private App Store endpoint:
 // ErrPasswordTokenExpired via reauth and ErrLicenseRequired via
 // acquireLicense. Any other error returns immediately.
-func withAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, retries int, onEvent func(authEvent), fn func() (T, error)) (T, error) {
-	return appstoreworkflow.WithAuth(cfg, as, app, retries, func(e appstoreworkflow.AuthEvent) {
+func withAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, storefront string, retries int, onEvent func(authEvent), fn func(*appstore.Account) (T, error)) (T, error) {
+	return appstoreworkflow.WithAuthAccount(cfg, as, app, retries, func(e appstoreworkflow.AuthEvent) {
 		if onEvent != nil {
 			onEvent(authEvent(e))
 		}
+	}, func() (*appstore.Account, error) {
+		return accountWithStorefront(cfg, storefront)
 	}, fn)
 }

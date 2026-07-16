@@ -106,7 +106,7 @@ func downloadSelectedVersions(cfg *config.Config, paths *config.Paths, as *appst
 	live := tui.NewLive()
 	live.Spin("listing versions for %s", app.BundleID)
 
-	list, err := listVersionsWithAuth(cfg, as, app)
+	list, err := listVersionsWithAuth(cfg, as, app, "")
 	if err != nil {
 		live.Fail("list versions failed: %v", err)
 		return
@@ -120,7 +120,7 @@ func downloadSelectedVersions(cfg *config.Config, paths *config.Paths, as *appst
 		return
 	}
 
-	selectedExtVerIDs, err := runVersionsPicker(cfg, as, app, list, cache, cachePath, "")
+	selectedExtVerIDs, err := runVersionsPicker(cfg, as, app, list, cache, cachePath, "", "")
 	if err != nil {
 		if errors.Is(err, errVersionSelectionAborted) {
 			return
@@ -161,7 +161,7 @@ func fetchDownloadSource(cfg *config.Config, paths *config.Paths, as *appstore.C
 	live := tui.NewLive()
 	live.Spin("%s", phaseLabel("fetching download metadata", phase))
 
-	disposition, err := fetchRemoteEncryptedSource(cfg, paths, as, app, extVerID, func(e authEvent) {
+	disposition, err := fetchRemoteEncryptedSource(cfg, paths, as, app, extVerID, "", func(e authEvent) {
 		switch e {
 		case authReauth:
 			live.Spin("%s", phaseLabel("re-authenticating", phase))

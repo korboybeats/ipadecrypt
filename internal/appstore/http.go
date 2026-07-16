@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"regexp"
@@ -162,10 +163,11 @@ func (e *ResponseDecodeError) Unwrap() error {
 var urlPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 func extractURLs(body []byte) []string {
-	matches := urlPattern.FindAll(body, -1)
+	text := html.UnescapeString(strings.ReplaceAll(string(body), `\/`, "/"))
+	matches := urlPattern.FindAllString(text, -1)
 	urls := make([]string, 0, len(matches))
 	for _, match := range matches {
-		urls = append(urls, string(match))
+		urls = append(urls, match)
 	}
 	return urls
 }
@@ -193,6 +195,9 @@ func responsePreview(body []byte) string {
 }
 
 func redactResponsePreview(s string) string {
+	lower := strings.ToLower(s)
+	var found []string
+
 	for _, key := range []string{
 		"passwordToken",
 		"dsPersonId",
@@ -200,18 +205,13 @@ func redactResponsePreview(s string) string {
 		"mMeToken",
 		"accountInfo",
 	} {
-		s = redactAfterKey(s, key)
-	}
-	return s
-}
-
-func redactAfterKey(s, key string) string {
-	if i := strings.Index(s, key); i >= 0 {
-		cut := strings.Index(s[i:], ";")
-		if cut < 0 {
-			return s[:i+len(key)] + "=<redacted>"
+		if strings.Contains(lower, strings.ToLower(key)) {
+			found = append(found, key)
 		}
-		return s[:i+len(key)] + "=<redacted>" + s[i+cut:]
 	}
+	if len(found) > 0 {
+		return fmt.Sprintf("<redacted response containing %s>", strings.Join(found, ", "))
+	}
+
 	return s
 }

@@ -58,16 +58,22 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 			return nil, err
 		}
 
-		out = loginResult{}
+		discoveryRetried := false
+		for {
+			out = loginResult{}
 
-		res, err = c.send(http.MethodPost, url, map[string]string{
-			"Content-Type": "application/x-www-form-urlencoded",
-		}, body, formatXML, &out)
-		if err != nil {
-			if discoveredEndpoint := authEndpointFromResponseError(err); discoveredEndpoint != "" && discoveredEndpoint != authEndpoint {
+			res, err = c.send(http.MethodPost, url, map[string]string{
+				"Content-Type": "application/x-www-form-urlencoded",
+			}, body, formatXML, &out)
+			if err == nil {
+				break
+			}
+
+			discoveredEndpoint := authEndpointFromResponseError(err)
+			if !discoveryRetried && discoveredEndpoint != "" && discoveredEndpoint != authEndpoint {
 				authEndpoint = discoveredEndpoint
 				url = authEndpoint
-
+				discoveryRetried = true
 				continue
 			}
 

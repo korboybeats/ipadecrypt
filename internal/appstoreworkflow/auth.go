@@ -10,6 +10,8 @@ import (
 
 type AuthEvent int
 
+type AccountProvider func() (*appstore.Account, error)
+
 const (
 	AuthReauth AuthEvent = iota + 1
 	AuthLicense
@@ -46,12 +48,28 @@ func Reauth(cfg *config.Config, as *appstore.Client) error {
 }
 
 func AcquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) error {
-	err := as.Purchase(cfg.Apple.Account(), app)
+	return AcquireLicenseWithAccount(cfg, as, app, func() (*appstore.Account, error) {
+		return cfg.Apple.Account(), nil
+	})
+}
+
+func AcquireLicenseWithAccount(cfg *config.Config, as *appstore.Client, app appstore.App, account AccountProvider) error {
+	acc, err := account()
+	if err != nil {
+		return err
+	}
+
+	err = as.Purchase(acc, app)
 	if errors.Is(err, appstore.ErrPasswordTokenExpired) {
 		if err := Reauth(cfg, as); err != nil {
 			return err
 		}
-		err = as.Purchase(cfg.Apple.Account(), app)
+
+		acc, err = account()
+		if err != nil {
+			return err
+		}
+		err = as.Purchase(acc, app)
 	}
 
 	if err != nil && !errors.Is(err, appstore.ErrLicenseAlreadyExists) {
@@ -62,6 +80,14 @@ func AcquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) e
 }
 
 func WithAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, retries int, onEvent func(AuthEvent), fn func() (T, error)) (T, error) {
+	return WithAuthAccount(cfg, as, app, retries, onEvent, func() (*appstore.Account, error) {
+		return cfg.Apple.Account(), nil
+	}, func(_ *appstore.Account) (T, error) {
+		return fn()
+	})
+}
+
+func WithAuthAccount[T any](cfg *config.Config, as *appstore.Client, app appstore.App, retries int, onEvent func(AuthEvent), account AccountProvider, fn func(*appstore.Account) (T, error)) (T, error) {
 	var zero T
 
 	notify := func(e AuthEvent) {
@@ -71,7 +97,12 @@ func WithAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, 
 	}
 
 	for range retries {
-		out, err := fn()
+		acc, err := account()
+		if err != nil {
+			return zero, err
+		}
+
+		out, err := fn(acc)
 		if err == nil {
 			return out, nil
 		}
@@ -85,7 +116,7 @@ func WithAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, 
 			notify(AuthRetryingDownload)
 		case errors.Is(err, appstore.ErrLicenseRequired):
 			notify(AuthLicense)
-			if err := AcquireLicense(cfg, as, app); err != nil {
+			if err := AcquireLicenseWithAccount(cfg, as, app, account); err != nil {
 				return zero, err
 			}
 			notify(AuthRetryingDownload)

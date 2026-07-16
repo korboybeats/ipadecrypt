@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/londek/ipadecrypt/internal/device"
@@ -36,5 +38,41 @@ func TestShouldAbandonLocalOutput(t *testing.T) {
 	}
 	if shouldAbandonLocalOutput(true) {
 		t.Fatal("completed output must be retained when later verification fails")
+	}
+}
+
+func TestLocalOutputCleanupRetainsCompletedUndeliveredTemp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "completed.ipa")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create output: %v", err)
+	}
+
+	completed := true
+	delivered := false
+	cleanups := &cleanupStack{}
+	pushLocalOutputCleanup(cleanups, file, path, func() { os.Remove(path) }, &completed, &delivered)
+	cleanups.run()
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("completed undelivered output was removed: %v", err)
+	}
+}
+
+func TestLocalOutputCleanupRemovesDeliveredTemp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "delivered.ipa")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create output: %v", err)
+	}
+
+	completed := true
+	delivered := true
+	cleanups := &cleanupStack{}
+	pushLocalOutputCleanup(cleanups, file, path, func() { os.Remove(path) }, &completed, &delivered)
+	cleanups.run()
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("delivered temporary output still exists: %v", err)
 	}
 }
