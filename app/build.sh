@@ -2,9 +2,13 @@
 # Build the Theos rootless app package and install it on the device.
 #
 # Requires the standard ssh-iphone / scp-iphone wrappers.
+# Pass --no-install (or IPADECRYPT_NO_INSTALL=1) to only build the .deb.
 
 set -e
 cd "$(dirname "$0")"
+
+NO_INSTALL="${IPADECRYPT_NO_INSTALL:-0}"
+[ "${1:-}" = "--no-install" ] && NO_INSTALL=1
 
 HELPER_BACKUP=""
 cleanup() {
@@ -49,15 +53,22 @@ else
   exit 1
 fi
 IOS_CC="$IOS_CLANG -target arm64-apple-ios15.0 -isysroot $IOS_SDK -Wno-incompatible-sysroot -Wno-unused-command-line-argument"
+
+# appstore-helper runs Apple's SAP/AMS code under Unicorn, which must be
+# statically linked on iOS (see build_unicorn_ios.sh).
+UNICORN_IOS_LIB="${UNICORN_IOS_LIB:-$(./build_unicorn_ios.sh)}"
+[ -f "$UNICORN_IOS_LIB" ] || { echo "Unicorn iOS archive not found: $UNICORN_IOS_LIB" >&2; exit 1; }
+HELPER_LDFLAGS="$IOS_LDFLAGS -Wl,-force_load,$UNICORN_IOS_LIB -Wl,-export_dynamic"
 ( cd .. && \
   GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
   CC="$IOS_CC" \
-  CGO_LDFLAGS="$IOS_LDFLAGS" \
+  CGO_LDFLAGS="$HELPER_LDFLAGS" \
   "$GO" build -trimpath -ldflags="-s -w" -o app/Resources/appstore-helper.arm64 ./cmd/ipadecrypt-appstore-helper )
 ldid -Sappstore-helper.entitlements.plist Resources/appstore-helper.arm64
 chmod +x Resources/appstore-helper.arm64
 HELPER_BACKUP=$(mktemp)
 cp Resources/helper.arm64 "$HELPER_BACKUP"
+cp ../internal/device/ipadecrypt-helper-arm64 Resources/helper.arm64
 ldid -S../helper/entitlements.plist Resources/helper.arm64
 chmod +x Resources/helper.arm64
 
@@ -75,6 +86,11 @@ THEOS="$THEOS" make package FINALPACKAGE=1
 
 DEB=$(ls -t packages/com.korboy.ipadecrypt_*.deb | head -1)
 [ -n "$DEB" ] || { echo "no .deb produced" >&2; exit 1; }
+
+echo "built rootless package: $DEB"
+if [ "$NO_INSTALL" = "1" ]; then
+  exit 0
+fi
 
 REMOTE="/var/mobile/Documents/Downloads/$(basename "$DEB")"
 copy_to_iphone "$DEB" "$REMOTE"

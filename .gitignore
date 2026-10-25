@@ -24,3 +24,4 @@ helper/ipadecryptautoalert/obj/
 fairplay-decrypt/
 ipatool/
 .serena/
+/app/.unicorn-ios/

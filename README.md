@@ -94,8 +94,9 @@ To build and install the rootless app locally:
 ./app/build.sh
 ```
 
-The script builds the app, app-store helper, and daemon, installs the package
-on the phone, refreshes uicache, and opens `com.korboy.ipadecrypt`.
+The script builds the app, app-store helper, and daemon, bundles the committed
+`internal/device/ipadecrypt-helper-arm64`, installs the package on the phone,
+refreshes uicache, and opens `com.korboy.ipadecrypt`.
 
 To build the RootHide app package and upload it to the phone's Downloads
 folder:
@@ -107,6 +108,19 @@ folder:
 RootHide output still uses the same app UI and daemon model, but package files
 are built with `THEOS_PACKAGE_SCHEME=roothide` and runtime paths are resolved
 through the active RootHide jailbreak root.
+
+Pass `--no-install` (or set `IPADECRYPT_NO_INSTALL=1`) to either script to only
+build the `.deb` under `app/packages/` without touching the phone.
+
+The app-store helper runs Apple's App Store/FairPlay code under Unicorn, which
+has to be statically linked on iOS. Both scripts call
+`app/build_unicorn_ios.sh` (macOS + Xcode + cmake), which builds Unicorn 2.1.4
+for arm64 iOS once and caches it in `app/.unicorn-ios/`; set `UNICORN_IOS_LIB`
+to reuse a prebuilt archive. iOS does not allow writable+executable JIT pages,
+so the build patches Unicorn's code buffer to flip between RW and RX with
+`mprotect`, and the helper marks itself debugged through Dopamine's
+`jbctl proc_set_debugged` the first time it starts Unicorn. That requires a
+Dopamine (rootless or RootHide) jailbreak with `jbctl` in its basebin.
 
 ## Usage
 
