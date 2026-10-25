@@ -159,7 +159,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptNoUninstall, "no-uninstall", false, "never uninstall the app after decryption (default: uninstall only if we installed or replaced it)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")
 	decrypt.Flags().StringVar(&decryptKeep, "keep", "", "where to keep the decrypted IPA for this run: desktop, device, both")
-	decrypt.Flags().BoolVar(&decryptOffline, "offline", false, "decrypt on this machine with the minted FairPlay credential (see `ipadecrypt mint`) instead of installing and decrypting on the device")
+	decrypt.Flags().BoolVar(&decryptOffline, "offline", false, "decrypt on this machine with the minted FairPlay credential (run ipadecrypt mint first) instead of installing and decrypting on the device")
 
 	versions := &cobra.Command{
 		Use:     "versions <bundle-id|app-store-id|app-store-url>",
