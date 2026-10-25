@@ -188,6 +188,11 @@ func humanBytes(n int64) string {
 }
 
 func decryptHandler(cmd *cobra.Command, args []string) {
+	if decryptOffline {
+		offlineDecryptHandler(cmd, args)
+		return
+	}
+
 	if decryptFromAppStore && decryptUseInstalled {
 		tui.Err("--from-appstore and --use-installed are mutually exclusive; pass at most one.")
 		return
@@ -214,7 +219,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	upd := updater.Start(context.Background(), Version, cfg)
+	upd := updater.Start(context.Background(), resolveVersion(), cfg)
 	defer upd.Wait()
 
 	target, err := parseDecryptArg(args[0])
@@ -223,7 +228,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if cfg.Apple.Email == "" || cfg.Device.Host == "" {
+	if cfg.Device.Host == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
 
@@ -295,7 +300,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s (%s)", Version, cfg.Device.User, dev.Host(), probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak)
+	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s (%s)", resolveVersion(), cfg.Device.User, dev.Host(), probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak)
 
 	//
 	// Fuzzy resolution: if target looks like a search term (no dot), match
@@ -520,6 +525,16 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		tui.OK("%s v%s", appBundleID, appVersion)
 	} else {
+		// The App Store download path is the only branch that needs an Apple ID.
+		// Local .ipa and installed-app decryption work without it, so a config
+		// that skipped login (--skip-login) still runs those.
+		if cfg.Apple.Email == "" {
+			tui.Err("this app must be downloaded from the App Store, but no Apple ID is configured")
+			tui.Info("run `ipadecrypt bootstrap` (without --skip-login) to sign in, or decrypt a local .ipa or an installed app instead")
+
+			return
+		}
+
 		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 		if err != nil {
 			tui.Err("appstore client: %v", err)
@@ -554,11 +569,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		if app.Price > 0 {
-			live.Fail("paid app (price=%v) - unsupported", app.Price)
-			return
-		}
-
 		live.OK("found %s on App Store", app.BundleID)
 
 		live = tui.NewLive()
@@ -580,6 +590,10 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		if err != nil {
 			if errors.Is(err, errRemoteDownloadFailed) {
 				live.Fail("download failed: %v", errors.Unwrap(err))
+				return
+			}
+
+			if reportAppStoreDownloadError(live, acc, err) {
 				return
 			}
 
@@ -1086,11 +1100,6 @@ func selectAppStoreVersionForDecrypt(cfg *config.Config, paths *config.Paths, ta
 	app, err := lookupTargetApp(as, acc, target)
 	if err != nil {
 		live.Fail("lookup failed: %v", err)
-		return "", false
-	}
-
-	if app.Price > 0 {
-		live.Fail("paid app (price=%v) - unsupported", app.Price)
 		return "", false
 	}
 

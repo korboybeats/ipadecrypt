@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 )
 
 func TestNewCreatesCookieParentDirectory(t *testing.T) {
@@ -22,15 +24,15 @@ func TestNewCreatesCookieParentDirectory(t *testing.T) {
 		t.Fatalf("cookie parent directory was not created: %v", err)
 	}
 
-	client.http = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client.executorFor = fakeExecutorFor(func(op string, req apphttp.Request, raw []byte) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
 			Body:       http.NoBody,
 		}, nil
-	})}
+	})
 
-	if _, err := client.send(http.MethodGet, "https://example.test", nil, nil, formatXML, nil); err != nil {
+	if _, err := client.send("request", http.MethodGet, "https://example.test", nil, nil, nil, formatXML, nil); err != nil {
 		t.Fatalf("send returned error: %v", err)
 	}
 	if _, err := os.Stat(cookiesFile); err != nil {

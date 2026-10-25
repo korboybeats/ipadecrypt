@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/spf13/cobra"
@@ -11,13 +12,30 @@ import (
 
 var Version = "dev"
 
+// resolveVersion prefers the linker-injected Version, falling back to the
+// module version recorded by `go install` so those builds are identifiable.
+func resolveVersion() string {
+	if Version != "dev" {
+		return Version
+	}
+
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+
+	return Version
+}
+
 var (
 	rootDirOverride string
 	redactSensitive bool
 
 	authReset bool
 
-	bootstrapReset bool
+	bootstrapReset     bool
+	bootstrapSkipLogin bool
+
+	mintRemint bool
 
 	downloadExtVerID      string
 	downloadOutput        string
@@ -39,6 +57,7 @@ var (
 	decryptNoUninstall    bool
 	decryptVerbose        bool
 	decryptKeep           string
+	decryptOffline        bool
 
 	versionsStorefront   string
 	versionsLogResponses bool
@@ -72,7 +91,7 @@ func main() {
 		Use:     "ipadecrypt",
 		Short:   "End-to-end FairPlay decrypter for App Store apps",
 		Long:    "ipadecrypt is an end-to-end suite for decrypting encrypted IPAs from the App Store with minimal user interaction.\n\nRun `ipadecrypt bootstrap` first to sign in and verify your device.",
-		Version: Version,
+		Version: resolveVersion(),
 	}
 
 	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",
@@ -95,6 +114,16 @@ func main() {
 		Run:     bootstrapHandler,
 	}
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
+	bootstrap.Flags().BoolVar(&bootstrapSkipLogin, "skip-login", false, "do not log in to the App Store. App Store downloads won't work; installed apps and local .ipa files still decrypt")
+
+	mint := &cobra.Command{
+		Use:   "mint",
+		Short: "Mint the offline FairPlay credential used by `decrypt --offline` (one-time, needs root SSH)",
+		Long:  "Connects once to the jailbroken device over root SSH and extracts the reusable 16-byte FairPlay account credential for the configured Apple ID. `decrypt --offline` then decrypts App Store or local IPAs owned by that Apple ID without installing them on the device.",
+		Args:  cobra.NoArgs,
+		Run:   mintHandler,
+	}
+	mint.Flags().BoolVar(&mintRemint, "remint", false, "re-run credential minting even if one is already cached for the account")
 
 	download := &cobra.Command{
 		Use:     "download <bundle-id|app-store-id|app-store-url>",
@@ -130,6 +159,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptNoUninstall, "no-uninstall", false, "never uninstall the app after decryption (default: uninstall only if we installed or replaced it)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")
 	decrypt.Flags().StringVar(&decryptKeep, "keep", "", "where to keep the decrypted IPA for this run: desktop, device, both")
+	decrypt.Flags().BoolVar(&decryptOffline, "offline", false, "decrypt on this machine with the minted FairPlay credential (see `ipadecrypt mint`) instead of installing and decrypting on the device")
 
 	versions := &cobra.Command{
 		Use:     "versions <bundle-id|app-store-id|app-store-url>",
@@ -159,7 +189,7 @@ func main() {
 
 	update := newUpdateCommand()
 
-	root.AddCommand(auth, bootstrap, download, decrypt, versions, doctor, keep, update)
+	root.AddCommand(auth, bootstrap, mint, download, decrypt, versions, doctor, keep, update)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

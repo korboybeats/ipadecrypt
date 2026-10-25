@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	cookiejar "github.com/juju/persistent-cookiejar"
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"howett.net/plist"
 )
 
@@ -33,17 +34,17 @@ customerMessage = "MZFinance.BadLogin.Configurator_message";`)
 func TestSendReturnsClearRateLimitError(t *testing.T) {
 	client := &Client{
 		jar: &cookiejar.Jar{},
-		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		executorFor: fakeExecutorFor(func(op string, req apphttp.Request, raw []byte) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusTooManyRequests,
 				Header:     make(http.Header),
 				Body:       io.NopCloser(strings.NewReader("Rate limit has been exceeded for: mzauth|global|all")),
 			}, nil
-		})},
+		}),
 	}
 
 	var out loginResult
-	_, err := client.send(http.MethodPost, "https://example.test/auth", nil, nil, formatXML, &out)
+	_, err := client.send("authenticate", http.MethodPost, "https://example.test/auth", nil, nil, nil, formatXML, &out)
 	if err == nil {
 		t.Fatal("send returned nil error")
 	}
@@ -55,16 +56,16 @@ func TestSendReturnsClearRateLimitError(t *testing.T) {
 func TestSendReturnsRateLimitErrorWithoutDecodeTarget(t *testing.T) {
 	client := &Client{
 		jar: &cookiejar.Jar{},
-		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		executorFor: fakeExecutorFor(func(op string, req apphttp.Request, raw []byte) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusTooManyRequests,
 				Header:     make(http.Header),
 				Body:       io.NopCloser(strings.NewReader("Rate limit has been exceeded")),
 			}, nil
-		})},
+		}),
 	}
 
-	res, err := client.send(http.MethodPost, "https://example.test/auth", nil, nil, formatXML, nil)
+	res, err := client.send("authenticate", http.MethodPost, "https://example.test/auth", nil, nil, nil, formatXML, nil)
 	if err == nil || !strings.Contains(err.Error(), "apple auth is rate-limited (HTTP 429)") {
 		t.Fatalf("error = %v, want rate-limit message", err)
 	}
@@ -73,22 +74,22 @@ func TestSendReturnsRateLimitErrorWithoutDecodeTarget(t *testing.T) {
 	}
 }
 
-func TestSendPreservesDiscoveryURLAndRedactsDecodeError(t *testing.T) {
+func TestSendRedactsDecodeErrorAndKeepsURLs(t *testing.T) {
 	const secret = "supersecret"
 	client := &Client{
 		jar: &cookiejar.Jar{},
-		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		executorFor: fakeExecutorFor(func(op string, req apphttp.Request, raw []byte) (*http.Response, error) {
 			body := "passwordToken=" + secret + " https://auth.itunes.apple.com/auth/v1/native"
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"text/plain"}},
 				Body:       io.NopCloser(strings.NewReader(body)),
 			}, nil
-		})},
+		}),
 	}
 
 	var out loginResult
-	_, err := client.send(http.MethodPost, "https://example.test/auth", nil, nil, formatXML, &out)
+	_, err := client.send("authenticate", http.MethodPost, "https://example.test/auth", nil, nil, nil, formatXML, &out)
 	var decodeErr *ResponseDecodeError
 	if !errors.As(err, &decodeErr) {
 		t.Fatalf("error = %v, want *ResponseDecodeError", err)
@@ -96,9 +97,9 @@ func TestSendPreservesDiscoveryURLAndRedactsDecodeError(t *testing.T) {
 	if strings.Contains(decodeErr.Body, secret) {
 		t.Fatalf("decode body leaked secret: %q", decodeErr.Body)
 	}
-	want := "https://auth.itunes.apple.com/auth/v1/native/fast/"
-	if got := authEndpointFromResponseError(err); got != want {
-		t.Fatalf("discovered endpoint = %q, want %q", got, want)
+	want := "https://auth.itunes.apple.com/auth/v1/native"
+	if len(decodeErr.URLs) != 1 || decodeErr.URLs[0] != want {
+		t.Fatalf("decode URLs = %v, want [%s]", decodeErr.URLs, want)
 	}
 }
 
@@ -117,8 +118,23 @@ func TestResponsePreviewRedactsEverySensitiveOccurrence(t *testing.T) {
 	}
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
+// fakeExecutor stands in for the emulated AppleMediaServices backend so
+// send's response handling can be tested without the Store runtime.
+type fakeExecutor struct {
+	op   string
+	send func(op string, req apphttp.Request, raw []byte) (*http.Response, error)
+}
 
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
+func (f fakeExecutor) Send(req apphttp.Request, raw []byte) (*http.Response, error) {
+	return f.send(f.op, req, raw)
+}
+
+func (f fakeExecutor) Do(req *http.Request) (*http.Response, error) {
+	return nil, errors.New("fakeExecutor: Do not supported")
+}
+
+func fakeExecutorFor(send func(op string, req apphttp.Request, raw []byte) (*http.Response, error)) func(string) apphttp.Executor {
+	return func(op string) apphttp.Executor {
+		return fakeExecutor{op: op, send: send}
+	}
 }

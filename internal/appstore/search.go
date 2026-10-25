@@ -10,16 +10,16 @@ import (
 // info to disambiguate app-name collisions (e.g. several apps called
 // "Messenger" by different developers).
 type SearchResult struct {
-	ID                 int64   `json:"trackId,omitempty"`
-	BundleID           string  `json:"bundleId,omitempty"`
-	Name               string  `json:"trackName,omitempty"`
-	ArtistName         string  `json:"artistName,omitempty"`
-	Version            string  `json:"version,omitempty"`
-	Price              float64 `json:"price,omitempty"`
-	MinimumOSVersion   string  `json:"minimumOsVersion,omitempty"`
-	GenreName          string  `json:"primaryGenreName,omitempty"`
-	UserRatingCount    int     `json:"userRatingCount,omitempty"`
-	AverageUserRating  float64 `json:"averageUserRating,omitempty"`
+	ID                int64   `json:"trackId,omitempty"`
+	BundleID          string  `json:"bundleId,omitempty"`
+	Name              string  `json:"trackName,omitempty"`
+	ArtistName        string  `json:"artistName,omitempty"`
+	Version           string  `json:"version,omitempty"`
+	Price             float64 `json:"price,omitempty"`
+	MinimumOSVersion  string  `json:"minimumOsVersion,omitempty"`
+	GenreName         string  `json:"primaryGenreName,omitempty"`
+	UserRatingCount   int     `json:"userRatingCount,omitempty"`
+	AverageUserRating float64 `json:"averageUserRating,omitempty"`
 }
 
 type searchResponse struct {
@@ -48,7 +48,7 @@ func (c *Client) Search(acc *Account, term string, limit int) ([]SearchResult, e
 	u := fmt.Sprintf("https://%s/search?%s", iTunesDomain, q.Encode())
 
 	var out searchResponse
-	res, err := c.send(http.MethodGet, u, nil, nil, formatJSON, &out)
+	res, err := c.send("request", http.MethodGet, u, nil, nil, nil, formatJSON, &out)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}

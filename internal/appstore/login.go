@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 )
 
 type loginResult struct {
@@ -25,58 +27,63 @@ type loginResult struct {
 
 // Login authenticates against the App Store and returns the account.
 // Pass authCode when a prior call returned ErrAuthCodeRequired (2FA).
-// Internally fetches the bag to discover the authenticate endpoint.
+//
+// It fetches the bag to obtain the current SAP signing config, establishes a
+// machine-signing session, and signs the authenticate request body with it.
 func (c *Client) Login(email, password, authCode string) (*Account, error) {
-	endpoint, err := c.bag()
+	mac, err := macAddress()
 	if err != nil {
 		return nil, err
 	}
 
-	g, err := guid()
+	guid, machineID, err := machineIdentity(mac)
 	if err != nil {
 		return nil, err
 	}
 
-	authEndpoint := normalizeAuthEndpoint(endpoint)
-	url := authEndpoint
+	config, err := c.bag()
+	if err != nil {
+		return nil, err
+	}
+
+	signer, err := c.actionSignerFactory(config, machineID)
+	if err != nil {
+		return nil, fmt.Errorf("initialize SAP action signer: %w", err)
+	}
+
+	// Teardown frees the machine-signing session on every exit path.
+	defer func() { _ = signer.Close() }()
+
+	url := config.AuthEndpoint
 
 	var (
 		res *http.Response
 		out loginResult
 	)
 
+	redirect := false
+
 	for attempt := 1; attempt <= 4; attempt++ {
-		body, err := plistBody(map[string]any{
+		// The pod redirect is part of the same authentication attempt: Apple
+		// expects the original XML plist body, including its attempt value.
+		requestAttempt := attempt
+		if redirect {
+			requestAttempt = 1
+		}
+
+		out = loginResult{}
+
+		res, err = c.send("authenticate", http.MethodPost, url, map[string]string{
+			"Content-Type": "application/x-www-form-urlencoded",
+		}, &apphttp.XMLPayload{Content: map[string]any{
 			"appleId":  email,
-			"attempt":  strconv.Itoa(attempt),
-			"guid":     g,
+			"attempt":  strconv.Itoa(requestAttempt),
+			"guid":     guid,
 			"password": password + strings.ReplaceAll(authCode, " ", ""),
 			"rmp":      "0",
 			"why":      "signIn",
-		})
+		}}, signer, formatXML, &out)
 		if err != nil {
-			return nil, err
-		}
-
-		discoveryRetried := false
-		for {
-			out = loginResult{}
-
-			res, err = c.send(http.MethodPost, url, map[string]string{
-				"Content-Type": "application/x-www-form-urlencoded",
-			}, body, formatXML, &out)
-			if err == nil {
-				break
-			}
-
-			discoveredEndpoint := authEndpointFromResponseError(err)
-			if !discoveryRetried && discoveredEndpoint != "" && discoveredEndpoint != authEndpoint {
-				authEndpoint = discoveredEndpoint
-				url = authEndpoint
-				discoveryRetried = true
-				continue
-			}
-
 			return nil, fmt.Errorf("login: %w", err)
 		}
 
@@ -89,8 +96,11 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 			break
 		}
 
+		// An empty next means "try again" on the same endpoint (invalid
+		// credentials on attempt 1); only a 302 moves us to a new pod.
 		if next != "" {
 			url = next
+			redirect = true
 		}
 	}
 
@@ -113,7 +123,7 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 
 // interpretLogin classifies an authenticate response.
 // Returns (nextURL, retry, err):
-//   - retry=true with nextURL set: follow the 302 redirect.
+//   - retry=true with nextURL set: follow the 302 redirect to a store pod.
 //   - retry=true with empty nextURL: server said "try again" (invalid-cred on attempt 1).
 //   - retry=false, err=nil: login succeeded.
 //   - retry=false, err!=nil: login failed permanently.
@@ -122,6 +132,10 @@ func interpretLogin(res *http.Response, out *loginResult, attempt int, authCode 
 		loc := res.Header.Get("Location")
 		if loc == "" {
 			return "", false, errors.New("login: redirect without Location")
+		}
+
+		if err := validateAuthenticationEndpoint(loc); err != nil {
+			return "", false, err
 		}
 
 		return loc, true, nil
@@ -134,6 +148,7 @@ func interpretLogin(res *http.Response, out *loginResult, attempt int, authCode 
 		if out.CustomerMessage != "" {
 			return "", false, fmt.Errorf("%w: %s", ErrInvalidCredentials, out.CustomerMessage)
 		}
+
 		return "", false, ErrInvalidCredentials
 	}
 
@@ -150,11 +165,11 @@ func interpretLogin(res *http.Response, out *loginResult, attempt int, authCode 
 			return "", false, errors.New(out.CustomerMessage)
 		}
 
-		return "", false, errors.New("login failed")
+		return "", false, fmt.Errorf("login failed (failureType %s)", out.FailureType)
 	}
 
 	if res.StatusCode != http.StatusOK || out.PasswordToken == "" || out.DirectoryServicesID == "" {
-		return "", false, errors.New("login failed")
+		return "", false, fmt.Errorf("login failed (HTTP %d)", res.StatusCode)
 	}
 
 	return "", false, nil

@@ -30,6 +30,7 @@ This fork adds a handful of QoL features on top of upstream:
 - **RootHide-aware device workspace.** RootHide device files are kept under `/rootfs/private/var/mobile/Documents/ipadecrypt/`.
 - **Faster IPA post-processing.** Metadata/Watch cleanup is combined into one scanned pass and skips rewriting entirely when there is nothing to remove. Cryptid verification streams Mach-O load commands instead of reading whole binaries into memory.
 - **~60× faster install check.** Replaced the per-file shell loop with a single `grep` over all top-level Info.plists.
+- **Optional offline decryption (from upstream).** `ipadecrypt mint` extracts a reusable per-account FairPlay credential over root SSH once; after that `ipadecrypt decrypt --offline <target>` downloads and decrypts on the computer with no device in the loop. The device-based flow above stays the default.
 - **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `-dl` (download), `-a`/`auth` (refresh Apple ID auth), `-k` (keep policy), `-u` (update).
 
 ## Requirements
@@ -123,6 +124,29 @@ A five-step interactive wizard:
 4. **Helper install** - uploads helper binary and verifies whether it runs.
 5. **Auto-confirm tweak** - optionally installs `ipadecryptautoalert`, a SpringBoard tweak that auto-taps the older-version `Download` prompt during **Latest iOS-compatible** installs.
 
+Pass `--skip-login` to skip step 1 when you only need the device steps (for
+example decrypting already-installed apps). The first App Store sign-in also
+downloads and caches the Apple frameworks the App Store engine emulates
+(tens of MB) under your user cache directory (`ipadecrypt/sap`); later runs
+reuse the cache.
+
+### Offline decryption (optional)
+
+```sh
+ipadecrypt mint                  # one-time, per Apple account
+ipadecrypt decrypt --offline <bundle-id|app-store-id|app-store-url|search-term>
+```
+
+`mint` connects to the configured device as `root` over SSH (it prompts for
+the root password if the saved SSH user is not root; that password is not
+saved), extracts the account's 16-byte FairPlay credential, and caches it in
+`~/ipadecrypt/credentials/<dsid>.bin`. It skips minting when a credential is
+already cached; pass `--remint` to force. The device needs at least one App
+Store app owned by the same Apple ID installed.
+
+`--offline` downloads the encrypted IPA and decrypts it on the computer with
+that credential. Output goes to `~/ipadecrypt/decrypted/` by default.
+
 ### Refresh Apple ID auth
 
 ```sh
@@ -209,6 +233,7 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 
 - [New, unsupported SC_Info format is shipped with some apps, ipadecrypt will fail to decrypt them.](https://github.com/londek/ipadecrypt/issues/34)
 - Due to arm64e PPL guards on A12+, some apps such as Apple's are not expected to work.
+- `--offline` only decrypts the supported SINF/SUPF license formats, and the credential is per Apple account: you must sign in with (and have minted from) the account that owns the app.
 
 ## License
 
@@ -216,6 +241,7 @@ MIT.
 
 ## Prior art
 
+- [EthanArbuckle/fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) - the offline FairPlay decryptor and credential-minting approach `--offline` is a Go port of.
 - [majd/ipatool](https://github.com/majd/ipatool) - the Apple Configurator impersonation the App Store client is based on.
 - [34306/TrollDecryptJB](https://github.com/34306/TrollDecryptJB) - `task_for_pid` + `mach_vm_read` from a suspended spawn, entitlement set.
 - [akemin-dayo/AppSync](https://github.com/akemin-dayo/AppSync) - installd signature-bypass tweak + `appinst`.
@@ -225,10 +251,10 @@ MIT.
 
 This project was developed with the assistance of AI tools. While I can't guarantee the accuracy of all AI-generated content, I have overviewed creation process and then reviewed, tested the code to ensure it meets the project's requirements.
 
-<a href="https://www.star-history.com/?repos=londek%2Fipadecrypt&type=date&legend=top-left">
+<a href="https://star-history.dera.page/#londek/ipadecrypt&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=londek/ipadecrypt&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=londek/ipadecrypt&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=londek/ipadecrypt&type=date&legend=top-left" />
  </picture>
 </a>

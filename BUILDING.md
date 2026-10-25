@@ -7,6 +7,13 @@ ipadecrypt has two parts:
 
 For regular development you only need the CLI; the prebuilt helper is committed at `internal/device/ipadecrypt-helper-arm64`. Rebuilding the helper requires Docker.
 
+The optional offline mode (`ipadecrypt mint` + `decrypt --offline`) also embeds
+a device mint bundle under `internal/credmint/bundle/` (three signed arm64 iOS
+programs plus two data blobs). It is committed, so a plain `go build` is
+mint-capable; see [`internal/credmint/toolchain/README.md`](internal/credmint/toolchain/README.md)
+to rebuild it. The offline App Store engine needs a 64-bit host, so there are
+no 32-bit (`386`) CLI builds.
+
 ## Prerequisites
 
 ### CLI only (cross-platform)

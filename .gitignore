@@ -19,3 +19,8 @@ dist/
 helper/ipadecryptautoalert/packages/
 helper/ipadecryptautoalert/obj/
 .DS_Store
+
+# Vendored reference clones (untracked research sources)
+fairplay-decrypt/
+ipatool/
+.serena/

@@ -67,11 +67,6 @@ func downloadHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if app.Price > 0 {
-		live.Fail("paid app (price=%v) - unsupported", app.Price)
-		return
-	}
-
 	live.OK("found %s on App Store", app.BundleID)
 
 	if downloadSelectVersion {
@@ -177,6 +172,10 @@ func fetchDownloadSource(cfg *config.Config, paths *config.Paths, as *appstore.C
 	if err != nil {
 		if errors.Is(err, errRemoteDownloadFailed) {
 			live.Fail("download failed: %v", errors.Unwrap(err))
+			return remoteSourceDisposition{}, err
+		}
+
+		if reportAppStoreDownloadError(live, cfg.Apple.Account(), err) {
 			return remoteSourceDisposition{}, err
 		}
 

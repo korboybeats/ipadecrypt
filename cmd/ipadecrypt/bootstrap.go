@@ -22,7 +22,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	upd := updater.Start(context.Background(), Version, cfg)
+	upd := updater.Start(context.Background(), resolveVersion(), cfg)
 	defer upd.Wait()
 
 	if bootstrapReset {
@@ -36,35 +36,10 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	// ---- Step 1: App Store sign-in -----------------------------------
 
-	tui.Step(1, 5, "Sign in to the App Store")
-	tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
-
-	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
-	if err != nil {
-		tui.Err("appstore client: %v", err)
-		return
-	}
-
-	account, err := authenticateApple(cfg, as)
-	if err != nil {
-		tui.Err("%v", err)
-		return
-	}
-
-	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
-	if err != nil {
-		tui.Err("resolve appstore country code: %v", err)
-		return
-	}
-
-	tui.Fields(
-		"Apple ID", redact(account.Email),
-		"Name", account.Name,
-		"Storefront", fmt.Sprintf("%s (%s)", redact(account.StoreFront), redact(appStoreCountry)),
-	)
-
-	if err := cfg.Save(); err != nil {
-		tui.Err("save config: %v", err)
+	if bootstrapSkipLogin {
+		tui.Step(1, 5, "Sign in to the App Store (skipped)")
+		tui.Info("skipped - App Store downloads are disabled.\nInstalled apps and local .ipa files can still be decrypted.")
+	} else if !bootstrapSignIn(cfg, paths) {
 		return
 	}
 
@@ -357,4 +332,44 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	tui.Spacer()
 	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>` to decrypt an app")
+	tui.Info("optional: run `ipadecrypt mint` once to enable device-free `ipadecrypt decrypt --offline`")
+}
+
+// bootstrapSignIn runs step 1 (App Store sign-in) and persists the account.
+// It reports whether bootstrap should continue.
+func bootstrapSignIn(cfg *config.Config, paths *config.Paths) bool {
+	tui.Step(1, 5, "Sign in to the App Store")
+	tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
+	tui.Info("The first sign-in runs a one-time machine-signing step and can take a few minutes.")
+
+	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+	if err != nil {
+		tui.Err("appstore client: %v", err)
+		return false
+	}
+
+	account, err := authenticateApple(cfg, as)
+	if err != nil {
+		tui.Err("%v", err)
+		return false
+	}
+
+	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
+	if err != nil {
+		tui.Err("resolve appstore country code: %v", err)
+		return false
+	}
+
+	tui.Fields(
+		"Apple ID", redact(account.Email),
+		"Name", account.Name,
+		"Storefront", fmt.Sprintf("%s (%s)", redact(account.StoreFront), redact(appStoreCountry)),
+	)
+
+	if err := cfg.Save(); err != nil {
+		tui.Err("save config: %v", err)
+		return false
+	}
+
+	return true
 }

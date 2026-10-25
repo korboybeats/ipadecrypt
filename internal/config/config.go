@@ -74,6 +74,11 @@ func (a *Apple) SetAccount(acc *appstore.Account) {
 	a.Pod = acc.Pod
 }
 
+// Device describes the jailbroken device reached over SSH. The on-device
+// decrypt flow uses Host (comma-separated for failover), Port, User, Auth and
+// the host-key fields. Minting the offline FairPlay credential needs root SSH;
+// when USB is set the mint connection is tunnelled over USB with iproxy (UDID
+// selects the device).
 type Device struct {
 	Host             string     `json:"host,omitempty"`
 	Port             int        `json:"port,omitempty"`
@@ -81,6 +86,8 @@ type Device struct {
 	Auth             DeviceAuth `json:"auth,omitempty"`
 	KnownHostsPath   string     `json:"knownHostsPath,omitempty"`
 	AcceptNewHostKey bool       `json:"acceptNewHostKey,omitempty"`
+	UDID             string     `json:"udid,omitempty"`
+	USB              bool       `json:"usb,omitempty"`
 }
 
 type DeviceAuth struct {
