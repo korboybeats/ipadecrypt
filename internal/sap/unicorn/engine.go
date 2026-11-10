@@ -47,22 +47,30 @@ var (
 )
 
 type api struct {
-	version  func(*uint32, *uint32) uint32
-	open     func(int32, int32, *uintptr) int32
-	close    func(uintptr) int32
-	query    func(uintptr, int32, *uint64) int32
-	ctl      func(uintptr, uint32, uint32) int32
-	strerror func(int32) string
-	memMap   func(uintptr, uint64, uint64, uint32) int32
-	memUnmap func(uintptr, uint64, uint64) int32
-	memRead  func(uintptr, uint64, unsafe.Pointer, uint64) int32
-	memWrite func(uintptr, uint64, unsafe.Pointer, uint64) int32
-	regRead  func(uintptr, int32, unsafe.Pointer) int32
-	regWrite func(uintptr, int32, unsafe.Pointer) int32
-	emuStart func(uintptr, uint64, uint64, uint64, uint64) int32
-	emuStop  func(uintptr) int32
-	hookAdd  func(uintptr, *uintptr, int32, uintptr, uintptr, uint64, uint64) int32
-	hookDel  func(uintptr, uintptr) int32
+	version        func(*uint32, *uint32) uint32
+	open           func(int32, int32, *uintptr) int32
+	close          func(uintptr) int32
+	query          func(uintptr, int32, *uint64) int32
+	ctl            func(uintptr, uint32, uint32) int32
+	strerror       func(int32) string
+	memMap         func(uintptr, uint64, uint64, uint32) int32
+	memUnmap       func(uintptr, uint64, uint64) int32
+	memRead        func(uintptr, uint64, unsafe.Pointer, uint64) int32
+	memWrite       func(uintptr, uint64, unsafe.Pointer, uint64) int32
+	regRead        func(uintptr, int32, unsafe.Pointer) int32
+	regWrite       func(uintptr, int32, unsafe.Pointer) int32
+	emuStart       func(uintptr, uint64, uint64, uint64, uint64) int32
+	emuStop        func(uintptr) int32
+	hookAdd        func(uintptr, *uintptr, int32, uintptr, uintptr, uint64, uint64) int32
+	hookDel        func(uintptr, uintptr) int32
+	contextAlloc   func(uintptr, *uintptr) int32
+	contextSave    func(uintptr, uintptr) int32
+	contextRestore func(uintptr, uintptr) int32
+	contextFree    func(uintptr) int32
+}
+
+type startFrame struct {
+	deferred func() error
 }
 
 type Engine struct {
@@ -76,6 +84,9 @@ type Engine struct {
 	closing     bool
 	closeDone   chan struct{}
 	closeErr    error
+
+	frameMu sync.Mutex
+	frames  []*startFrame
 }
 
 func New(ctx context.Context) (*Engine, error) {
@@ -166,6 +177,10 @@ func (e *Engine) register(handle uintptr) {
 	purego.RegisterLibFunc(&e.api.emuStop, handle, "uc_emu_stop")
 	purego.RegisterLibFunc(&e.api.hookAdd, handle, "uc_hook_add")
 	purego.RegisterLibFunc(&e.api.hookDel, handle, "uc_hook_del")
+	purego.RegisterLibFunc(&e.api.contextAlloc, handle, "uc_context_alloc")
+	purego.RegisterLibFunc(&e.api.contextSave, handle, "uc_context_save")
+	purego.RegisterLibFunc(&e.api.contextRestore, handle, "uc_context_restore")
+	purego.RegisterLibFunc(&e.api.contextFree, handle, "uc_context_free")
 }
 
 func (e *Engine) MemMap(address, size uint64) error {
@@ -295,18 +310,7 @@ func (e *Engine) RegWrite128(register int, value [16]byte) error {
 }
 
 func (e *Engine) Start(begin, end uint64) error {
-	handle, done, err := e.beginOperation()
-	if err != nil {
-		return err
-	}
-
-	defer done()
-
-	if err := e.executionError(nil); err != nil {
-		return err
-	}
-
-	return e.executionError(e.err(e.api.emuStart(handle, begin, end, 0, 0)))
+	return e.runEmulation(begin, end, 0, 0, false, 0)
 }
 
 func (e *Engine) StartBounded(begin, end uint64, timeout time.Duration, instructionLimit uint64) error {
@@ -314,36 +318,95 @@ func (e *Engine) StartBounded(begin, end uint64, timeout time.Duration, instruct
 		return errors.New("unicorn timeout must be positive")
 	}
 
-	microseconds := uint64(timeout / time.Microsecond)
-	if microseconds == 0 {
-		microseconds = 1
+	return e.runEmulation(begin, end, 0, instructionLimit, true, timeout)
+}
+
+// runEmulation starts the guest and, if a hook deferred more work (typically a
+// nested uc_emu_start on another engine), runs that work only after this
+// uc_emu_start has returned, then resumes at the PC the work selected.
+//
+// Nested uc_emu_start from inside a hook is unsafe: Unicorn/TCG is not
+// re-entrant, and the iOS W^X adapter mprotects every registered JIT buffer
+// at once, which would make the outer engine's executing pages non-executable
+// (SIGBUS).
+func (e *Engine) runEmulation(begin, end, microseconds, instructionLimit uint64, checkTimeout bool, timeout time.Duration) error {
+	if err := e.pushFrame(); err != nil {
+		return err
+	}
+	defer e.popFrame()
+
+	deadline := time.Time{}
+	if checkTimeout {
+		deadline = time.Now().Add(timeout)
 	}
 
+	next := begin
+	for {
+		us := microseconds
+		if checkTimeout {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return fmt.Errorf("%w after %s", errTimeout, timeout)
+			}
+			us = uint64(remaining / time.Microsecond)
+			if us == 0 {
+				us = 1
+			}
+		}
+
+		startErr := e.emuStartOnce(next, end, us, instructionLimit)
+		work, ok := e.takeDeferred()
+		if !ok {
+			if startErr != nil {
+				return startErr
+			}
+			if !checkTimeout {
+				return nil
+			}
+			handle, done, err := e.beginOperation()
+			if err != nil {
+				return err
+			}
+			var timedOut uint64
+			queryErr := e.err(e.api.query(handle, queryTimeout, &timedOut))
+			done()
+			if queryErr != nil {
+				return fmt.Errorf("query Unicorn timeout: %w", queryErr)
+			}
+			if timedOut != 0 {
+				return fmt.Errorf("%w after %s", errTimeout, timeout)
+			}
+			return nil
+		}
+
+		if err := work(); err != nil {
+			return err
+		}
+
+		pc, err := e.RegRead(RegPC)
+		if err != nil {
+			return fmt.Errorf("read resume PC after deferred hook work: %w", err)
+		}
+		// Unicorn stops when PC equals the until address, without fetching it.
+		if end != 0 && pc == end {
+			return nil
+		}
+		next = pc
+	}
+}
+
+func (e *Engine) emuStartOnce(begin, end, microseconds, instructionLimit uint64) error {
 	handle, done, err := e.beginOperation()
 	if err != nil {
 		return err
 	}
-
 	defer done()
 
 	if err := e.executionError(nil); err != nil {
 		return err
 	}
 
-	if err := e.executionError(e.err(e.api.emuStart(handle, begin, end, microseconds, instructionLimit))); err != nil {
-		return err
-	}
-
-	var timedOut uint64
-	if err := e.err(e.api.query(handle, queryTimeout, &timedOut)); err != nil {
-		return fmt.Errorf("query Unicorn timeout: %w", err)
-	}
-
-	if timedOut != 0 {
-		return fmt.Errorf("%w after %s", errTimeout, timeout)
-	}
-
-	return nil
+	return e.executionError(e.err(e.api.emuStart(handle, begin, end, microseconds, instructionLimit)))
 }
 
 func (e *Engine) Stop() error {

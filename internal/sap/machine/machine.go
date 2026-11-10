@@ -499,6 +499,20 @@ func (m *Machine) invoke(function uint64, arguments ...uint64) (uint64, error) {
 		return 0, errors.New("SAP guest entry point is unavailable")
 	}
 
+	snapshot, err := m.engine.SaveContext()
+	if err != nil {
+		return 0, fmt.Errorf("save SAP guest context: %w", err)
+	}
+	defer func() { _ = snapshot.Close() }()
+
+	status, invokeErr := m.runInvoke(function, arguments...)
+	if restoreErr := m.engine.RestoreContext(snapshot); invokeErr == nil && restoreErr != nil {
+		return 0, fmt.Errorf("restore SAP guest context: %w", restoreErr)
+	}
+	return status, invokeErr
+}
+
+func (m *Machine) runInvoke(function uint64, arguments ...uint64) (uint64, error) {
 	registers := [...]int{
 		unicorn.RegX0,
 		unicorn.RegX1,

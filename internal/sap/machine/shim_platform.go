@@ -189,17 +189,20 @@ func (s *shims) machMsgRPCFromKernel() error {
 	if s.machRPCHandler == nil {
 		return errors.New("kernel Mach RPC handler is unavailable")
 	}
-	reply, err := s.machRPCHandler(request, int(receiveSize))
-	if err != nil {
-		return err
-	}
-	if len(reply) == 0 || len(reply) > int(receiveSize) {
-		return errors.New("kernel Mach RPC reply is invalid")
-	}
-	if err := s.engine.MemWrite(message, reply); err != nil {
-		return fmt.Errorf("write kernel Mach RPC reply: %w", err)
-	}
-	return s.setResult(0)
+
+	return s.finishShimCall(func() error {
+		reply, err := s.machRPCHandler(request, int(receiveSize))
+		if err != nil {
+			return err
+		}
+		if len(reply) == 0 || len(reply) > int(receiveSize) {
+			return errors.New("kernel Mach RPC reply is invalid")
+		}
+		if err := s.engine.MemWrite(message, reply); err != nil {
+			return fmt.Errorf("write kernel Mach RPC reply: %w", err)
+		}
+		return s.setResult(0)
+	})
 }
 
 func (s *shims) machMsg() error {
@@ -573,46 +576,47 @@ func (s *shims) ioConnectCallStructMethod() error {
 			return fmt.Errorf("read FairPlay IOKit indirect buffer: %w", err)
 		}
 	}
-	var output, indirectOutput []byte
-	var code int32
 	if s.fairPlayHandler == nil {
 		return errors.New("emulated FairPlay IOKit handler is unavailable")
 	}
-	output, indirectOutput, code, hostErr := s.fairPlayHandler(input, indirect, int(outputSize))
-	if hostErr == nil && code != 0 && selector == 26 && len(indirect) >= 16 && len(input) == int(outputSize) {
-		indirectOutput = append([]byte(nil), indirect...)
-		digest := sha256.Sum256(indirectOutput[:len(indirectOutput)-16])
-		copy(indirectOutput[len(indirectOutput)-16:], digest[:16])
-		output = append([]byte(nil), input...)
-		code = 0
-	}
-	if hostErr != nil {
-		return hostErr
-	}
-	if len(indirectOutput) != 0 {
-		if err := s.engine.MemWrite(indirectAddress, indirectOutput); err != nil {
-			return fmt.Errorf("write FairPlay IOKit indirect buffer: %w", err)
+
+	return s.finishShimCall(func() error {
+		output, indirectOutput, code, hostErr := s.fairPlayHandler(input, indirect, int(outputSize))
+		if hostErr == nil && code != 0 && selector == 26 && len(indirect) >= 16 && len(input) == int(outputSize) {
+			indirectOutput = append([]byte(nil), indirect...)
+			digest := sha256.Sum256(indirectOutput[:len(indirectOutput)-16])
+			copy(indirectOutput[len(indirectOutput)-16:], digest[:16])
+			output = append([]byte(nil), input...)
+			code = 0
 		}
-		if len(output) >= 8 {
-			binary.LittleEndian.PutUint64(output[:8], indirectAddress)
+		if hostErr != nil {
+			return hostErr
 		}
-	}
-	outputAddress, err := s.argument(4)
-	if err != nil {
-		return err
-	}
-	if len(output) != 0 {
-		if err := s.engine.MemWrite(outputAddress, output); err != nil {
-			return fmt.Errorf("write FairPlay IOKit output: %w", err)
+		if len(indirectOutput) != 0 {
+			if err := s.engine.MemWrite(indirectAddress, indirectOutput); err != nil {
+				return fmt.Errorf("write FairPlay IOKit indirect buffer: %w", err)
+			}
+			if len(output) >= 8 {
+				binary.LittleEndian.PutUint64(output[:8], indirectAddress)
+			}
 		}
-	}
-	if outputSizeAddress != 0 {
-		if err := s.writeUint64(outputSizeAddress, uint64(len(output))); err != nil {
+		outputAddress, err := s.argument(4)
+		if err != nil {
 			return err
 		}
-	}
+		if len(output) != 0 {
+			if err := s.engine.MemWrite(outputAddress, output); err != nil {
+				return fmt.Errorf("write FairPlay IOKit output: %w", err)
+			}
+		}
+		if outputSizeAddress != 0 {
+			if err := s.writeUint64(outputSizeAddress, uint64(len(output))); err != nil {
+				return err
+			}
+		}
 
-	return s.setResult(uint64(uint32(code)))
+		return s.setResult(uint64(uint32(code)))
+	})
 }
 
 func (s *shims) ioMainPort() error {

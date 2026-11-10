@@ -222,6 +222,29 @@ func (s *shims) dispatch(address uint64, _ uint32) {
 	}
 }
 
+// finishShimCall runs the host body of a shim that may start another Unicorn
+// engine (FairPlay IOKit / Mach RPC). The stub is a single RET; we stop the
+// current uc_emu_start, run the body after it returns, then resume at LR so
+// the hook is not re-entered and iOS W^X JIT pages are not flipped mid-hook.
+func (s *shims) finishShimCall(body func() error) error {
+	if body == nil {
+		return errors.New("shim body is nil")
+	}
+
+	return s.engine.DeferAndStop(func() error {
+		if err := body(); err != nil {
+			return err
+		}
+
+		link, err := s.engine.RegRead(unicorn.RegLR)
+		if err != nil {
+			return fmt.Errorf("read shim return address: %w", err)
+		}
+
+		return s.engine.RegWrite(unicorn.RegPC, link)
+	})
+}
+
 func (s *shims) fail(err error) {
 	if s.fault == nil {
 		s.fault = err

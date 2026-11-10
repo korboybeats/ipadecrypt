@@ -45,6 +45,7 @@ func main() {
 	var authOnly bool
 	var authStatus bool
 	var prefetchAssets bool
+	var probeModernADI bool
 	var externalVersionID string
 	var decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA string
 	flag.StringVar(&bundleID, "bundle-id", "", "bundle identifier")
@@ -55,6 +56,7 @@ func main() {
 	flag.BoolVar(&authOnly, "auth-only", false, "refresh App Store authentication and exit")
 	flag.BoolVar(&authStatus, "auth-status", false, "report whether complete saved App Store authentication is available")
 	flag.BoolVar(&prefetchAssets, "prefetch-assets", false, "download and cache Anisette/SAP support files without signing in")
+	flag.BoolVar(&probeModernADI, "probe-modern-adi", false, "open the cached Modern ADI/FairPlay runtime without signing in or contacting Apple")
 	flag.StringVar(&externalVersionID, "external-version-id", "", "pin to a specific historical App Store version")
 	flag.StringVar(&decryptHelper, "decrypt-helper", "", "run decrypt helper and relay events")
 	flag.StringVar(&decryptBundleID, "decrypt-bundle-id", "", "bundle identifier for decrypt helper")
@@ -63,7 +65,7 @@ func main() {
 	flag.Parse()
 
 	var err error
-	if credentialsNeeded(authOnly, prefetchAssets, authStatus, bundleID != "" || trackID != "", verifyIPA != "", decryptHelper != "") {
+	if !probeModernADI && credentialsNeeded(authOnly, prefetchAssets, authStatus, bundleID != "" || trackID != "", verifyIPA != "", decryptHelper != "") {
 		email, password, authCode, err = readCredentialsFromStdin(os.Stdin, os.Stdin)
 		if err != nil {
 			fail(1, "credentials", err.Error())
@@ -76,6 +78,16 @@ func main() {
 		}
 		if err := runPrefetchAssets(); err != nil {
 			fail(1, "prefetch-failed", err.Error())
+		}
+		return
+	}
+
+	if probeModernADI {
+		if err := ensureUnicornJITReady(); err != nil {
+			fail(22, "jit-not-ready", err.Error())
+		}
+		if err := runProbeModernADI(); err != nil {
+			fail(1, "probe-modern-adi-failed", err.Error())
 		}
 		return
 	}
