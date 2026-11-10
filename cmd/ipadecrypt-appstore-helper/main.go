@@ -37,6 +37,10 @@ type installedApp struct {
 	Path     string
 }
 
+// unicornIOSLibMtime is set at link time from the iOS Unicorn archive mtime
+// so a library rebuild cannot be ignored by the Go link cache.
+var unicornIOSLibMtime string
+
 func main() {
 	var bundleID, trackID, email, password, authCode string
 	var verifyIPA string
@@ -46,6 +50,7 @@ func main() {
 	var authStatus bool
 	var prefetchAssets bool
 	var probeModernADI bool
+	var probeStoreAMD bool
 	var externalVersionID string
 	var decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA string
 	flag.StringVar(&bundleID, "bundle-id", "", "bundle identifier")
@@ -57,6 +62,7 @@ func main() {
 	flag.BoolVar(&authStatus, "auth-status", false, "report whether complete saved App Store authentication is available")
 	flag.BoolVar(&prefetchAssets, "prefetch-assets", false, "download and cache Anisette/SAP support files without signing in")
 	flag.BoolVar(&probeModernADI, "probe-modern-adi", false, "open the cached Modern ADI/FairPlay runtime without signing in or contacting Apple")
+	flag.BoolVar(&probeStoreAMD, "probe-store-amd", false, "run the Store AMD login-header path offline with a dummy identity and no Apple HTTP")
 	flag.StringVar(&externalVersionID, "external-version-id", "", "pin to a specific historical App Store version")
 	flag.StringVar(&decryptHelper, "decrypt-helper", "", "run decrypt helper and relay events")
 	flag.StringVar(&decryptBundleID, "decrypt-bundle-id", "", "bundle identifier for decrypt helper")
@@ -65,7 +71,7 @@ func main() {
 	flag.Parse()
 
 	var err error
-	if !probeModernADI && credentialsNeeded(authOnly, prefetchAssets, authStatus, bundleID != "" || trackID != "", verifyIPA != "", decryptHelper != "") {
+	if !probeModernADI && !probeStoreAMD && credentialsNeeded(authOnly, prefetchAssets, authStatus, bundleID != "" || trackID != "", verifyIPA != "", decryptHelper != "") {
 		email, password, authCode, err = readCredentialsFromStdin(os.Stdin, os.Stdin)
 		if err != nil {
 			fail(1, "credentials", err.Error())
@@ -88,6 +94,16 @@ func main() {
 		}
 		if err := runProbeModernADI(); err != nil {
 			fail(1, "probe-modern-adi-failed", err.Error())
+		}
+		return
+	}
+
+	if probeStoreAMD {
+		if err := ensureUnicornJITReady(); err != nil {
+			fail(22, "jit-not-ready", err.Error())
+		}
+		if err := runProbeStoreAMD(); err != nil {
+			fail(1, "probe-store-amd-failed", err.Error())
 		}
 		return
 	}

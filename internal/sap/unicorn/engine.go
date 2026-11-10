@@ -327,6 +327,9 @@ func (e *Engine) RegWrite128(register int, value [16]byte) error {
 }
 
 func (e *Engine) Start(begin, end uint64) error {
+	if err := rejectNestedStart(e); err != nil {
+		return err
+	}
 	return e.runEmulation(begin, end, 0, 0, false, 0)
 }
 
@@ -334,7 +337,9 @@ func (e *Engine) StartBounded(begin, end uint64, timeout time.Duration, instruct
 	if timeout <= 0 {
 		return errors.New("unicorn timeout must be positive")
 	}
-
+	if err := rejectNestedStart(e); err != nil {
+		return err
+	}
 	return e.runEmulation(begin, end, 0, instructionLimit, true, timeout)
 }
 

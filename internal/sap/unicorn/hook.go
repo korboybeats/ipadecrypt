@@ -29,6 +29,12 @@ type Hook struct {
 	id     uintptr
 }
 
+type registeredHook struct {
+	engine *Engine
+	code   CodeHook
+	fault  MemoryFaultHook
+}
+
 var (
 	codeHookID         atomic.Uint64
 	codeHookCallbacks  sync.Map
@@ -40,8 +46,14 @@ var (
 		userData uintptr,
 	) uintptr {
 		callback, ok := codeHookCallbacks.Load(userData)
-		if ok {
-			callback.(CodeHook)(address, size)
+		if !ok {
+			return 0
+		}
+		h := callback.(registeredHook)
+		enterHook(h.engine)
+		defer leaveHook()
+		if h.code != nil {
+			h.code(address, size)
 		}
 
 		return 0
@@ -50,7 +62,13 @@ var (
 		_ purego.CDecl, _ uintptr, _ int32, address uint64, size int32, _ int64, userData uintptr,
 	) uintptr {
 		callback, ok := codeHookCallbacks.Load(userData)
-		if ok && callback.(MemoryFaultHook)(address, uint32(size)) {
+		if !ok {
+			return 0
+		}
+		h := callback.(registeredHook)
+		enterHook(h.engine)
+		defer leaveHook()
+		if h.fault != nil && h.fault(address, uint32(size)) {
 			return 1
 		}
 
@@ -91,7 +109,16 @@ func (e *Engine) addHook(kind int32, trampoline uintptr, begin, end uint64, call
 		id = uintptr(codeHookID.Add(1))
 	}
 
-	codeHookCallbacks.Store(id, callback)
+	entry := registeredHook{engine: e}
+	switch c := callback.(type) {
+	case CodeHook:
+		entry.code = c
+	case MemoryFaultHook:
+		entry.fault = c
+	default:
+		return nil, errors.New("unsupported unicorn hook callback")
+	}
+	codeHookCallbacks.Store(id, entry)
 
 	var hookHandle uintptr
 	if err := e.err(e.api.hookAdd(handle, &hookHandle, kind, trampoline, id, begin, end)); err != nil {

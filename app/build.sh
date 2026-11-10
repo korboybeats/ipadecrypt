@@ -59,11 +59,14 @@ IOS_CC="$IOS_CLANG -target arm64-apple-ios15.0 -isysroot $IOS_SDK -Wno-incompati
 UNICORN_IOS_LIB="${UNICORN_IOS_LIB:-$(./build_unicorn_ios.sh)}"
 [ -f "$UNICORN_IOS_LIB" ] || { echo "Unicorn iOS archive not found: $UNICORN_IOS_LIB" >&2; exit 1; }
 HELPER_LDFLAGS="$IOS_LDFLAGS -Wl,-force_load,$UNICORN_IOS_LIB -Wl,-export_dynamic"
+# Go's link cache keys CGO_LDFLAGS by string, not by archive contents.
+# Stamp the .a mtime so a Unicorn rebuild cannot leave a stale helper.
+UNICORN_IOS_MTIME=$(stat -f %m "$UNICORN_IOS_LIB" 2>/dev/null || stat -c %Y "$UNICORN_IOS_LIB")
 ( cd .. && \
   GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
   CC="$IOS_CC" \
   CGO_LDFLAGS="$HELPER_LDFLAGS" \
-  "$GO" build -trimpath -ldflags="-s -w" -o app/Resources/appstore-helper.arm64 ./cmd/ipadecrypt-appstore-helper )
+  "$GO" build -trimpath -ldflags="-s -w -X main.unicornIOSLibMtime=$UNICORN_IOS_MTIME" -o app/Resources/appstore-helper.arm64 ./cmd/ipadecrypt-appstore-helper )
 ldid -Sappstore-helper.entitlements.plist Resources/appstore-helper.arm64
 chmod +x Resources/appstore-helper.arm64
 HELPER_BACKUP=$(mktemp)

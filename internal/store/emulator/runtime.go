@@ -628,7 +628,16 @@ func (r *Runtime) step(address uint64, _ uint32) {
 	}()
 
 	if callback := r.callbacks[address]; callback != nil {
-		callback()
+		// Host shims (including Store AMD XPC) are RET stubs. Run them only
+		// after this uc_emu_start returns so they can start other engines
+		// without flipping iOS W^X pages under the outer TCG buffer.
+		if err := r.engine.DeferAndStopThenReturn(func() error {
+			callback()
+			return r.fault
+		}); err != nil && r.fault == nil {
+			r.fault = err
+			_ = r.engine.Stop()
+		}
 
 		return
 	}

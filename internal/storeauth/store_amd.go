@@ -28,6 +28,10 @@ func StoreAMDHeaders(ctx context.Context, encoded []byte, endpoint string, hardw
 		return nil, nil, ErrNotProvisioned
 	}
 
+	return runStoreAMDHeaders(ctx, state, endpoint, hardwareID)
+}
+
+func runStoreAMDHeaders(ctx context.Context, state *anisetteState, endpoint string, hardwareID []byte) (map[string]string, []byte, error) {
 	bundle, err := assets.Load(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load Store AMD assets: %w", err)
@@ -74,4 +78,27 @@ func StoreAMDHeaders(ctx context.Context, encoded []byte, endpoint string, hardw
 	}
 
 	return headers, updated, nil
+}
+
+// probeStoreAMDIdentifier is a synthetic 16-byte host UUID used only by
+// ProbeStoreAMDHeaders. It is not an Apple ID and is never sent to Apple.
+var probeStoreAMDIdentifier = []byte("ipadecrypt-probe")
+
+const probeStoreAMDEndpoint = "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate"
+
+// ProbeStoreAMDHeaders runs the Store AMD / storeAMDLoginProof header path
+// end to end with a dummy identity: OpenModernADI, the AMS emulator,
+// XPC ExchangeXPC, and header assembly. It does not provision, persist
+// state, or perform HTTP. A guest/XPC error still proves the nested
+// start path ran if the process survives.
+func ProbeStoreAMDHeaders(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("store AMD probe context is nil")
+	}
+	if len(probeStoreAMDIdentifier) != 16 {
+		return errors.New("store AMD probe identifier must be 16 bytes")
+	}
+
+	_, _, err := runStoreAMDHeaders(ctx, &anisetteState{Identifier: probeStoreAMDIdentifier}, probeStoreAMDEndpoint, []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
+	return err
 }

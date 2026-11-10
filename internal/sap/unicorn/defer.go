@@ -1,6 +1,51 @@
 package unicorn
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"sync"
+)
+
+var (
+	// ErrNestedStart is returned when a hook callback starts another engine
+	// on the same thread. Hooks must DeferAndStop the work instead so the
+	// outer uc_emu_start can return first.
+	ErrNestedStart = errors.New("nested unicorn start from a hook")
+
+	hookMu    sync.Mutex
+	hookStack []*Engine
+)
+
+func enterHook(e *Engine) {
+	hookMu.Lock()
+	hookStack = append(hookStack, e)
+	hookMu.Unlock()
+}
+
+func leaveHook() {
+	hookMu.Lock()
+	if n := len(hookStack); n > 0 {
+		hookStack = hookStack[:n-1]
+	}
+	hookMu.Unlock()
+}
+
+func hookEngine() *Engine {
+	hookMu.Lock()
+	defer hookMu.Unlock()
+	if len(hookStack) == 0 {
+		return nil
+	}
+	return hookStack[len(hookStack)-1]
+}
+
+func rejectNestedStart(inner *Engine) error {
+	outer := hookEngine()
+	if outer == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: inner=%p outer=%p", ErrNestedStart, inner, outer)
+}
 
 func (e *Engine) pushFrame() error {
 	if e == nil {
@@ -67,4 +112,22 @@ func (e *Engine) DeferAndStop(work func() error) error {
 	e.frameMu.Unlock()
 
 	return e.Stop()
+}
+
+// DeferAndStopThenReturn defers body, then resumes the outer guest at LR so a
+// hook on a RET stub is not re-entered.
+func (e *Engine) DeferAndStopThenReturn(body func() error) error {
+	if body == nil {
+		return errors.New("deferred unicorn hook work is nil")
+	}
+	return e.DeferAndStop(func() error {
+		if err := body(); err != nil {
+			return err
+		}
+		link, err := e.RegRead(RegLR)
+		if err != nil {
+			return fmt.Errorf("read hook return address: %w", err)
+		}
+		return e.RegWrite(RegPC, link)
+	})
 }

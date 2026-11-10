@@ -2,6 +2,7 @@ package unicorn
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -162,5 +163,32 @@ func TestInvokeContextIsolatesNestedCalls(t *testing.T) {
 	x1, _ := e.RegRead(RegX1)
 	if x0 != 0xaaaa || x1 != 0xbbbb {
 		t.Fatalf("registers after nested call restore: X0=%#x X1=%#x", x0, x1)
+	}
+}
+
+func TestStartBoundedFromHookIsRejected(t *testing.T) {
+	outer := newTestEngine(t)
+	inner := newTestEngine(t)
+	mapRet(t, outer, testHookAddr)
+	mapRet(t, inner, testPage)
+	if err := outer.RegWrite(RegLR, testReturn); err != nil {
+		t.Fatal(err)
+	}
+	if err := outer.RegWrite(RegSP, testPage+0x800); err != nil {
+		t.Fatal(err)
+	}
+
+	var nested error
+	_, err := outer.AddCodeHook(testHookAddr, testHookAddr, func(uint64, uint32) {
+		nested = inner.StartBounded(testPage, testPage+4, time.Second, 0)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := outer.StartBounded(testHookAddr, testReturn, 2*time.Second, 0); err != nil {
+		t.Fatalf("outer start: %v", err)
+	}
+	if !errors.Is(nested, ErrNestedStart) {
+		t.Fatalf("nested start error = %v, want %v", nested, ErrNestedStart)
 	}
 }
