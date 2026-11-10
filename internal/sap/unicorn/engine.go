@@ -13,9 +13,17 @@ import (
 )
 
 const (
-	queryTimeout     = 4
-	controlCPUModel  = uint32(7 | 1<<26 | 1<<30)
-	arm64CPUModelMax = uint32(3)
+	queryTimeout    = 4
+	controlCPUModel = uint32(7 | 1<<26 | 1<<30)
+	// UC_CTL_WRITE(UC_CTL_TCG_BUFFER_SIZE, 1) and the matching READ form.
+	controlTCGBufferSizeWrite = uint32(13 | 1<<26 | 1<<30)
+	controlTCGBufferSizeRead  = uint32(13 | 1<<26 | 2<<30)
+	arm64CPUModelMax          = uint32(3)
+	// Unicorn 2.1 defaults to a 1 GiB TCG buffer on 64-bit hosts. OpenModernADI
+	// creates four engines, and the iOS W^X adapter mprotects every registered
+	// buffer on each JIT write/execute switch. 16 MiB is enough for FairPlay/ADI
+	// translation and keeps four engines well inside iOS mapping limits.
+	tcgBufferSize = 16 << 20
 )
 
 const (
@@ -135,6 +143,15 @@ func newEngine(ctx context.Context, loadLibrary func(context.Context) (library, 
 		_ = library.close()
 
 		return nil, fmt.Errorf("create arm64 emulator: %w", err)
+	}
+
+	// Must run before any API that lazily initializes TCG, or Unicorn will
+	// mmap the 1 GiB default buffer.
+	if err := engine.setTCGBufferSize(tcgBufferSize); err != nil {
+		_ = engine.api.close(engine.handle)
+		_ = library.close()
+
+		return nil, err
 	}
 
 	// Select Unicorn's most capable ARM64 model. The compatibility layer handles

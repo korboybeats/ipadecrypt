@@ -12,7 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define IPD_MAX_BUFFERS 16
+#define IPD_MAX_BUFFERS 32
 #define CS_OPS_STATUS 0
 #define CS_DEBUGGED 0x10000000
 
@@ -79,6 +79,13 @@ static int ipd_ensure_debugged(void) {
     return 0;
 }
 
+static int ipd_used_locked(void) {
+    int n = 0;
+    for (int i = 0; i < IPD_MAX_BUFFERS; i++)
+        if (ipd_bufs[i].buf) n++;
+    return n;
+}
+
 int ipd_jit_register(void *buf, size_t size) {
     ipd_ensure_debugged();
     pthread_mutex_lock(&ipd_lock);
@@ -86,11 +93,14 @@ int ipd_jit_register(void *buf, size_t size) {
         if (!ipd_bufs[i].buf) {
             ipd_bufs[i].buf = buf;
             ipd_bufs[i].size = size;
+            int used = ipd_used_locked();
             pthread_mutex_unlock(&ipd_lock);
+            fprintf(stderr, "unicorn: jit buffer %zu bytes (%d in use)\n", size, used);
             return 0;
         }
     }
     pthread_mutex_unlock(&ipd_lock);
+    fprintf(stderr, "unicorn: no free JIT buffer slot (max %d)\n", IPD_MAX_BUFFERS);
     return -1;
 }
 
@@ -98,7 +108,9 @@ void ipd_jit_unregister(void *buf) {
     pthread_mutex_lock(&ipd_lock);
     for (int i = 0; i < IPD_MAX_BUFFERS; i++)
         if (ipd_bufs[i].buf == buf) ipd_bufs[i].buf = NULL;
+    int used = ipd_used_locked();
     pthread_mutex_unlock(&ipd_lock);
+    fprintf(stderr, "unicorn: jit buffer released (%d in use)\n", used);
 }
 
 /* enabled != 0: code is executable (RX); enabled == 0: writable (RW). */

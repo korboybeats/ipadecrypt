@@ -79,7 +79,41 @@ old_free = """    if (tcg_ctx->initial_buffer) {
 new_free = """    if (tcg_ctx->initial_buffer) {
         ipd_jit_unregister(tcg_ctx->initial_buffer);
         if (munmap(tcg_ctx->initial_buffer, tcg_ctx->initial_buffer_size)) {"""
-for old, new in ((old_alloc, new_alloc), (old_free, new_free)):
+old_size = """static inline size_t size_code_gen_buffer(size_t tb_size)
+{
+    /* Size the buffer.  */
+    if (tb_size == 0) {
+        tb_size = DEFAULT_CODE_GEN_BUFFER_SIZE;
+    }
+    if (tb_size < MIN_CODE_GEN_BUFFER_SIZE) {
+        tb_size = MIN_CODE_GEN_BUFFER_SIZE;
+    }
+    if (tb_size > MAX_CODE_GEN_BUFFER_SIZE) {
+        tb_size = MAX_CODE_GEN_BUFFER_SIZE;
+    }
+    return tb_size;
+}
+"""
+new_size = """static inline size_t size_code_gen_buffer(size_t tb_size)
+{
+    /* iOS cannot hold Unicorn's 1 GiB 64-bit default per engine.
+       OpenModernADI opens four engines, and the W^X shim mprotects every
+       registered buffer on each RW/RX flip. 16 MiB is enough for FairPlay/ADI
+       translation and stays well inside iOS mapping limits. */
+    const size_t ipd_tcg_cap = 16u * 1024u * 1024u;
+    if (tb_size == 0 || tb_size > ipd_tcg_cap) {
+        tb_size = ipd_tcg_cap;
+    }
+    if (tb_size < MIN_CODE_GEN_BUFFER_SIZE) {
+        tb_size = MIN_CODE_GEN_BUFFER_SIZE;
+    }
+    if (tb_size > MAX_CODE_GEN_BUFFER_SIZE) {
+        tb_size = MAX_CODE_GEN_BUFFER_SIZE;
+    }
+    return tb_size;
+}
+"""
+for old, new in ((old_alloc, new_alloc), (old_free, new_free), (old_size, new_size)):
     if s.count(old) != 1:
         sys.exit("translate-all.c patch anchor not found; Unicorn source changed")
     s = s.replace(old, new)

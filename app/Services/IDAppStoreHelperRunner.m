@@ -25,8 +25,11 @@ static NSTimeInterval IDLastHelperEventAt = 0;
 
 // First-time SAP extract can take many minutes on a phone; treat silence, not
 // duration, as a hang. 30 minutes is a hard cap against a wedged helper.
-static const NSTimeInterval IDHelperStallSeconds = 120;
-static const NSTimeInterval IDHelperTimeoutSeconds = 30 * 60;
+// A silent helper is almost never waiting on 2FA (that is a later spawn).
+// 60s still covers a slow OpenModernADI; 5 minutes covers a hung Apple request
+// without leaving "Signing in" spinning indefinitely.
+static const NSTimeInterval IDHelperStallSeconds = 60;
+static const NSTimeInterval IDHelperTimeoutSeconds = 5 * 60;
 
 static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     if (![line hasPrefix:@"@evt "]) return nil;
@@ -372,10 +375,10 @@ static BOOL IDWriteCredentialsToStdin(int fd, NSString *email, NSString *passwor
                 msg = @"Apple ID sign-in cancelled";
                 code = 1;
             } else if (stallReason == 2) {
-                msg = @"Sign-in stalled while preparing Apple machine identity. Check your network and try again.";
+                msg = @"Sign-in stalled. If this keeps happening, force-quit the app and try again.";
                 code = 23;
             } else if (stallReason == 3) {
-                msg = @"Sign-in timed out while preparing Apple machine identity. Try again on a stable network.";
+                msg = @"Sign-in timed out. Try again on a stable network.";
                 code = 24;
             }
             err = [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:code
