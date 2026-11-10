@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 const (
@@ -32,17 +31,7 @@ var frameworkImagePaths = []string{
 }
 
 func resolveRemoteImage(ctx context.Context) (Bundle, error) {
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			MaxIdleConns:          4,
-			MaxIdleConnsPerHost:   4,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			ForceAttemptHTTP2:     true,
-		},
-	}
+	client := newHTTPClient()
 	remote, err := openRemoteFileWithProgress(ctx, client, progressFrom(ctx))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("resolve macOS %s (%s) frameworks: %w", macOSVersion, macOSBuild, err)
@@ -117,6 +106,14 @@ func resolveRemoteImage(ctx context.Context) (Bundle, error) {
 	if err := validate(bundle); err != nil {
 		return Bundle{}, err
 	}
+
+	recordLoadStats(remote.FetchedBytes(), remote.NeededBytes())
+	reportProgress(ctx, Progress{
+		Stage:   "download-stats",
+		Message: "Finished fetching Apple support files",
+		Current: remote.FetchedBytes(),
+		Needed:  remote.NeededBytes(),
+	})
 
 	return bundle, nil
 }

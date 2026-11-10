@@ -8,6 +8,7 @@ type Progress struct {
 	Message string
 	Current int64
 	Total   int64
+	Needed  int64
 }
 
 // ProgressFunc receives throttled progress updates during Load.

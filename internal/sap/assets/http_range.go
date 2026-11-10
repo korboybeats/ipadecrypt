@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,12 +15,22 @@ import (
 
 const (
 	remoteReadAttempts = 3
-	// remoteWindowSize is large enough that APFS 4 KiB walks and AEA segment
-	// reads coalesce into a handful of HTTP range GETs instead of one-per-page.
-	// The previous unbuffered ReadAt issued a fresh Range request for every
-	// small read and burned hundreds of wakeups per second on device.
-	remoteWindowSize   = 2 << 20
+	// remoteBlockSize is the cache and fetch alignment. AEA cluster headers
+	// are small and hundreds of megabytes apart; a 2 MiB sliding window was
+	// pulling ~879 MiB of range traffic to build a 167 MiB cache. 64 KiB
+	// covers a header (and a typical APFS block run start) without dragging
+	// in the rest of the cluster payload.
+	remoteBlockSize = 64 << 10
+	// remoteCacheLimit keeps recently used blocks so payload that happens to
+	// share a block with a header is not re-fetched, and APFS walks do not
+	// re-download metadata.
+	remoteCacheLimit = 64 << 20
+	// remoteReadAhead is appended only when the next read continues a
+	// sequential run, so scattered header walks stay small.
+	remoteReadAhead    = 256 << 10
+	remoteMaxParallel  = 4
 	remoteRetryBackoff = 200 * time.Millisecond
+	progressMinGap     = 250 * time.Millisecond // ~4 events/sec
 )
 
 type remoteFile struct {
@@ -29,11 +40,34 @@ type remoteFile struct {
 	size   int64
 
 	mu         sync.Mutex
-	windowOff  int64
-	window     []byte
+	blocks     map[int64][]byte
+	lru        []int64
+	cacheBytes int64
 	fetched    int64
+	needed     []span
+	lastEnd    int64
 	lastReport time.Time
 	reporter   ProgressFunc
+}
+
+type span struct {
+	start, end int64 // end exclusive
+}
+
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			MaxIdleConns:          8,
+			MaxIdleConnsPerHost:   remoteMaxParallel,
+			MaxConnsPerHost:       remoteMaxParallel,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+			DisableCompression:    true,
+		},
+	}
 }
 
 //nolint:wsl // Request construction and validation are clearer in protocol order.
@@ -42,6 +76,9 @@ func openRemoteFile(ctx context.Context, client *http.Client) (*remoteFile, erro
 }
 
 func openRemoteFileWithProgress(ctx context.Context, client *http.Client, reporter ProgressFunc) (*remoteFile, error) {
+	if client == nil {
+		client = newHTTPClient()
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, macOSRestoreURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create remote image request: %w", err)
@@ -68,7 +105,14 @@ func openRemoteFileWithProgress(ctx context.Context, client *http.Client, report
 		return nil, fmt.Errorf("open remote image: server returned unexpected byte range %d-%d", start, end)
 	}
 
-	return &remoteFile{ctx: ctx, client: client, url: macOSRestoreURL, size: size, reporter: reporter}, nil
+	return &remoteFile{
+		ctx:      ctx,
+		client:   client,
+		url:      macOSRestoreURL,
+		size:     size,
+		blocks:   make(map[int64][]byte),
+		reporter: reporter,
+	}, nil
 }
 
 //nolint:wsl // Parsing checks are clearer in wire-format order.
@@ -99,9 +143,15 @@ func parseContentRange(value string) (int64, int64, int64, error) {
 	return start, end, size, nil
 }
 
-// ReadAt serves small random reads from a sliding window filled with multi-megabyte
-// range GETs. Concurrent callers serialize on the window lock; APFS extraction is
-// already single-threaded through this ReaderAt.
+func alignBlock(offset int64) int64 {
+	if offset < 0 {
+		return 0
+	}
+	return offset - offset%remoteBlockSize
+}
+
+// ReadAt serves reads from an aligned block cache. Scattered metadata walks
+// fetch only the touched blocks; sequential payload walks read ahead.
 func (r *remoteFile) ReadAt(data []byte, offset int64) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
@@ -118,80 +168,218 @@ func (r *remoteFile) ReadAt(data []byte, offset int64) (int, error) {
 		wanted = int(remaining)
 	}
 
-	total := 0
-	for total < wanted {
-		n, err := r.readAtBuffered(data[total:wanted], offset+int64(total))
-		total += n
-		if err != nil {
-			if errors.Is(err, io.EOF) && total == wanted {
-				break
-			}
-			if total == wanted {
-				return total, nil
-			}
-			return total, err
-		}
-	}
-
-	if wanted != len(data) {
-		return total, io.EOF
-	}
-	return total, nil
-}
-
-func (r *remoteFile) readAtBuffered(data []byte, offset int64) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if len(data) == 0 {
-		return 0, nil
-	}
-	if offset < 0 {
-		return 0, errors.New("negative remote image offset")
-	}
-	if offset >= r.size {
-		return 0, io.EOF
-	}
-
-	if err := r.ensureWindowLocked(offset); err != nil {
+	if err := r.fill(offset, int64(wanted)); err != nil {
 		return 0, err
 	}
 
-	rel := int(offset - r.windowOff)
-	if rel < 0 || rel >= len(r.window) {
-		return 0, fmt.Errorf("remote window miss at offset %d", offset)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.needed = addSpan(r.needed, offset, offset+int64(wanted))
+
+	copied := 0
+	for copied < wanted {
+		blockOff := alignBlock(offset + int64(copied))
+		block, ok := r.blocks[blockOff]
+		if !ok {
+			return copied, fmt.Errorf("remote block cache miss at offset %d", offset+int64(copied))
+		}
+		rel := int(offset + int64(copied) - blockOff)
+		if rel < 0 || rel >= len(block) {
+			return copied, fmt.Errorf("remote block cache miss at offset %d", offset+int64(copied))
+		}
+		copied += copy(data[copied:wanted], block[rel:])
 	}
-	n := copy(data, r.window[rel:])
-	if n < len(data) && offset+int64(n) >= r.size {
-		return n, io.EOF
+
+	if wanted != len(data) {
+		return copied, io.EOF
 	}
-	return n, nil
+	return copied, nil
 }
 
-func (r *remoteFile) ensureWindowLocked(offset int64) error {
-	if len(r.window) > 0 && offset >= r.windowOff && offset < r.windowOff+int64(len(r.window)) {
+func (r *remoteFile) fill(offset, length int64) error {
+	r.mu.Lock()
+
+	end := offset + length
+	if end > r.size {
+		end = r.size
+	}
+	sequential := r.lastEnd > 0 && offset <= r.lastEnd+remoteBlockSize && offset >= r.lastEnd-remoteBlockSize
+	fetchEnd := end
+	if sequential {
+		fetchEnd += remoteReadAhead
+	}
+	if fetchEnd > r.size {
+		fetchEnd = r.size
+	} else if rem := fetchEnd % remoteBlockSize; rem != 0 {
+		fetchEnd += remoteBlockSize - rem
+		if fetchEnd > r.size {
+			fetchEnd = r.size
+		}
+	}
+	r.lastEnd = end
+
+	// Do not issue read-ahead GETs when the requested range is already cached.
+	// Prefetch only when this read itself misses.
+	if r.cachedLocked(offset, end) {
+		r.mu.Unlock()
 		return nil
 	}
 
-	start := offset
-	end := offset + remoteWindowSize - 1
-	if end >= r.size {
-		end = r.size - 1
-	}
-	if end < start {
-		return io.EOF
+	missing := r.missingRangesLocked(alignBlock(offset), fetchEnd)
+	if len(missing) == 0 {
+		r.mu.Unlock()
+		return nil
 	}
 
-	buf := make([]byte, end-start+1)
-	if err := r.fillRangeLocked(buf, start); err != nil {
-		return err
+	type result struct {
+		start int64
+		data  []byte
+		err   error
 	}
-	r.windowOff = start
-	r.window = buf
-	return nil
+
+	jobs := missing
+	results := make([]result, len(jobs))
+	workers := remoteMaxParallel
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+
+	// Release the cache lock for the duration of the HTTP GETs.
+	r.mu.Unlock()
+
+	var wg sync.WaitGroup
+	jobsCh := make(chan int, len(jobs))
+	for i := range jobs {
+		jobsCh <- i
+	}
+	close(jobsCh)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobsCh {
+				start, end := jobs[idx].start, jobs[idx].end
+				buf := make([]byte, end-start)
+				err := r.fetchRange(buf, start)
+				results[idx] = result{start: start, data: buf, err: err}
+			}
+		}()
+	}
+	wg.Wait()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var firstErr error
+	for _, res := range results {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			continue
+		}
+		r.installLocked(res.start, res.data)
+	}
+	r.reportProgressLocked()
+	return firstErr
 }
 
-func (r *remoteFile) fillRangeLocked(data []byte, offset int64) error {
+func (r *remoteFile) cachedLocked(offset, end int64) bool {
+	if offset < 0 || end > r.size || offset >= end {
+		return false
+	}
+	for off := offset; off < end; {
+		blockOff := alignBlock(off)
+		block, ok := r.blocks[blockOff]
+		if !ok {
+			return false
+		}
+		rel := off - blockOff
+		if rel < 0 || rel >= int64(len(block)) {
+			return false
+		}
+		off += int64(len(block)) - rel
+	}
+	return true
+}
+
+func (r *remoteFile) missingRangesLocked(start, end int64) []span {
+	if start < 0 {
+		start = 0
+	}
+	if end > r.size {
+		end = r.size
+	}
+	if start >= end {
+		return nil
+	}
+
+	var missing []span
+	var runStart int64 = -1
+	for off := alignBlock(start); off < end; off += remoteBlockSize {
+		if _, ok := r.blocks[off]; ok {
+			if runStart >= 0 {
+				missing = append(missing, span{start: runStart, end: off})
+				runStart = -1
+			}
+			continue
+		}
+		if runStart < 0 {
+			runStart = off
+		}
+	}
+	if runStart >= 0 {
+		last := alignBlock(end - 1)
+		runEnd := last + remoteBlockSize
+		if runEnd > r.size {
+			runEnd = r.size
+		}
+		missing = append(missing, span{start: runStart, end: runEnd})
+	}
+	return missing
+}
+
+func (r *remoteFile) installLocked(offset int64, data []byte) {
+	// Split the downloaded range into aligned blocks. A coalesced GET of
+	// several blocks is stored one block at a time so later random hits work.
+	off := offset
+	rest := data
+	for len(rest) > 0 {
+		blockOff := alignBlock(off)
+		if blockOff != off {
+			// Fetches are always issued at aligned starts.
+			return
+		}
+		size := int64(len(rest))
+		if size > remoteBlockSize {
+			size = remoteBlockSize
+		}
+		if _, ok := r.blocks[blockOff]; !ok {
+			chunk := make([]byte, size)
+			copy(chunk, rest[:size])
+			r.blocks[blockOff] = chunk
+			r.lru = append(r.lru, blockOff)
+			r.cacheBytes += size
+			r.fetched += size
+		}
+		off += size
+		rest = rest[size:]
+	}
+	r.evictLocked()
+}
+
+func (r *remoteFile) evictLocked() {
+	for r.cacheBytes > remoteCacheLimit && len(r.lru) > 1 {
+		oldest := r.lru[0]
+		r.lru = r.lru[1:]
+		if block, ok := r.blocks[oldest]; ok {
+			r.cacheBytes -= int64(len(block))
+			delete(r.blocks, oldest)
+		}
+	}
+}
+
+func (r *remoteFile) fetchRange(data []byte, offset int64) error {
 	wanted := len(data)
 	total := 0
 	var lastErr error
@@ -235,8 +423,6 @@ func (r *remoteFile) fillRangeLocked(data []byte, offset int64) error {
 		count, readErr := io.ReadFull(response.Body, data[total:wanted])
 		closeErr := response.Body.Close()
 		total += count
-		r.fetched += int64(count)
-		r.reportProgressLocked()
 
 		if readErr == nil {
 			lastErr = closeErr
@@ -259,7 +445,7 @@ func (r *remoteFile) reportProgressLocked() {
 		return
 	}
 	now := time.Now()
-	if !r.lastReport.IsZero() && now.Sub(r.lastReport) < 500*time.Millisecond {
+	if !r.lastReport.IsZero() && now.Sub(r.lastReport) < progressMinGap {
 		return
 	}
 	r.lastReport = now
@@ -268,6 +454,7 @@ func (r *remoteFile) reportProgressLocked() {
 		Message: "Preparing Apple machine identity / downloading support files (first time)",
 		Current: r.fetched,
 		Total:   0,
+		Needed:  spanBytes(r.needed),
 	})
 }
 
@@ -275,4 +462,42 @@ func (r *remoteFile) FetchedBytes() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.fetched
+}
+
+func (r *remoteFile) NeededBytes() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return spanBytes(r.needed)
+}
+
+func addSpan(spans []span, start, end int64) []span {
+	if start >= end {
+		return spans
+	}
+	spans = append(spans, span{start: start, end: end})
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start == spans[j].start {
+			return spans[i].end < spans[j].end
+		}
+		return spans[i].start < spans[j].start
+	})
+	out := spans[:0]
+	for _, s := range spans {
+		if len(out) == 0 || s.start > out[len(out)-1].end {
+			out = append(out, s)
+			continue
+		}
+		if s.end > out[len(out)-1].end {
+			out[len(out)-1].end = s.end
+		}
+	}
+	return out
+}
+
+func spanBytes(spans []span) int64 {
+	var total int64
+	for _, s := range spans {
+		total += s.end - s.start
+	}
+	return total
 }

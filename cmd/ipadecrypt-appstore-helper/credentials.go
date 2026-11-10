@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 )
+
+const maxCredentialJSON = 1 << 20
 
 type appleCredentials struct {
 	Email    string `json:"email"`
@@ -14,48 +17,74 @@ type appleCredentials struct {
 	AuthCode string `json:"auth_code"`
 }
 
-// loadCredentialsFile reads a 0600 JSON credentials file and removes it.
-// Password and auth-code must never travel on argv.
-func loadCredentialsFile(path string) (email, password, authCode string, err error) {
-	if strings.TrimSpace(path) == "" {
+func zeroBytes(data []byte) {
+	for i := range data {
+		data[i] = 0
+	}
+}
+
+func zeroString(value *string) {
+	if value == nil {
+		return
+	}
+	// strings are immutable; replace with a zeroed copy then drop.
+	n := len(*value)
+	if n == 0 {
+		return
+	}
+	buf := make([]byte, n)
+	copy(buf, *value)
+	zeroBytes(buf)
+	*value = ""
+}
+
+// readCredentialsFromStdin reads one JSON message from stdin and closes it.
+// An empty stdin is a no-op so commands that do not need credentials can
+// inherit a closed pipe. Nothing is written to disk or argv.
+func readCredentialsFromStdin(r io.Reader, closer io.Closer) (email, password, authCode string, err error) {
+	if closer != nil {
+		defer closer.Close()
+	}
+	if r == nil {
 		return "", "", "", nil
 	}
 
-	defer func() { _ = os.Remove(path) }()
-
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(r, maxCredentialJSON+1))
 	if err != nil {
-		return "", "", "", fmt.Errorf("read credentials file: %w", err)
+		zeroBytes(data)
+		return "", "", "", fmt.Errorf("read credentials from stdin: %w", err)
+	}
+	defer zeroBytes(data)
+
+	if len(data) > maxCredentialJSON {
+		return "", "", "", errors.New("credentials message is too large")
+	}
+
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return "", "", "", nil
 	}
 
 	var creds appleCredentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return "", "", "", fmt.Errorf("parse credentials file: %w", err)
+	if err := json.Unmarshal(trimmed, &creds); err != nil {
+		return "", "", "", fmt.Errorf("parse credentials from stdin: %w", err)
 	}
 
-	creds.Email = strings.TrimSpace(creds.Email)
-	creds.Password = strings.TrimSpace(creds.Password)
-	creds.AuthCode = strings.TrimSpace(creds.AuthCode)
-	if creds.Email == "" && creds.Password == "" && creds.AuthCode == "" {
-		return "", "", "", errors.New("credentials file is empty")
-	}
-
-	return creds.Email, creds.Password, creds.AuthCode, nil
-}
-
-func mergeCredentials(email, password, authCode, filePath string) (string, string, string, error) {
-	fileEmail, filePassword, fileAuthCode, err := loadCredentialsFile(filePath)
-	if err != nil {
-		return "", "", "", err
-	}
-	if email == "" {
-		email = fileEmail
-	}
-	if password == "" {
-		password = filePassword
-	}
-	if authCode == "" {
-		authCode = fileAuthCode
+	email = strings.TrimSpace(creds.Email)
+	password = strings.TrimSpace(creds.Password)
+	authCode = strings.TrimSpace(creds.AuthCode)
+	zeroString(&creds.Email)
+	zeroString(&creds.Password)
+	zeroString(&creds.AuthCode)
+	if email == "" && password == "" && authCode == "" {
+		return "", "", "", errors.New("credentials message is empty")
 	}
 	return email, password, authCode, nil
+}
+
+func credentialsNeeded(authOnly, prefetchAssets, authStatus, hasTarget, verifyIPA, decryptHelper bool) bool {
+	if prefetchAssets || authStatus || verifyIPA || decryptHelper {
+		return false
+	}
+	return authOnly || hasTarget
 }

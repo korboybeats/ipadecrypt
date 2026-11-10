@@ -1,6 +1,8 @@
 #import "IDAppStoreHelperRunner.h"
 #import "Logging.h"
+#import <errno.h>
 #import <fcntl.h>
+#import <string.h>
 #import <signal.h>
 #import <spawn.h>
 #import <sys/wait.h>
@@ -52,44 +54,45 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     return out;
 }
 
-static NSString *IDWriteCredentialsFile(NSString *email, NSString *password, NSString *authCode) {
+static NSData *IDCredentialsJSON(NSString *email, NSString *password, NSString *authCode) {
     if (email.length == 0 && password.length == 0 && authCode.length == 0) return nil;
-
     NSMutableDictionary *obj = [NSMutableDictionary dictionary];
     if (email.length) obj[@"email"] = email;
     if (password.length) obj[@"password"] = password;
     if (authCode.length) obj[@"auth_code"] = authCode;
-    NSError *jsonErr = nil;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:obj options:0 error:&jsonErr];
-    if (!data) return nil;
-
-    NSString *path = [NSString stringWithFormat:@"/var/tmp/ipadecrypt-creds-%d-%@",
-                      getpid(), [NSUUID UUID].UUIDString];
-    int fd = open(path.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0) return nil;
-    ssize_t wrote = write(fd, data.bytes, data.length);
-    int closeRC = close(fd);
-    if (wrote != (ssize_t)data.length || closeRC != 0) {
-        unlink(path.fileSystemRepresentation);
-        return nil;
-    }
-    return path;
+    return [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil];
 }
 
-static void IDAppendCredentials(NSMutableArray<NSString *> *args,
-                                NSString *email,
-                                NSString *password,
-                                NSString *authCode) {
-    NSString *path = IDWriteCredentialsFile(email, password, authCode);
-    if (path.length) {
-        [args addObjectsFromArray:@[@"--credentials-file", path]];
-        return;
+static void IDZeroData(NSData *data) {
+    if (!data.length) return;
+    // NSMutableData lets us wipe the payload after writing it to the pipe.
+    if ([data isKindOfClass:[NSMutableData class]]) {
+        memset(((NSMutableData *)data).mutableBytes, 0, data.length);
     }
-    // Email alone is not a secret; never fall back to putting a password or
-    // 2FA code on argv if the temp file could not be created.
-    if (email.length) {
-        [args addObjectsFromArray:@[@"--email", email]];
+}
+
+static BOOL IDWriteCredentialsToStdin(int fd, NSString *email, NSString *password, NSString *authCode) {
+    NSData *immutable = IDCredentialsJSON(email, password, authCode);
+    if (!immutable.length) {
+        return close(fd) == 0;
     }
+    NSMutableData *data = [immutable mutableCopy];
+    const uint8_t *bytes = data.mutableBytes;
+    NSUInteger remaining = data.length;
+    BOOL ok = YES;
+    while (remaining > 0) {
+        ssize_t n = write(fd, bytes, remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ok = NO;
+            break;
+        }
+        bytes += (NSUInteger)n;
+        remaining -= (NSUInteger)n;
+    }
+    IDZeroData(data);
+    if (close(fd) != 0) ok = NO;
+    return ok;
 }
 
 @implementation IDAppStoreHelperRunner
@@ -134,10 +137,18 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
 }
 
 + (void)spawnAuthWithArguments:(NSArray<NSString *> *)args
+                         email:(NSString *)email
+                      password:(NSString *)password
+                      authCode:(NSString *)authCode
                        onEvent:(void (^)(NSDictionary *))eventBlock
                     completion:(void (^)(int, NSError *))completion {
     [self enqueueAuthOperation:^{
-        [self spawnWithArguments:args onEvent:eventBlock completion:^(int code, NSError *err) {
+        [self spawnWithArguments:args
+                           email:email
+                        password:password
+                        authCode:authCode
+                         onEvent:eventBlock
+                      completion:^(int code, NSError *err) {
             @synchronized (self) {
                 if (code == 0 && !err) {
                     IDLastAuthResult = IDAppleAuthCheckResultSuccess;
@@ -158,6 +169,15 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
 }
 
 + (void)spawnWithArguments:(NSArray<NSString *> *)args
+                   onEvent:(void (^)(NSDictionary *))eventBlock
+                completion:(void (^)(int, NSError *))completion {
+    [self spawnWithArguments:args email:nil password:nil authCode:nil onEvent:eventBlock completion:completion];
+}
+
++ (void)spawnWithArguments:(NSArray<NSString *> *)args
+                     email:(NSString *)email
+                  password:(NSString *)password
+                  authCode:(NSString *)authCode
                    onEvent:(void (^)(NSDictionary *))eventBlock
                 completion:(void (^)(int, NSError *))completion {
     void (^callerCompletion)(int, NSError *) = [completion copy];
@@ -182,8 +202,8 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
     NSMutableArray<NSString *> *fullArgs = [NSMutableArray arrayWithObject:helper];
     [fullArgs addObjectsFromArray:args ?: @[]];
 
-    int outFD[2], errFD[2];
-    if (pipe(outFD) != 0 || pipe(errFD) != 0) {
+    int outFD[2], errFD[2], inFD[2];
+    if (pipe(outFD) != 0 || pipe(errFD) != 0 || pipe(inFD) != 0) {
         completion(-1, [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:2
                                        userInfo:@{NSLocalizedDescriptionKey: @"pipe() failed"}]);
         return;
@@ -193,10 +213,13 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addclose(&fa, outFD[0]);
     posix_spawn_file_actions_addclose(&fa, errFD[0]);
+    posix_spawn_file_actions_addclose(&fa, inFD[1]);
     posix_spawn_file_actions_adddup2(&fa, outFD[1], STDOUT_FILENO);
     posix_spawn_file_actions_adddup2(&fa, errFD[1], STDERR_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, inFD[0], STDIN_FILENO);
     posix_spawn_file_actions_addclose(&fa, outFD[1]);
     posix_spawn_file_actions_addclose(&fa, errFD[1]);
+    posix_spawn_file_actions_addclose(&fa, inFD[0]);
 
     NSUInteger argc = fullArgs.count;
     char **argv = calloc(argc + 1, sizeof(char *));
@@ -218,11 +241,20 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
     posix_spawn_file_actions_destroy(&fa);
     close(outFD[1]);
     close(errFD[1]);
+    close(inFD[0]);
     if (rc != 0) {
-        close(outFD[0]); close(errFD[0]);
+        close(outFD[0]); close(errFD[0]); close(inFD[1]);
         completion(-1, [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:3
                                        userInfo:@{NSLocalizedDescriptionKey:
                                            [NSString stringWithFormat:@"spawn rc=%d", rc]}]);
+        return;
+    }
+    if (!IDWriteCredentialsToStdin(inFD[1], email, password, authCode)) {
+        close(outFD[0]); close(errFD[0]);
+        kill(pid, SIGTERM);
+        completion(-1, [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:5
+                                       userInfo:@{NSLocalizedDescriptionKey:
+                                           @"failed to send credentials on helper stdin"}]);
         return;
     }
 
@@ -405,9 +437,8 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
     if (externalVersionID.length) {
         [args addObjectsFromArray:@[@"--external-version-id", externalVersionID]];
     }
-    IDAppendCredentials(args, email, password, authCode);
 
-    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args email:email password:password authCode:authCode onEvent:eventBlock completion:completion];
 }
 
 + (void)listVersionsWithBundleID:(NSString *)bundleID
@@ -424,9 +455,8 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
     if (trackID > 0) {
         [args addObjectsFromArray:@[@"--track-id", [NSString stringWithFormat:@"%ld", (long)trackID]]];
     }
-    IDAppendCredentials(args, email, password, authCode);
 
-    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args email:email password:password authCode:authCode onEvent:eventBlock completion:completion];
 }
 
 + (void)fetchVersionMetadataWithBundleID:(NSString *)bundleID
@@ -447,9 +477,8 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
     if (trackID > 0) {
         [args addObjectsFromArray:@[@"--track-id", [NSString stringWithFormat:@"%ld", (long)trackID]]];
     }
-    IDAppendCredentials(args, email, password, authCode);
 
-    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args email:email password:password authCode:authCode onEvent:eventBlock completion:completion];
 }
 
 + (void)refreshAuthWithEmail:(NSString *)email
@@ -458,9 +487,8 @@ static void IDAppendCredentials(NSMutableArray<NSString *> *args,
                      onEvent:(void (^)(NSDictionary *))eventBlock
                   completion:(void (^)(int, NSError *))completion {
     NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObject:@"--auth-only"];
-    IDAppendCredentials(args, email, password, authCode);
 
-    [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
+    [self spawnAuthWithArguments:args email:email password:password authCode:authCode onEvent:eventBlock completion:completion];
 }
 
 + (void)checkSavedAuthWithCompletion:(void (^)(int, NSError *))completion {

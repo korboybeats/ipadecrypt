@@ -79,9 +79,38 @@ var requiredFiles = []fileSpec{
 // loaded memoizes the verified bundle for the process; consumers clone the
 // image bytes before patching them, so sharing the slices is safe.
 var (
-	loadedMu sync.Mutex
-	loaded   *Bundle
+	loadedMu    sync.Mutex
+	loaded      *Bundle
+	lastStatsMu sync.Mutex
+	lastStats   LoadStats
 )
+
+// LoadStats reports unique bytes fetched from the network versus unique
+// bytes actually read during the most recent Load.
+type LoadStats struct {
+	Fetched int64
+	Needed  int64
+	Cached  bool
+}
+
+// LastLoadStats returns accounting from the most recent Load call.
+func LastLoadStats() LoadStats {
+	lastStatsMu.Lock()
+	defer lastStatsMu.Unlock()
+	return lastStats
+}
+
+func recordLoadStats(fetched, needed int64) {
+	lastStatsMu.Lock()
+	defer lastStatsMu.Unlock()
+	lastStats = LoadStats{Fetched: fetched, Needed: needed, Cached: false}
+}
+
+func recordCacheHitStats() {
+	lastStatsMu.Lock()
+	defer lastStatsMu.Unlock()
+	lastStats = LoadStats{Cached: true}
+}
 
 // Load resolves and caches the pinned macOS framework profile used by SAP,
 // kbsync generation, and package decryption.
@@ -125,6 +154,7 @@ func load(ctx context.Context) (Bundle, error) {
 	})
 
 	if bundle, err := readCache(directory); err == nil {
+		recordCacheHitStats()
 		reportProgress(ctx, Progress{
 			Stage:   "cache-hit",
 			Message: "Using cached Apple machine-identity support files",

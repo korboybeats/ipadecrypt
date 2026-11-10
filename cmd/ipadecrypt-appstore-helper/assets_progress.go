@@ -17,15 +17,18 @@ func ensureAppleAssets(ctx context.Context) error {
 
 	var mu sync.Mutex
 	var lastEmit time.Time
+	var lastStage string
 
 	ctx = assets.WithProgress(ctx, func(p assets.Progress) {
 		mu.Lock()
 		defer mu.Unlock()
 		now := time.Now()
-		if !lastEmit.IsZero() && now.Sub(lastEmit) < 400*time.Millisecond && p.Stage == "downloading-support-files" {
+		stageChanged := p.Stage != lastStage
+		if !stageChanged && !lastEmit.IsZero() && now.Sub(lastEmit) < 250*time.Millisecond {
 			return
 		}
 		lastEmit = now
+		lastStage = p.Stage
 
 		kv := []string{
 			"phase", "asset-progress",
@@ -33,6 +36,7 @@ func ensureAppleAssets(ctx context.Context) error {
 			"message", p.Message,
 			"current", strconv.FormatInt(p.Current, 10),
 			"total", strconv.FormatInt(p.Total, 10),
+			"needed", strconv.FormatInt(p.Needed, 10),
 		}
 		emit(kv...)
 	})
@@ -41,7 +45,12 @@ func ensureAppleAssets(ctx context.Context) error {
 	if _, err := assets.Load(ctx); err != nil {
 		return fmt.Errorf("prepare Apple machine-identity support files: %w", err)
 	}
-	emit("phase", "asset-ready", "cache", mustCacheDir())
+	stats := assets.LastLoadStats()
+	emit("phase", "asset-ready",
+		"cache", mustCacheDir(),
+		"fetched", strconv.FormatInt(stats.Fetched, 10),
+		"needed", strconv.FormatInt(stats.Needed, 10),
+	)
 	return nil
 }
 
@@ -56,7 +65,7 @@ func mustCacheDir() string {
 func runPrefetchAssets() error {
 	emit("phase", "step", "name", "prefetch-assets")
 	if assets.CacheValid() {
-		emit("phase", "asset-ready", "cache", mustCacheDir(), "status", "already-cached")
+		emit("phase", "asset-ready", "cache", mustCacheDir(), "status", "already-cached", "fetched", "0", "needed", "0")
 		return nil
 	}
 	if err := ensureAppleAssets(context.Background()); err != nil {

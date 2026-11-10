@@ -38,7 +38,7 @@ type installedApp struct {
 }
 
 func main() {
-	var bundleID, trackID, email, password, authCode, credentialsFile string
+	var bundleID, trackID, email, password, authCode string
 	var verifyIPA string
 	var listVersions bool
 	var versionMetadata bool
@@ -49,10 +49,6 @@ func main() {
 	var decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA string
 	flag.StringVar(&bundleID, "bundle-id", "", "bundle identifier")
 	flag.StringVar(&trackID, "track-id", "", "App Store track ID")
-	flag.StringVar(&email, "email", "", "Apple ID email")
-	flag.StringVar(&password, "password", "", "DEPRECATED: Apple ID password on argv; use --credentials-file")
-	flag.StringVar(&authCode, "auth-code", "", "DEPRECATED: Apple 2FA code on argv; use --credentials-file")
-	flag.StringVar(&credentialsFile, "credentials-file", "", "path to 0600 JSON {email,password,auth_code}; deleted after read")
 	flag.StringVar(&verifyIPA, "verify-ipa", "", "verify cryptid in IPA and exit")
 	flag.BoolVar(&listVersions, "list-versions", false, "list App Store external version IDs")
 	flag.BoolVar(&versionMetadata, "version-metadata", false, "fetch metadata for one App Store external version ID")
@@ -67,9 +63,11 @@ func main() {
 	flag.Parse()
 
 	var err error
-	email, password, authCode, err = mergeCredentials(email, password, authCode, credentialsFile)
-	if err != nil {
-		fail(1, "credentials", err.Error())
+	if credentialsNeeded(authOnly, prefetchAssets, authStatus, bundleID != "" || trackID != "", verifyIPA != "", decryptHelper != "") {
+		email, password, authCode, err = readCredentialsFromStdin(os.Stdin, os.Stdin)
+		if err != nil {
+			fail(1, "credentials", err.Error())
+		}
 	}
 
 	if prefetchAssets {
