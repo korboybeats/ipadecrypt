@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,30 +38,49 @@ type installedApp struct {
 }
 
 func main() {
-	var bundleID, trackID, email, password, authCode string
+	var bundleID, trackID, email, password, authCode, credentialsFile string
 	var verifyIPA string
 	var listVersions bool
 	var versionMetadata bool
 	var authOnly bool
 	var authStatus bool
+	var prefetchAssets bool
 	var externalVersionID string
 	var decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA string
 	flag.StringVar(&bundleID, "bundle-id", "", "bundle identifier")
 	flag.StringVar(&trackID, "track-id", "", "App Store track ID")
 	flag.StringVar(&email, "email", "", "Apple ID email")
-	flag.StringVar(&password, "password", "", "Apple ID password")
-	flag.StringVar(&authCode, "auth-code", "", "Apple 2FA code")
+	flag.StringVar(&password, "password", "", "DEPRECATED: Apple ID password on argv; use --credentials-file")
+	flag.StringVar(&authCode, "auth-code", "", "DEPRECATED: Apple 2FA code on argv; use --credentials-file")
+	flag.StringVar(&credentialsFile, "credentials-file", "", "path to 0600 JSON {email,password,auth_code}; deleted after read")
 	flag.StringVar(&verifyIPA, "verify-ipa", "", "verify cryptid in IPA and exit")
 	flag.BoolVar(&listVersions, "list-versions", false, "list App Store external version IDs")
 	flag.BoolVar(&versionMetadata, "version-metadata", false, "fetch metadata for one App Store external version ID")
 	flag.BoolVar(&authOnly, "auth-only", false, "refresh App Store authentication and exit")
 	flag.BoolVar(&authStatus, "auth-status", false, "report whether complete saved App Store authentication is available")
+	flag.BoolVar(&prefetchAssets, "prefetch-assets", false, "download and cache Anisette/SAP support files without signing in")
 	flag.StringVar(&externalVersionID, "external-version-id", "", "pin to a specific historical App Store version")
 	flag.StringVar(&decryptHelper, "decrypt-helper", "", "run decrypt helper and relay events")
 	flag.StringVar(&decryptBundleID, "decrypt-bundle-id", "", "bundle identifier for decrypt helper")
 	flag.StringVar(&decryptBundlePath, "decrypt-bundle-path", "", "installed bundle path for decrypt helper")
 	flag.StringVar(&decryptOutIPA, "decrypt-out-ipa", "", "output IPA path for decrypt helper")
 	flag.Parse()
+
+	var err error
+	email, password, authCode, err = mergeCredentials(email, password, authCode, credentialsFile)
+	if err != nil {
+		fail(1, "credentials", err.Error())
+	}
+
+	if prefetchAssets {
+		if err := ensureUnicornJITReady(); err != nil {
+			fail(22, "jit-not-ready", err.Error())
+		}
+		if err := runPrefetchAssets(); err != nil {
+			fail(1, "prefetch-failed", err.Error())
+		}
+		return
+	}
 
 	if decryptHelper != "" {
 		if err := runDecryptHelper(decryptHelper, decryptBundleID, decryptBundlePath, decryptOutIPA); err != nil {
@@ -86,6 +106,9 @@ func main() {
 			} else if errors.Is(err, errAuthRequired) || errors.Is(err, appstore.ErrInvalidCredentials) {
 				code = 20
 				reason = "auth-required"
+			} else if errors.Is(err, errJITNotReady) {
+				code = 22
+				reason = "jit-not-ready"
 			}
 			fail(code, reason, err.Error())
 		}
@@ -109,7 +132,6 @@ func main() {
 		fail(2, "missing-target", "bundle-id or track-id is required")
 	}
 
-	var err error
 	if versionMetadata {
 		err = runVersionMetadata(bundleID, trackID, email, password, authCode, externalVersionID)
 	} else if listVersions {
@@ -126,6 +148,9 @@ func main() {
 		} else if errors.Is(err, errAuthRequired) || errors.Is(err, appstore.ErrInvalidCredentials) {
 			code = 20
 			reason = "auth-required"
+		} else if errors.Is(err, errJITNotReady) {
+			code = 22
+			reason = "jit-not-ready"
 		}
 		fail(code, reason, err.Error())
 	}
@@ -165,6 +190,13 @@ func savedAppleAuthAvailable(cfg *config.Config) bool {
 func runAuthOnly(email, password, authCode string) error {
 	emit("phase", "step", "name", "loading-config")
 	defer chownConfig()
+
+	if err := ensureUnicornJITReady(); err != nil {
+		return err
+	}
+	if err := ensureAppleAssets(context.Background()); err != nil {
+		return err
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -288,6 +320,12 @@ func prepareAppStore(bundleID, trackID, email, password, authCode string) (*conf
 	}
 
 	if email != "" || password != "" || authCode != "" {
+		if err := ensureUnicornJITReady(); err != nil {
+			return nil, nil, appstore.App{}, err
+		}
+		if err := ensureAppleAssets(context.Background()); err != nil {
+			return nil, nil, appstore.App{}, err
+		}
 		err := refreshAppleAuth(cfg, email, password, authCode, func(email, password, authCode string) error {
 			emit("phase", "step", "name", "authenticating")
 			return appstoreworkflow.LoginAndSave(cfg, as, email, password, authCode)

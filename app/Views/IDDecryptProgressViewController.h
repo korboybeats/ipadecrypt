@@ -11,4 +11,7 @@
 
 // Mark complete without an output IPA/share action.
 - (void)markCompleteWithMessage:(NSString *)message error:(NSError *)err;
+
+// Invoked when the user taps Cancel while work is in flight. Cleared on completion.
+@property (nonatomic, copy) void (^cancelHandler)(void);
 @end

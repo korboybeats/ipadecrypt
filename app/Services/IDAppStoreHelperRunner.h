@@ -43,6 +43,9 @@
                      onEvent:(void (^)(NSDictionary *event))eventBlock
                   completion:(void (^)(int exitCode, NSError *err))completion;
 
++ (void)prefetchAssetsOnEvent:(void (^)(NSDictionary *event))eventBlock
+                   completion:(void (^)(int exitCode, NSError *err))completion;
+
 + (void)checkSavedAuthWithCompletion:(void (^)(int exitCode, NSError *err))completion;
 
 + (void)verifyIPA:(NSString *)ipaPath
@@ -52,5 +55,8 @@
 + (NSString *)bundledHelperPath;
 + (BOOL)hasActiveOperation;
 + (IDAppleAuthCheckResult)lastAuthResult;
+
+// Kill the in-flight helper (Cancel in the sign-in / progress sheet).
++ (void)cancelActiveHelper;
 
 @end

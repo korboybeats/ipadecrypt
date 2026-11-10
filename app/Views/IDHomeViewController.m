@@ -25,6 +25,9 @@ static NSString *IDDecryptedOutputDirectory(void) {
 
 static NSString *IDAppStoreStepTitle(NSString *name) {
     if ([name isEqualToString:@"loading-config"]) return @"Preparing App Store session";
+    if ([name isEqualToString:@"preparing-machine-identity"]) return @"Preparing Apple machine identity";
+    if ([name isEqualToString:@"prefetch-assets"]) return @"Downloading Apple support files";
+    if ([name isEqualToString:@"jit-ready"]) return @"Jailbreak JIT ready";
     if ([name isEqualToString:@"authenticating"]) return @"Signing in to Apple ID";
     if ([name isEqualToString:@"lookup-track"] || [name isEqualToString:@"lookup-bundle"]) return @"Checking latest App Store version";
     if ([name isEqualToString:@"prepare-download"]) return @"Authorizing download";
@@ -32,6 +35,7 @@ static NSString *IDAppStoreStepTitle(NSString *name) {
     if ([name isEqualToString:@"install"]) return @"Installing IPA";
     return name.length ? name : @"Working";
 }
+
 
 static BOOL IDShouldShowAppinstLine(NSString *line) {
     if (line.length == 0) return NO;
@@ -62,6 +66,25 @@ static NSString *IDHumanBytes(long long n) {
     if (n >= (1LL << 20)) return [NSString stringWithFormat:@"%.1f MB", v / (double)(1LL << 20)];
     if (n >= (1LL << 10)) return [NSString stringWithFormat:@"%.1f KB", v / (double)(1LL << 10)];
     return [NSString stringWithFormat:@"%lld B", n];
+}
+
+static NSString *IDAssetProgressLine(NSDictionary *ev, long long *lastBytes) {
+    NSString *msg = ev[@"message"] ?: @"Preparing Apple machine identity / downloading support files (first time)";
+    NSString *stage = ev[@"stage"] ?: @"";
+    long long cur = [ev[@"current"] longLongValue];
+    long long total = [ev[@"total"] longLongValue];
+    BOOL downloading = [stage isEqualToString:@"downloading-support-files"];
+    if (downloading && lastBytes && *lastBytes >= 0 && cur < *lastBytes + (8LL << 20)) {
+        return nil;
+    }
+    if (lastBytes) *lastBytes = cur;
+    if (cur > 0 && total > 0) {
+        return [NSString stringWithFormat:@"  %@ — %@ of %@", msg, IDHumanBytes(cur), IDHumanBytes(total)];
+    }
+    if (cur > 0) {
+        return [NSString stringWithFormat:@"  %@ — %@", msg, IDHumanBytes(cur)];
+    }
+    return [NSString stringWithFormat:@"  %@", msg];
 }
 
 static NSString *IDPluralize(NSString *count, NSString *noun) {
@@ -141,6 +164,7 @@ static NSString *IDPrettyImageName(NSString *name) {
     self.refreshControl = rc;
 
     [self reload];
+    [self prefetchAppleAssetsIfNeeded];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -226,6 +250,24 @@ static NSString *IDPrettyImageName(NSString *name) {
 
 - (void)cancelAppleAuthIdlePolling {
     self.authIdlePollToken++;
+}
+
+- (void)prefetchAppleAssetsIfNeeded {
+    [IDAppStoreHelperRunner prefetchAssetsOnEvent:^(NSDictionary *ev) {
+        NSString *phase = ev[@"phase"] ?: @"";
+        if ([phase isEqualToString:@"asset-progress"] || [phase isEqualToString:@"asset-ready"]) {
+            IDLOG(@"asset prefetch: %@", ev);
+        } else if ([phase isEqualToString:@"stderr"]) {
+            NSString *line = ev[@"line"] ?: @"";
+            if (line.length) IDLOG(@"asset prefetch: %@", line);
+        }
+    } completion:^(int code, NSError *err) {
+        if (err) {
+            IDLOG(@"asset prefetch failed: %@", err.localizedDescription);
+        } else {
+            IDLOG(@"asset prefetch finished, code=%d", code);
+        }
+    }];
 }
 
 - (void)refreshAppleAuth {
@@ -694,6 +736,10 @@ static NSString *IDPrettyImageName(NSString *name) {
     __block NSString *failureMessage = nil;
     __block NSString *lastHelperStderr = nil;
     __block NSInteger lastDownloadPercent = -1;
+    __block long long lastAssetBytes = -1;
+    vc.cancelHandler = ^{
+        [IDAppStoreHelperRunner cancelActiveHelper];
+    };
 
     [IDAppStoreHelperRunner runWithBundleID:bundleID
                                     trackID:trackID
@@ -705,6 +751,11 @@ static NSString *IDPrettyImageName(NSString *name) {
         NSString *phase = ev[@"phase"] ?: @"";
         if ([phase isEqualToString:@"step"]) {
             [vc appendStatus:[NSString stringWithFormat:@"  %@", IDAppStoreStepTitle(ev[@"name"])]];
+        } else if ([phase isEqualToString:@"asset-progress"]) {
+            NSString *line = IDAssetProgressLine(ev, &lastAssetBytes);
+            if (line.length) [vc appendStatus:line];
+        } else if ([phase isEqualToString:@"asset-ready"]) {
+            [vc appendStatus:@"  Apple machine-identity support files ready"];
         } else if ([phase isEqualToString:@"auth-required"]) {
             [vc appendStatus:@"  Apple ID sign-in required"];
         } else if ([phase isEqualToString:@"auth"]) {
@@ -925,6 +976,10 @@ static NSString *IDPrettyImageName(NSString *name) {
     __block NSString *failureReason = nil;
     __block NSString *failureMessage = nil;
     __block NSString *lastHelperStderr = nil;
+    __block long long lastAssetBytes = -1;
+    vc.cancelHandler = ^{
+        [IDAppStoreHelperRunner cancelActiveHelper];
+    };
     [IDAppStoreHelperRunner refreshAuthWithEmail:email
                                         password:password
                                         authCode:authCode
@@ -932,6 +987,11 @@ static NSString *IDPrettyImageName(NSString *name) {
         NSString *phase = ev[@"phase"] ?: @"";
         if ([phase isEqualToString:@"step"]) {
             [vc appendStatus:[NSString stringWithFormat:@"  %@", IDAppStoreStepTitle(ev[@"name"])]];
+        } else if ([phase isEqualToString:@"asset-progress"]) {
+            NSString *line = IDAssetProgressLine(ev, &lastAssetBytes);
+            if (line.length) [vc appendStatus:line];
+        } else if ([phase isEqualToString:@"asset-ready"]) {
+            [vc appendStatus:@"  Apple machine-identity support files ready"];
         } else if ([phase isEqualToString:@"auth-required"]) {
             [vc appendStatus:@"  Apple ID sign-in required"];
         } else if ([phase isEqualToString:@"failed"]) {

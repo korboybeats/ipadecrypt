@@ -11,6 +11,7 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 @property (nonatomic, strong) UIBarButtonItem *shareItem;
 @property (nonatomic, strong) UIBarButtonItem *logsItem;
 @property (nonatomic, strong) NSMutableArray<NSString *> *pendingStatusLines;
+@property (nonatomic) BOOL finished;
 @end
 
 @implementation IDDecryptProgressViewController
@@ -46,6 +47,40 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
     [self.spinner startAnimating];
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithCustomView:self.spinner];
+    self.navigationItem.leftBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+                                                      target:self
+                                                      action:@selector(cancelTapped)];
+}
+
+
+- (void)finishChromeWithError:(NSError *)err {
+    self.finished = YES;
+    self.cancelHandler = nil;
+    self.navigationItem.leftBarButtonItem = nil;
+    if (err) {
+        NSString *msg = err.localizedDescription ?: @"";
+        BOOL cancelled = [msg.lowercaseString containsString:@"cancelled"] ||
+                         [msg.lowercaseString containsString:@"canceled"];
+        if (!cancelled) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Error"
+                                 message:msg
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    }
+}
+
+- (void)cancelTapped {
+    if (self.finished) return;
+    [self appendStatus:@"  Cancelling…"];
+    void (^handler)(void) = self.cancelHandler;
+    self.cancelHandler = nil;
+    if (handler) handler();
 }
 
 - (void)appendStatus:(NSString *)line {
@@ -65,6 +100,7 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 
 - (void)markCompleteWithOutputIPA:(NSString *)outIPA error:(NSError *)err {
     [self.spinner stopAnimating];
+    [self finishChromeWithError:err];
     self.outIPA = outIPA;
     UIImage *copyImage = [UIImage systemImageNamed:@"doc.on.doc"];
     self.logsItem = [[UIBarButtonItem alloc] initWithImage:copyImage
@@ -94,6 +130,7 @@ static NSString *const IDOpenFilzaAfterDecryptKey = @"OpenFilzaAfterDecrypt";
 
 - (void)markCompleteWithMessage:(NSString *)message error:(NSError *)err {
     [self.spinner stopAnimating];
+    [self finishChromeWithError:err];
     UIImage *copyImage = [UIImage systemImageNamed:@"doc.on.doc"];
     self.logsItem = [[UIBarButtonItem alloc] initWithImage:copyImage
                                                      style:UIBarButtonItemStylePlain

@@ -1,5 +1,7 @@
 #import "IDAppStoreHelperRunner.h"
 #import "Logging.h"
+#import <fcntl.h>
+#import <signal.h>
 #import <spawn.h>
 #import <sys/wait.h>
 #import <unistd.h>
@@ -15,6 +17,14 @@ static NSInteger IDActiveAppStoreHelperCount = 0;
 static BOOL IDAuthHelperRunning = NO;
 static NSMutableArray *IDPendingAuthOperations = nil;
 static IDAppleAuthCheckResult IDLastAuthResult = IDAppleAuthCheckResultNone;
+static pid_t IDActiveHelperPID = 0;
+static BOOL IDActiveHelperCanceled = NO;
+static NSTimeInterval IDLastHelperEventAt = 0;
+
+// First-time SAP extract can take many minutes on a phone; treat silence, not
+// duration, as a hang. 30 minutes is a hard cap against a wedged helper.
+static const NSTimeInterval IDHelperStallSeconds = 120;
+static const NSTimeInterval IDHelperTimeoutSeconds = 30 * 60;
 
 static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     if (![line hasPrefix:@"@evt "]) return nil;
@@ -40,6 +50,46 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
         if (key && value) out[key] = value;
     }
     return out;
+}
+
+static NSString *IDWriteCredentialsFile(NSString *email, NSString *password, NSString *authCode) {
+    if (email.length == 0 && password.length == 0 && authCode.length == 0) return nil;
+
+    NSMutableDictionary *obj = [NSMutableDictionary dictionary];
+    if (email.length) obj[@"email"] = email;
+    if (password.length) obj[@"password"] = password;
+    if (authCode.length) obj[@"auth_code"] = authCode;
+    NSError *jsonErr = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:obj options:0 error:&jsonErr];
+    if (!data) return nil;
+
+    NSString *path = [NSString stringWithFormat:@"/var/tmp/ipadecrypt-creds-%d-%@",
+                      getpid(), [NSUUID UUID].UUIDString];
+    int fd = open(path.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) return nil;
+    ssize_t wrote = write(fd, data.bytes, data.length);
+    int closeRC = close(fd);
+    if (wrote != (ssize_t)data.length || closeRC != 0) {
+        unlink(path.fileSystemRepresentation);
+        return nil;
+    }
+    return path;
+}
+
+static void IDAppendCredentials(NSMutableArray<NSString *> *args,
+                                NSString *email,
+                                NSString *password,
+                                NSString *authCode) {
+    NSString *path = IDWriteCredentialsFile(email, password, authCode);
+    if (path.length) {
+        [args addObjectsFromArray:@[@"--credentials-file", path]];
+        return;
+    }
+    // Email alone is not a secret; never fall back to putting a password or
+    // 2FA code on argv if the temp file could not be created.
+    if (email.length) {
+        [args addObjectsFromArray:@[@"--email", email]];
+    }
 }
 
 @implementation IDAppStoreHelperRunner
@@ -176,16 +226,61 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
         return;
     }
 
+    @synchronized (self) {
+        IDActiveHelperPID = pid;
+        IDActiveHelperCanceled = NO;
+        IDLastHelperEventAt = [NSDate date].timeIntervalSince1970;
+    }
+
     int outRead = outFD[0];
     int errRead = errFD[0];
     dispatch_queue_t q = dispatch_queue_create("ipadecrypt.appstore-helper", DISPATCH_QUEUE_CONCURRENT);
     NSMutableArray<NSString *> *stderrLines = [NSMutableArray array];
     dispatch_group_t g = dispatch_group_create();
+    NSDate *startedAt = [NSDate date];
+    __block NSInteger stallReason = 0; // 1=cancel, 2=stall, 3=timeout
+
+    void (^noteEvent)(void) = ^{
+        @synchronized (self) {
+            IDLastHelperEventAt = [NSDate date].timeIntervalSince1970;
+        }
+    };
+
+    dispatch_source_t watchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(watchdog, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), 2 * NSEC_PER_SEC, 200 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(watchdog, ^{
+        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+        NSTimeInterval last = 0;
+        pid_t live = 0;
+        BOOL canceled = NO;
+        @synchronized (self) {
+            last = IDLastHelperEventAt;
+            live = IDActiveHelperPID;
+            canceled = IDActiveHelperCanceled;
+        }
+        if (live != pid) return;
+        NSInteger reason = 0;
+        if (canceled) {
+            reason = 1;
+        } else if (now - [startedAt timeIntervalSince1970] > IDHelperTimeoutSeconds) {
+            reason = 3;
+        } else if (last > 0 && now - last > IDHelperStallSeconds) {
+            reason = 2;
+        }
+        if (reason == 0) return;
+        stallReason = reason;
+        kill(pid, SIGTERM);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), q, ^{
+            if (kill(pid, 0) == 0) kill(pid, SIGKILL);
+        });
+    });
+    dispatch_resume(watchdog);
 
     dispatch_group_async(g, q, ^{
         FILE *outStream = fdopen(outRead, "r");
         char *buf = NULL; size_t cap = 0; ssize_t n;
         while ((n = getline(&buf, &cap, outStream)) > 0) {
+            noteEvent();
             NSString *line = [[NSString alloc] initWithBytes:buf length:(NSUInteger)n - 1
                                                     encoding:NSUTF8StringEncoding];
             NSDictionary *ev = IDParseAppStoreEvent(line);
@@ -203,6 +298,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
         FILE *errStream = fdopen(errRead, "r");
         char *buf = NULL; size_t cap = 0; ssize_t n;
         while ((n = getline(&buf, &cap, errStream)) > 0) {
+            noteEvent();
             NSString *line = [[NSString alloc] initWithBytes:buf length:(NSUInteger)n - 1
                                                     encoding:NSUTF8StringEncoding];
             IDLOG(@"appstore-helper-stderr: %@", line);
@@ -221,18 +317,52 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     });
 
     dispatch_group_notify(g, q, ^{
+        dispatch_source_cancel(watchdog);
         int status = 0;
         waitpid(pid, &status, 0);
-        int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        @synchronized (self) {
+            if (IDActiveHelperPID == pid) {
+                IDActiveHelperPID = 0;
+                IDActiveHelperCanceled = NO;
+            }
+        }
+        int exitCode = -1;
         NSError *err = nil;
-        if (exitCode != 0) {
+        if (WIFEXITED(status)) {
+            exitCode = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            exitCode = 128 + WTERMSIG(status);
+        }
+        if (stallReason != 0) {
+            NSString *msg = @"appstore helper stopped unexpectedly";
+            NSInteger code = exitCode != 0 ? exitCode : -1;
+            if (stallReason == 1) {
+                msg = @"Apple ID sign-in cancelled";
+                code = 1;
+            } else if (stallReason == 2) {
+                msg = @"Sign-in stalled while preparing Apple machine identity. Check your network and try again.";
+                code = 23;
+            } else if (stallReason == 3) {
+                msg = @"Sign-in timed out while preparing Apple machine identity. Try again on a stable network.";
+                code = 24;
+            }
+            err = [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:code
+                                  userInfo:@{NSLocalizedDescriptionKey: msg}];
+            exitCode = (int)code;
+        } else if (exitCode != 0) {
             NSString *detail = nil;
             @synchronized (stderrLines) {
                 detail = [stderrLines componentsJoinedByString:@"\n"];
             }
-            NSString *msg = detail.length
-                ? [NSString stringWithFormat:@"appstore helper exit %d\n%@", exitCode, detail]
-                : [NSString stringWithFormat:@"appstore helper exit %d", exitCode];
+            NSString *msg;
+            if (WIFSIGNALED(status)) {
+                msg = [NSString stringWithFormat:@"appstore helper crashed (signal %d)", WTERMSIG(status)];
+                if (detail.length) msg = [msg stringByAppendingFormat:@"\n%@", detail];
+            } else {
+                msg = detail.length
+                    ? [NSString stringWithFormat:@"appstore helper exit %d\n%@", exitCode, detail]
+                    : [NSString stringWithFormat:@"appstore helper exit %d", exitCode];
+            }
             err = [NSError errorWithDomain:@"IDAppStoreHelperRunner" code:exitCode
                                   userInfo:@{NSLocalizedDescriptionKey: msg}];
         }
@@ -275,15 +405,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     if (externalVersionID.length) {
         [args addObjectsFromArray:@[@"--external-version-id", externalVersionID]];
     }
-    if (email.length) {
-        [args addObjectsFromArray:@[@"--email", email]];
-    }
-    if (password.length) {
-        [args addObjectsFromArray:@[@"--password", password]];
-    }
-    if (authCode.length) {
-        [args addObjectsFromArray:@[@"--auth-code", authCode]];
-    }
+    IDAppendCredentials(args, email, password, authCode);
 
     [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
 }
@@ -302,15 +424,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     if (trackID > 0) {
         [args addObjectsFromArray:@[@"--track-id", [NSString stringWithFormat:@"%ld", (long)trackID]]];
     }
-    if (email.length) {
-        [args addObjectsFromArray:@[@"--email", email]];
-    }
-    if (password.length) {
-        [args addObjectsFromArray:@[@"--password", password]];
-    }
-    if (authCode.length) {
-        [args addObjectsFromArray:@[@"--auth-code", authCode]];
-    }
+    IDAppendCredentials(args, email, password, authCode);
 
     [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
 }
@@ -333,15 +447,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     if (trackID > 0) {
         [args addObjectsFromArray:@[@"--track-id", [NSString stringWithFormat:@"%ld", (long)trackID]]];
     }
-    if (email.length) {
-        [args addObjectsFromArray:@[@"--email", email]];
-    }
-    if (password.length) {
-        [args addObjectsFromArray:@[@"--password", password]];
-    }
-    if (authCode.length) {
-        [args addObjectsFromArray:@[@"--auth-code", authCode]];
-    }
+    IDAppendCredentials(args, email, password, authCode);
 
     [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
 }
@@ -352,15 +458,7 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
                      onEvent:(void (^)(NSDictionary *))eventBlock
                   completion:(void (^)(int, NSError *))completion {
     NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObject:@"--auth-only"];
-    if (email.length) {
-        [args addObjectsFromArray:@[@"--email", email]];
-    }
-    if (password.length) {
-        [args addObjectsFromArray:@[@"--password", password]];
-    }
-    if (authCode.length) {
-        [args addObjectsFromArray:@[@"--auth-code", authCode]];
-    }
+    IDAppendCredentials(args, email, password, authCode);
 
     [self spawnAuthWithArguments:args onEvent:eventBlock completion:completion];
 }
@@ -375,6 +473,25 @@ static NSDictionary *IDParseAppStoreEvent(NSString *line) {
     [self spawnWithArguments:@[@"--verify-ipa", ipaPath ?: @""]
                      onEvent:eventBlock
                   completion:completion];
+}
+
++ (void)prefetchAssetsOnEvent:(void (^)(NSDictionary *))eventBlock
+                   completion:(void (^)(int, NSError *))completion {
+    [self enqueueAuthOperation:^{
+        [self spawnWithArguments:@[@"--prefetch-assets"] onEvent:eventBlock completion:^(int code, NSError *err) {
+            if (completion) completion(code, err);
+            [self finishAuthOperation];
+        }];
+    }];
+}
+
++ (void)cancelActiveHelper {
+    @synchronized (self) {
+        IDActiveHelperCanceled = YES;
+        if (IDActiveHelperPID > 0) {
+            kill(IDActiveHelperPID, SIGTERM);
+        }
+    }
 }
 
 @end

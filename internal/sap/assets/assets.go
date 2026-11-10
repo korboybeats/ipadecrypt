@@ -18,6 +18,8 @@ const (
 	macOSBuild          = "26A434"
 	macOSRestoreURL     = "https://updates.cdn-apple.com/2026FallFCS/59241290-5d51-4ca8-9df4-31624b9a4eac/UniversalMac_27.0.1_26A434_Restore.ipsw"
 	assetCacheDirectory = "apple-assets-macos-27-26A434-arm64-v4"
+	cacheCompleteName   = ".complete"
+	workspacePrefix     = "ipadecrypt-macos-27-"
 )
 
 type Bundle struct {
@@ -110,25 +112,66 @@ func Load(ctx context.Context) (Bundle, error) {
 }
 
 func load(ctx context.Context) (Bundle, error) {
+	cleanupStaleWorkspaces()
+
 	directory, err := cacheDirectory()
 	if err != nil {
 		return Bundle{}, err
 	}
 
+	reportProgress(ctx, Progress{
+		Stage:   "checking-cache",
+		Message: "Checking cached Apple machine-identity support files",
+	})
+
 	if bundle, err := readCache(directory); err == nil {
+		reportProgress(ctx, Progress{
+			Stage:   "cache-hit",
+			Message: "Using cached Apple machine-identity support files",
+		})
 		return bundle, nil
 	}
+
+	reportProgress(ctx, Progress{
+		Stage:   "downloading-support-files",
+		Message: "Preparing Apple machine identity / downloading support files (first time)",
+	})
 
 	bundle, err := resolveRemoteImage(ctx)
 	if err != nil {
 		return Bundle{}, err
 	}
 
+	reportProgress(ctx, Progress{
+		Stage:   "caching",
+		Message: "Installing Apple support files into local cache",
+	})
+
 	if err := writeCache(directory, bundle); err != nil {
 		return Bundle{}, fmt.Errorf("cache Apple SAP assets: %w", err)
 	}
 
+	reportProgress(ctx, Progress{
+		Stage:   "cache-ready",
+		Message: "Apple machine-identity support files ready",
+	})
+
 	return bundle, nil
+}
+
+// CacheDirectory returns the on-disk cache path for the pinned macOS profile.
+func CacheDirectory() (string, error) {
+	return cacheDirectory()
+}
+
+// CacheValid reports whether a complete, digest-checked cache is present.
+func CacheValid() bool {
+	directory, err := cacheDirectory()
+	if err != nil {
+		return false
+	}
+	_, err = readCache(directory)
+	return err == nil
 }
 
 func cacheDirectory() (string, error) {
@@ -141,6 +184,10 @@ func cacheDirectory() (string, error) {
 }
 
 func readCache(directory string) (Bundle, error) {
+	if _, err := os.Stat(filepath.Join(directory, cacheCompleteName)); err != nil {
+		return Bundle{}, fmt.Errorf("incomplete Apple SAP asset cache: %w", err)
+	}
+
 	files := make(map[string][]byte, len(requiredFiles))
 
 	for _, spec := range requiredFiles {
@@ -152,12 +199,11 @@ func readCache(directory string) (Bundle, error) {
 		files[spec.name] = data
 	}
 
-	bundle := bundleFrom(files)
-	if err := validate(bundle); err != nil {
+	if err := validateFiles(files); err != nil {
 		return Bundle{}, err
 	}
 
-	return bundle, nil
+	return bundleFrom(files), nil
 }
 
 func readCacheFile(path string, expectedSize int) ([]byte, error) {
@@ -197,22 +243,79 @@ func readCacheFile(path string, expectedSize int) ([]byte, error) {
 }
 
 func writeCache(directory string, bundle Bundle) error {
-	if err := validate(bundle); err != nil {
+	return writeCacheFiles(directory, bundleFiles(bundle))
+}
+
+func writeCacheFiles(directory string, files map[string][]byte) error {
+	if err := validateFiles(files); err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create SAP asset cache: %w", err)
+	parent := filepath.Dir(directory)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create SAP asset cache parent: %w", err)
 	}
 
-	files := bundleFiles(bundle)
+	staging, err := os.MkdirTemp(parent, ".sap-staging-*")
+	if err != nil {
+		return fmt.Errorf("create SAP asset staging directory: %w", err)
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+
+	if err := os.Chmod(staging, 0o700); err != nil {
+		return fmt.Errorf("set SAP asset staging permissions: %w", err)
+	}
+
 	for _, spec := range requiredFiles {
-		if err := replaceFile(filepath.Join(directory, spec.name), files[spec.name]); err != nil {
-			return fmt.Errorf("write cached SAP asset %s: %w", spec.name, err)
+		if err := replaceFile(filepath.Join(staging, spec.name), files[spec.name]); err != nil {
+			return fmt.Errorf("write staged SAP asset %s: %w", spec.name, err)
 		}
 	}
 
+	completePath := filepath.Join(staging, cacheCompleteName)
+	if err := os.WriteFile(completePath, []byte(assetCacheDirectory+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write SAP asset cache marker: %w", err)
+	}
+
+	// Replace the live cache directory atomically from the caller's point of
+	// view: remove any incomplete prior cache, then rename staging into place.
+	_ = os.RemoveAll(directory)
+	if err := os.Rename(staging, directory); err != nil {
+		return fmt.Errorf("install SAP asset cache: %w", err)
+	}
+	committed = true
 	return nil
+}
+
+func cleanupStaleWorkspaces() {
+	roots := []string{os.TempDir(), "/var/tmp", "/tmp"}
+	seen := map[string]struct{}{}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if !entry.IsDir() || len(name) < len(workspacePrefix) || name[:len(workspacePrefix)] != workspacePrefix {
+				continue
+			}
+			_ = os.RemoveAll(filepath.Join(root, name))
+		}
+	}
 }
 
 func replaceFile(path string, data []byte) error {
@@ -256,7 +359,10 @@ func replaceFile(path string, data []byte) error {
 }
 
 func validate(bundle Bundle) error {
-	files := bundleFiles(bundle)
+	return validateFiles(bundleFiles(bundle))
+}
+
+func validateFiles(files map[string][]byte) error {
 	for _, spec := range requiredFiles {
 		data := files[spec.name]
 		if len(data) != spec.size {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -31,11 +32,26 @@ var frameworkImagePaths = []string{
 }
 
 func resolveRemoteImage(ctx context.Context) (Bundle, error) {
-	client := &http.Client{}
-	remote, err := openRemoteFile(ctx, client)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			MaxIdleConns:          4,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+		},
+	}
+	remote, err := openRemoteFileWithProgress(ctx, client, progressFrom(ctx))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("resolve macOS %s (%s) frameworks: %w", macOSVersion, macOSBuild, err)
 	}
+
+	reportProgress(ctx, Progress{
+		Stage:   "reading-restore-index",
+		Message: "Reading Apple restore image index",
+	})
 
 	archive, err := zip.NewReader(remote, remote.size)
 	if err != nil {
@@ -52,21 +68,36 @@ func resolveRemoteImage(ctx context.Context) (Bundle, error) {
 		return Bundle{}, err
 	}
 
-	workspace, err := os.MkdirTemp("", "ipadecrypt-macos-27-*")
+	workspace, err := os.MkdirTemp("", workspacePrefix+"*")
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create macOS image workspace: %w", err)
 	}
 	defer os.RemoveAll(workspace)
 
 	frameworkDirectory := filepath.Join(workspace, "frameworks")
+	reportProgress(ctx, Progress{
+		Stage:   "extracting-frameworks",
+		Message: "Extracting FairPlay / ADI frameworks",
+		Current: remote.FetchedBytes(),
+	})
 	if err := extractFrameworkFiles(ctx, client, remote, fileSystemEntry, frameworkDirectory); err != nil {
 		return Bundle{}, err
 	}
 
 	appleMediaServicesPath := filepath.Join(frameworkDirectory, "AppleMediaServices")
+	reportProgress(ctx, Progress{
+		Stage:   "extracting-ams",
+		Message: "Extracting AppleMediaServices",
+		Current: remote.FetchedBytes(),
+	})
 	if err := extractAppleMediaServices(ctx, client, remote, systemOSEntry, appleMediaServicesPath); err != nil {
 		return Bundle{}, fmt.Errorf("extract AppleMediaServices from macOS %s (%s): %w", macOSVersion, macOSBuild, err)
 	}
+	reportProgress(ctx, Progress{
+		Stage:   "extracting-fairplay",
+		Message: "Extracting FairPlayIOKit",
+		Current: remote.FetchedBytes(),
+	})
 	if err := extractFairPlayKext(archive, filepath.Join(frameworkDirectory, "FairPlayIOKit")); err != nil {
 		return Bundle{}, err
 	}
