@@ -2,4 +2,12 @@ version: "2"
 linters:
   disable:
     - errcheck
-    - wsl_v5
+  exclusions:
+    # internal/apphttp, internal/store, internal/sap and internal/storeauth are
+    # a vendored copy of ipatool's App Store engine (see README "Prior art");
+    # they are maintained upstream, not linted to this project's rules.
+    paths:
+      - internal/apphttp/
+      - internal/store/
+      - internal/sap/
+      - internal/storeauth/

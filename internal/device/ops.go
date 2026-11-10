@@ -277,12 +277,16 @@ func (c *Client) EnsureHelper(jailbreak string) (string, error) {
 	sum := sha256.Sum256(helperArm64)
 	remote := helperRemotePath(jailbreak, hex.EncodeToString(sum[:])[:12])
 
-	if c.Exists(remote) {
-		return remote, nil
+	if !c.Exists(remote) {
+		if err := c.Upload(bytes.NewReader(helperArm64), remote, 0o755); err != nil {
+			return "", fmt.Errorf("upload helper: %w", err)
+		}
 	}
 
-	if err := c.Upload(bytes.NewReader(helperArm64), remote, 0o755); err != nil {
-		return "", fmt.Errorf("upload helper: %w", err)
+	// Freya's amfid kills the ad-hoc helper before main unless its
+	// entitlements are preserved the Freya way (see freya.go).
+	if err := c.prepareFreyaHelper(remote); err != nil {
+		return "", err
 	}
 
 	return remote, nil

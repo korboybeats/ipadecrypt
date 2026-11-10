@@ -12,7 +12,7 @@ func TestInterpretLoginReturnsTypedInvalidCredentials(t *testing.T) {
 	res := testHTTPResponse(http.StatusOK, "")
 	out := &loginResult{FailureType: failureInvalidCredentials, CustomerMessage: "Incorrect Apple ID or password"}
 
-	_, retry, err := interpretLogin(res, out, 2, "")
+	retry, err := interpretLogin(res, out, 2, "")
 	if retry {
 		t.Fatal("invalid credentials should not retry after the first attempt")
 	}
@@ -25,15 +25,31 @@ func TestInterpretLoginRetriesFirstInvalidCredentialsOnSameEndpoint(t *testing.T
 	res := testHTTPResponse(http.StatusOK, "")
 	out := &loginResult{FailureType: failureInvalidCredentials}
 
-	next, retry, err := interpretLogin(res, out, 1, "")
+	retry, err := interpretLogin(res, out, 1, "")
 	if err != nil {
 		t.Fatalf("interpretLogin: %v", err)
 	}
 	if !retry {
 		t.Fatal("first invalid-credentials response should retry")
 	}
-	if next != "" {
-		t.Fatalf("next = %q, want empty (retry on the same endpoint)", next)
+}
+
+func TestInterpretLoginIgnoresDialogWhenTokenPresent(t *testing.T) {
+	res := testHTTPResponse(http.StatusOK, "")
+	out := &loginResult{
+		PasswordToken: "tok",
+		Dialog: loginDialog{
+			Message:     "Welcome",
+			Explanation: "informational",
+		},
+	}
+
+	retry, err := interpretLogin(res, out, 1, "")
+	if err != nil {
+		t.Fatalf("interpretLogin: %v", err)
+	}
+	if retry {
+		t.Fatal("token+dialog should succeed without retry")
 	}
 }
 

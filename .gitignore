@@ -5,6 +5,10 @@
 !.github/
 !.github/ISSUE_TEMPLATE/
 !.github/ISSUE_TEMPLATE/bug_report.md
+*.exe
+.idea
+.fleet
+.vscode
 .claude
 dist/
 .grepai/
@@ -19,6 +23,7 @@ dist/
 helper/ipadecryptautoalert/packages/
 helper/ipadecryptautoalert/obj/
 .DS_Store
+ipatool-sessions/
 
 # Vendored reference clones (untracked research sources)
 fairplay-decrypt/

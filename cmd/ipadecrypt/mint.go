@@ -55,7 +55,7 @@ func mintHandler(cmd *cobra.Command, args []string) {
 	live := tui.NewLive()
 	live.Spin("minting credential (one-time)")
 
-	credential, err := credmint.Mint(context.Background(), dev)
+	credential, err := credmint.Mint(context.Background(), dev, dsid)
 	if err != nil {
 		if errors.Is(err, credmint.ErrBinariesUnavailable) {
 			live.Fail("this build cannot mint credentials")

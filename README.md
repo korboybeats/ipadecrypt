@@ -33,6 +33,13 @@ This fork adds a handful of QoL features on top of upstream:
 - **Optional offline decryption (from upstream).** `ipadecrypt mint` extracts a reusable per-account FairPlay credential over root SSH once; after that `ipadecrypt decrypt --offline <target>` downloads and decrypts on the computer with no device in the loop. The device-based flow above stays the default.
 - **Short command flags.** `-d` (decrypt), `-b` (bootstrap), `-v` (versions), `-dl` (download), `-a`/`auth` (refresh Apple ID auth), `-k` (keep policy), `-u` (update).
 
+The offline decryptor handles **arm64** slices (everything the modern App Store
+ships). A few old builds still ship a **32-bit (armv7) slice** - those can't be
+decrypted offline, so ipadecrypt automatically falls back to decrypting them
+**on your jailbroken device** when one is configured (the same device used for
+minting). Pass `--no-on-device` to disable the fallback, or `--on-device` to go
+straight to the device.
+
 ## Requirements
 
 ### On your computer
@@ -40,12 +47,18 @@ This fork adds a handful of QoL features on top of upstream:
 
 ### On the jailbroken iPhone
 All installable through Sileo:
-
 | Package | Purpose |
 |---|---|
 | **OpenSSH** | SSH server - ipadecrypt drives the device over SSH |
 | **AppSync Unified** | Bypasses installd's signature check (add repo `https://lukezgd.github.io/repo`) |
 | **appinst** | Installs modified IPAs on the device (add repo `https://lukezgd.github.io/repo`) |
+- Nothing special for everyday (arm64) decrypting. A jailbroken iPhone reachable
+  over the network (or over USB with `iproxy`) is needed for the one-time mint,
+  and again only for the on-device fallback on old 32-bit apps.
+| Requirement | Purpose |
+| **OpenSSH with root access** | The mint and the on-device fallback connect over root SSH (install OpenSSH from Sileo) |
+| **≥1 owned App Store app installed** | Bought with the same Apple ID; used to trigger FairPlay once during the mint |
+| **AppSync Unified + `appinst`** | Only for the on-device fallback: installs the app on the device so it can be decrypted |
 
 > Tested on palera1n rootless, Dopamine rootless, and RootHide. iOS 14 through 17 on A10–A14 devices are expected to work.
 
@@ -137,69 +150,52 @@ A five-step interactive wizard:
 3. **Prerequisites** - verifies AppSync and `appinst` are installed.
 4. **Helper install** - uploads helper binary and verifies whether it runs.
 5. **Auto-confirm tweak** - optionally installs `ipadecryptautoalert`, a SpringBoard tweak that auto-taps the older-version `Download` prompt during **Latest iOS-compatible** installs.
-
 Pass `--skip-login` to skip step 1 when you only need the device steps (for
 example decrypting already-installed apps). The first App Store sign-in also
 downloads and caches the Apple frameworks the App Store engine emulates
 (tens of MB) under your user cache directory (`ipadecrypt/sap`); later runs
 reuse the cache.
-
 ### Offline decryption (optional)
-
 ```sh
 ipadecrypt mint                  # one-time, per Apple account
 ipadecrypt decrypt --offline <bundle-id|app-store-id|app-store-url|search-term>
 ```
-
 `mint` connects to the configured device as `root` over SSH (it prompts for
 the root password if the saved SSH user is not root; that password is not
 saved), extracts the account's 16-byte FairPlay credential, and caches it in
 `~/ipadecrypt/credentials/<dsid>.bin`. It skips minting when a credential is
 already cached; pass `--remint` to force. The device needs at least one App
 Store app owned by the same Apple ID installed.
-
 `--offline` downloads the encrypted IPA and decrypts it on the computer with
 that credential. Output goes to `~/ipadecrypt/decrypted/` by default.
-
 ### Refresh Apple ID auth
-
-```sh
 ipadecrypt auth
-```
-
 Refreshes the saved App Store session without running the full bootstrap flow.
 Use this when App Store actions fail with an auth-code or expired-token error.
-
 ### Choose where decrypted IPAs are kept
-
-```sh
 ipadecrypt keep
-```
-
 Opens an interactive picker for future CLI decrypt runs. For scripts, pass the
 policy directly:
-
-```sh
 ipadecrypt keep desktop
 ipadecrypt keep device
 ipadecrypt keep both
-```
-
 `desktop` copies the final IPA to `~/ipadecrypt/decrypted/` and removes the
 device copy after a successful transfer. `device` keeps only the device copy.
 `both` keeps both copies and is the default.
-
 ### Update the CLI
-
-```sh
 ipadecrypt update
-```
-
 Downloads the latest matching CLI binary from GitHub Releases, verifies it
 against `checksums.txt`, backs up the current binary, and replaces it.
-
 Use `ipadecrypt update --check` to check without installing, or
 `ipadecrypt update --rollback` to restore the previous binary backup.
+A three-step interactive wizard:
+1. **App Store sign-in** - Logs into the App Store. Credentials stay local in `~/.ipadecrypt/config.json`. The first sign-in downloads and caches the Apple frameworks the App Store engine emulates (~tens of MB, range-extracted from a pinned macOS image) under `~/.cache/ipadecrypt/`; later runs reuse the cache.
+2. **Credential mint** - Connects once to your jailbroken device over root SSH and extracts the reusable account credential, cached under `~/.ipadecrypt/credentials/`.
+3. **On-device fallback check** - Verifies the device is ready to decrypt old apps that still ship a 32-bit slice (AppSync Unified + `appinst` present, helper uploads and execs). Best-effort: a missing prerequisite only disables that fallback and is reported, not fatal.
+Run it again anytime; it skips minting if a credential is already cached (pass
+`--remint` to force). After bootstrap, decrypting modern (arm64) apps is fully
+offline - the device is only needed again for the on-device fallback on old
+32-bit apps.
 
 ### Decrypt an app
 
@@ -217,25 +213,25 @@ build picker can also open the App Store version table so you can choose a
 specific historical version to install and decrypt.
 
 ### Download an encrypted IPA
-
 ```sh
 ipadecrypt download <bundle-id|app-store-id|app-store-url>
 ```
-
 Downloaded encrypted IPAs are saved to `~/ipadecrypt/<bundleID>_<version>.ipa`
 by default. Use `-o/--output` to choose a file or directory,
 `--external-version-id` to download a specific historical release, or
 `--select-version` to select and download multiple App Store versions.
-
 ### Diagnose setup
-
-```sh
 ipadecrypt doctor
-```
-
 Checks local config, SSH/sudo, jailbreak tooling, helper execution, output
 folders, output retention policy, auto-confirm state, and the installed
 jailbreak app/daemon.
+This decrypts offline. If the app ships a 32-bit slice the offline path can't
+handle and a jailbroken device is configured, ipadecrypt automatically falls
+back to decrypting it on the device. Useful flags:
+- `--on-device` - skip the offline attempt and decrypt on the device directly.
+- `--no-on-device` - never touch the device; fail if offline can't fully decrypt.
+- `--patch-device-type` - expand `UIDeviceFamily` so an app built for a different device type still installs during the on-device fallback.
+- `--no-uninstall` / `--force-uninstall` - control whether the app is removed from the device after an on-device decrypt (default: removed only if this run installed it).
 
 ### List versions of an app
 
@@ -248,6 +244,9 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 - [New, unsupported SC_Info format is shipped with some apps, ipadecrypt will fail to decrypt them.](https://github.com/londek/ipadecrypt/issues/34)
 - Due to arm64e PPL guards on A12+, some apps such as Apple's are not expected to work.
 - `--offline` only decrypts the supported SINF/SUPF license formats, and the credential is per Apple account: you must sign in with (and have minted from) the account that owns the app.
+- Only the supported SINF/SUPF license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.
+- The credential is per Apple account: decrypting an app requires signing in with (and having minted from) the account that owns it.
+- Old builds that still ship a 32-bit (armv7) slice can't be decrypted offline (the offline decryptor is arm64-only) - they need the on-device fallback, so a jailbroken device must be configured.
 
 ## License
 
