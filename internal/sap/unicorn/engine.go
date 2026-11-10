@@ -442,6 +442,7 @@ func (e *Engine) Close() error {
 
 	runtime.SetFinalizer(e, nil)
 	e.active.Wait()
+	allowJITWrite()
 	e.clearCodeHooks()
 
 	e.stateMu.Lock()

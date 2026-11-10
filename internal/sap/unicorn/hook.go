@@ -124,6 +124,7 @@ func (h *Hook) Close() error {
 	}
 
 	engine := h.engine
+	allowJITWrite()
 	handle, done, err := engine.beginOperation()
 
 	if err == nil {

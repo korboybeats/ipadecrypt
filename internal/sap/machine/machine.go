@@ -726,12 +726,15 @@ func (m *Machine) Close() error {
 
 	var errs []error
 
-	if m.services != nil {
-		errs = append(errs, m.services.close())
-	}
-
+	// Close the engine first so uc_close releases hooks. Calling uc_hook_del
+	// against still-RX iOS TCG pages SIGBUS; Engine.Close switches those
+	// pages writable, and Hook.Close then skips hookDel once the engine is gone.
 	if m.engine != nil {
 		errs = append(errs, m.engine.Close())
+	}
+
+	if m.services != nil {
+		errs = append(errs, m.services.close())
 	}
 
 	return errors.Join(errs...)
